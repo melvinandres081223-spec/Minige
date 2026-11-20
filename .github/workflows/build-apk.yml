@@ -17,10 +17,16 @@ jobs:
           cache: gradle
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
-      - name: Ensure debug keystore exists
+        with:
+          gradle-version: 9.3.1
+      - name: Ensure debug keystore and google-services.json exist
         run: |
           mkdir -p ~/.android
           [ -f ~/.android/debug.keystore ] || keytool -genkeypair -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          cp ~/.android/debug.keystore debug.keystore
+          if [ ! -f app/google-services.json ]; then
+            echo '{"project_info":{"project_number":"000000000000","project_id":"mock-project"},"client":[{"client_info":{"mobilesdk_app_id":"1:000000000000:android:0000000000000000","android_client_info":{"package_name":"com.melvin.minige"}},"oauth_client":[{"client_id":"000000000000-mock.apps.googleusercontent.com","client_type":3}],"api_key":[{"current_key":"AIzaSyDummyKeyForGitHubActionsBuild123"}]}]}' > app/google-services.json
+          fi
       - name: Build Debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
       - name: Upload app-debug.apk Artifact
@@ -28,4 +34,3 @@ jobs:
         with:
           name: app-debug
           path: app/build/outputs/apk/debug/app-debug.apk
-          
