@@ -1,0 +1,171 @@
+{
+  "entities": {
+    "Delivery": {
+      "title": "Delivery",
+      "description": "A water delivery or pick-up entry for a customer on a specific date.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID" },
+        "dateKey": { "type": "string", "description": "Delivery date in yyyy-MM-dd format" },
+        "customerName": { "type": "string", "description": "Customer display name" },
+        "purifiedGallons": { "type": "integer", "description": "Number of Purified gallons" },
+        "alkalineGallons": { "type": "integer", "description": "Number of Alkaline gallons" },
+        "purifiedUnitPrice": { "type": "integer", "description": "Unit price snapshot for Purified in PHP" },
+        "alkalineUnitPrice": { "type": "integer", "description": "Unit price snapshot for Alkaline in PHP" },
+        "totalAmount": { "type": "integer", "description": "Total PHP bill for the delivery" },
+        "amountPaid": { "type": "integer", "description": "Total PHP collected so far" },
+        "paymentType": {
+          "type": "string",
+          "enum": ["CASH", "BANK_DEPOSIT", "PAUTANG", "PICK_UP"],
+          "description": "Payment or pick-up mode"
+        },
+        "commissionRate": { "type": "integer", "description": "Commission rate snapshot per gallon in PHP" },
+        "commissionEarned": { "type": "integer", "description": "Commission earned in PHP (0 until fully paid, always 0 for PICK_UP)" },
+        "settledDateKey": { "type": "string", "description": "Optional yyyy-MM-dd date when full commission was earned" },
+        "notes": { "type": "string", "description": "Optional delivery notes" },
+        "calendarEventId": { "type": "string", "description": "Optional Google Calendar event ID" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server creation timestamp" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server update timestamp" }
+      },
+      "required": [
+        "userId",
+        "dateKey",
+        "customerName",
+        "purifiedGallons",
+        "alkalineGallons",
+        "purifiedUnitPrice",
+        "alkalineUnitPrice",
+        "totalAmount",
+        "amountPaid",
+        "paymentType",
+        "commissionRate",
+        "commissionEarned",
+        "notes",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UtangPayment": {
+      "title": "UtangPayment",
+      "description": "A partial or full payment collected toward a Pautang delivery.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID" },
+        "deliveryId": { "type": "string", "description": "Parent delivery document ID" },
+        "dateKey": { "type": "string", "description": "Collection date in yyyy-MM-dd format" },
+        "amount": { "type": "integer", "description": "Amount collected in PHP" },
+        "method": {
+          "type": "string",
+          "enum": ["CASH", "BANK_DEPOSIT"],
+          "description": "Collection method"
+        },
+        "notes": { "type": "string", "description": "Optional payment notes" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server creation timestamp" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server update timestamp" }
+      },
+      "required": [
+        "userId",
+        "deliveryId",
+        "dateKey",
+        "amount",
+        "method",
+        "notes",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Expense": {
+      "title": "Expense",
+      "description": "A daily route expense entry.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID" },
+        "dateKey": { "type": "string", "description": "Expense date in yyyy-MM-dd format" },
+        "category": {
+          "type": "string",
+          "enum": ["FOOD", "GAS", "VULCANIZING", "MOTOR_REPAIR"],
+          "description": "Route expense category"
+        },
+        "amount": { "type": "integer", "description": "Expense amount in PHP" },
+        "notes": { "type": "string", "description": "Optional expense notes" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server creation timestamp" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server update timestamp" }
+      },
+      "required": [
+        "userId",
+        "dateKey",
+        "category",
+        "amount",
+        "notes",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "DailyLedger": {
+      "title": "DailyLedger",
+      "description": "Daily starting sukli (retained change) and remittance notes.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID" },
+        "dateKey": { "type": "string", "description": "Ledger date in yyyy-MM-dd format" },
+        "startingSukli": { "type": "integer", "description": "Starting retained change in PHP" },
+        "notes": { "type": "string", "description": "Optional ledger notes" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server creation timestamp" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server update timestamp" }
+      },
+      "required": [
+        "userId",
+        "dateKey",
+        "startingSukli",
+        "notes",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserSettings": {
+      "title": "UserSettings",
+      "description": "Editable pricing and commission rate settings for Minige.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID" },
+        "purifiedPrice": { "type": "integer", "description": "Unit price per Purified gallon in PHP" },
+        "alkalinePrice": { "type": "integer", "description": "Unit price per Alkaline gallon in PHP" },
+        "commissionRate": { "type": "integer", "description": "Default commission per paid gallon in PHP" },
+        "defaultSukli": { "type": "integer", "description": "Default starting sukli in PHP" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server creation timestamp" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server update timestamp" }
+      },
+      "required": [
+        "userId",
+        "purifiedPrice",
+        "alkalinePrice",
+        "commissionRate",
+        "defaultSukli",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/deliveries/{deliveryId}": {
+      "schema": { "$ref": "#/entities/Delivery" },
+      "description": "User-owned water delivery and pick-up records."
+    },
+    "/users/{userId}/utangPayments/{paymentId}": {
+      "schema": { "$ref": "#/entities/UtangPayment" },
+      "description": "User-owned credit (Pautang) installment payments."
+    },
+    "/users/{userId}/expenses/{expenseId}": {
+      "schema": { "$ref": "#/entities/Expense" },
+      "description": "User-owned daily route expenses."
+    },
+    "/users/{userId}/dailyLedgers/{ledgerId}": {
+      "schema": { "$ref": "#/entities/DailyLedger" },
+      "description": "User-owned daily sukli and remittance notes keyed by yyyy-MM-dd."
+    },
+    "/users/{userId}/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/UserSettings" },
+      "description": "User-owned unit prices and commission settings."
+    }
+  }
+}

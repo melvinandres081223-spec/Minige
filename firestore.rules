@@ -1,0 +1,252 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global safety net: default deny everything
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidDateKey(val) {
+      return val is string && val.size() == 10 && val.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidDelivery(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             isValidDateKey(data.dateKey) &&
+             data.customerName is string && data.customerName.size() >= 1 && data.customerName.size() <= 80 &&
+             data.purifiedGallons is int && data.purifiedGallons >= 0 && data.purifiedGallons <= 10000 &&
+             data.alkalineGallons is int && data.alkalineGallons >= 0 && data.alkalineGallons <= 10000 &&
+             (data.purifiedGallons + data.alkalineGallons) >= 1 &&
+             data.purifiedUnitPrice is int && data.purifiedUnitPrice >= 0 && data.purifiedUnitPrice <= 10000 &&
+             data.alkalineUnitPrice is int && data.alkalineUnitPrice >= 0 && data.alkalineUnitPrice <= 10000 &&
+             data.totalAmount is int && data.totalAmount >= 0 && data.totalAmount <= 10000000 &&
+             data.amountPaid is int && data.amountPaid >= 0 && data.amountPaid <= 10000000 &&
+             data.paymentType in ['CASH', 'BANK_DEPOSIT', 'PAUTANG', 'PICK_UP'] &&
+             data.commissionRate is int && data.commissionRate >= 0 && data.commissionRate <= 1000 &&
+             data.commissionEarned is int && data.commissionEarned >= 0 && data.commissionEarned <= 10000000 &&
+             (!('settledDateKey' in data) || data.settledDateKey == null || isValidDateKey(data.settledDateKey)) &&
+             data.notes is string && data.notes.size() <= 300 &&
+             (!('calendarEventId' in data) || data.calendarEventId == null || (data.calendarEventId is string && data.calendarEventId.size() <= 200));
+    }
+
+    function isValidUtangPayment(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             isValidId(data.deliveryId) &&
+             isValidDateKey(data.dateKey) &&
+             data.amount is int && data.amount >= 1 && data.amount <= 10000000 &&
+             data.method in ['CASH', 'BANK_DEPOSIT'] &&
+             data.notes is string && data.notes.size() <= 300;
+    }
+
+    function isValidExpense(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             isValidDateKey(data.dateKey) &&
+             data.category in ['FOOD', 'GAS', 'VULCANIZING', 'MOTOR_REPAIR'] &&
+             data.amount is int && data.amount >= 1 && data.amount <= 10000000 &&
+             data.notes is string && data.notes.size() <= 300;
+    }
+
+    function isValidDailyLedger(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             isValidDateKey(data.dateKey) &&
+             data.startingSukli is int && data.startingSukli >= 0 && data.startingSukli <= 1000000 &&
+             data.notes is string && data.notes.size() <= 300;
+    }
+
+    function isValidUserSettings(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.purifiedPrice is int && data.purifiedPrice >= 0 && data.purifiedPrice <= 10000 &&
+             data.alkalinePrice is int && data.alkalinePrice >= 0 && data.alkalinePrice <= 10000 &&
+             data.commissionRate is int && data.commissionRate >= 0 && data.commissionRate <= 1000 &&
+             data.defaultSukli is int && data.defaultSukli >= 0 && data.defaultSukli <= 1000000;
+    }
+
+    match /users/{userId}/deliveries/{deliveryId} {
+      allow get: if isOwner(userId) && isValidId(deliveryId);
+      allow list: if isOwner(userId);
+
+      allow create: if isOwner(userId) &&
+                       isValidId(deliveryId) &&
+                       incoming().userId == userId &&
+                       incoming().keys().hasAll([
+                         'userId', 'dateKey', 'customerName', 'purifiedGallons', 'alkalineGallons',
+                         'purifiedUnitPrice', 'alkalineUnitPrice', 'totalAmount', 'amountPaid',
+                         'paymentType', 'commissionRate', 'commissionEarned', 'notes',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'dateKey', 'customerName', 'purifiedGallons', 'alkalineGallons',
+                         'purifiedUnitPrice', 'alkalineUnitPrice', 'totalAmount', 'amountPaid',
+                         'paymentType', 'commissionRate', 'commissionEarned', 'settledDateKey',
+                         'notes', 'calendarEventId', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                       isValidDelivery(incoming());
+
+      allow update: if isOwner(userId) &&
+                       isValidId(deliveryId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                       isValidDelivery(incoming()) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'dateKey', 'customerName', 'purifiedGallons', 'alkalineGallons',
+                         'purifiedUnitPrice', 'alkalineUnitPrice', 'totalAmount', 'amountPaid',
+                         'paymentType', 'commissionRate', 'commissionEarned', 'settledDateKey',
+                         'notes', 'calendarEventId', 'updatedAt'
+                       ]);
+
+      allow delete: if isOwner(userId) && isValidId(deliveryId);
+    }
+
+    match /users/{userId}/utangPayments/{paymentId} {
+      allow get: if isOwner(userId) && isValidId(paymentId);
+      allow list: if isOwner(userId);
+
+      allow create: if isOwner(userId) &&
+                       isValidId(paymentId) &&
+                       incoming().userId == userId &&
+                       incoming().keys().hasAll([
+                         'userId', 'deliveryId', 'dateKey', 'amount', 'method', 'notes',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'deliveryId', 'dateKey', 'amount', 'method', 'notes',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                       isValidUtangPayment(incoming());
+
+      allow update: if isOwner(userId) &&
+                       isValidId(paymentId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().deliveryId == existing().deliveryId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                       isValidUtangPayment(incoming()) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'dateKey', 'amount', 'method', 'notes', 'updatedAt'
+                       ]);
+
+      allow delete: if isOwner(userId) && isValidId(paymentId);
+    }
+
+    match /users/{userId}/expenses/{expenseId} {
+      allow get: if isOwner(userId) && isValidId(expenseId);
+      allow list: if isOwner(userId);
+
+      allow create: if isOwner(userId) &&
+                       isValidId(expenseId) &&
+                       incoming().userId == userId &&
+                       incoming().keys().hasAll([
+                         'userId', 'dateKey', 'category', 'amount', 'notes', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'dateKey', 'category', 'amount', 'notes', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                       isValidExpense(incoming());
+
+      allow update: if isOwner(userId) &&
+                       isValidId(expenseId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                       isValidExpense(incoming()) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'dateKey', 'category', 'amount', 'notes', 'updatedAt'
+                       ]);
+
+      allow delete: if isOwner(userId) && isValidId(expenseId);
+    }
+
+    match /users/{userId}/dailyLedgers/{ledgerId} {
+      allow get: if isOwner(userId) && isValidId(ledgerId);
+      allow list: if isOwner(userId);
+
+      allow create: if isOwner(userId) &&
+                       isValidId(ledgerId) &&
+                       incoming().userId == userId &&
+                       incoming().dateKey == ledgerId &&
+                       incoming().keys().hasAll([
+                         'userId', 'dateKey', 'startingSukli', 'notes', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'dateKey', 'startingSukli', 'notes', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                       isValidDailyLedger(incoming());
+
+      allow update: if isOwner(userId) &&
+                       isValidId(ledgerId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().dateKey == existing().dateKey &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                       isValidDailyLedger(incoming()) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'startingSukli', 'notes', 'updatedAt'
+                       ]);
+
+      allow delete: if isOwner(userId) && isValidId(ledgerId);
+    }
+
+    match /users/{userId}/settings/{settingId} {
+      allow get: if isOwner(userId) && isValidId(settingId);
+      allow list: if isOwner(userId);
+
+      allow create: if isOwner(userId) &&
+                       isValidId(settingId) &&
+                       incoming().userId == userId &&
+                       incoming().keys().hasAll([
+                         'userId', 'purifiedPrice', 'alkalinePrice', 'commissionRate',
+                         'defaultSukli', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'purifiedPrice', 'alkalinePrice', 'commissionRate',
+                         'defaultSukli', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                       isValidUserSettings(incoming());
+
+      allow update: if isOwner(userId) &&
+                       isValidId(settingId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                       isValidUserSettings(incoming()) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'purifiedPrice', 'alkalinePrice', 'commissionRate', 'defaultSukli', 'updatedAt'
+                       ]);
+
+      allow delete: if isOwner(userId) && isValidId(settingId);
+    }
+  }
+}

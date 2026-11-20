@@ -1,71 +1,87 @@
 package com.melvin.minige
 
-import android.Manifest
-import android.content.pm.PackageManager
+import android.app.Activity
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.CalendarMonth
-import androidx.compose.material.icons.rounded.CheckCircle
-import androidx.compose.material.icons.rounded.CloudSync
-import androidx.compose.material.icons.rounded.Mic
-import androidx.compose.material.icons.rounded.Storage
-import androidx.compose.material3.Button
-import androidx.compose.material3.CardDefaults
+import androidx.compose.material.icons.automirrored.rounded.ReceiptLong
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.CreditScore
+import androidx.compose.material.icons.rounded.DateRange
+import androidx.compose.material.icons.rounded.LocalShipping
+import androidx.compose.material.icons.rounded.ReceiptLong
+import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Today
 import androidx.compose.material3.CenterAlignedTopAppBar
-import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedCard
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import androidx.core.content.ContextCompat
+import androidx.credentials.CredentialManager
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.google.firebase.Firebase
+import com.google.firebase.auth.auth
+import com.melvin.minige.auth.authStateFlow
+import com.melvin.minige.auth.signOutFromGoogleAndFirebase
+import com.melvin.minige.calendar.GoogleCalendarSyncHelper
+import com.melvin.minige.ui.MinigeEvent
+import com.melvin.minige.ui.MinigeViewModel
+import com.melvin.minige.ui.screens.AddDeliverySheet
+import com.melvin.minige.ui.screens.AddExpenseSheet
+import com.melvin.minige.ui.screens.AuthScreen
+import com.melvin.minige.ui.screens.EditSukliDialog
+import com.melvin.minige.ui.screens.PautangScreen
+import com.melvin.minige.ui.screens.SettingsScreen
+import com.melvin.minige.ui.screens.TodayDashboardScreen
+import com.melvin.minige.ui.screens.WeeklyReportScreen
 import com.melvin.minige.ui.theme.MinigeTheme
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -73,60 +89,102 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             MinigeTheme {
-                MinigeHomeScreen()
+                MinigeRootApp()
             }
         }
     }
 }
 
-private data class MinigeCapability(
+private enum class MinigeTab(
+    val label: String,
     val icon: ImageVector,
-    val titleRes: Int,
-    val descriptionRes: Int,
-)
+) {
+    TODAY("Today", Icons.Rounded.Today),
+    PAUTANG("Pautang", Icons.Rounded.CreditScore),
+    WEEKLY("Weekly", Icons.Rounded.DateRange),
+    SETTINGS("Settings", Icons.Rounded.Settings),
+}
+
+@Composable
+fun MinigeRootApp() {
+    val auth = Firebase.auth
+    val currentUser by auth.authStateFlow().collectAsStateWithLifecycle(initialValue = auth.currentUser)
+    val user = currentUser
+
+    if (user == null) {
+        AuthScreen(onAuthSuccess = {})
+    } else {
+        key(user.uid) {
+            MinigeMainShell(
+                currentUserId = user.uid,
+                userEmail = user.email,
+            )
+        }
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MinigeHomeScreen(modifier: Modifier = Modifier) {
+fun MinigeMainShell(
+    currentUserId: String,
+    userEmail: String?,
+) {
     val context = LocalContext.current
-    var hasMicPermission by remember {
-        mutableStateOf(
-            ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.RECORD_AUDIO,
-            ) == PackageManager.PERMISSION_GRANTED
-        )
+    val scope = rememberCoroutineScope()
+    val credentialManager = remember(context) { CredentialManager.create(context) }
+
+    val viewModel: MinigeViewModel = viewModel(
+        key = currentUserId,
+        factory = MinigeViewModel.factory(currentUserId),
+    )
+
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    var selectedTab by rememberSaveable { mutableStateOf(MinigeTab.TODAY) }
+    var showAddMenu by remember { mutableStateOf(false) }
+    var showAddDeliverySheet by remember { mutableStateOf(false) }
+    var showAddExpenseSheet by remember { mutableStateOf(false) }
+    var showEditSukliDialog by remember { mutableStateOf(false) }
+
+    val calendarConsentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult(),
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val token = GoogleCalendarSyncHelper.extractTokenFromIntent(context, result.data)
+            if (!token.isNullOrBlank()) {
+                viewModel.syncDayWithCalendarToken(token)
+            } else {
+                scope.launch { snackbarHostState.showSnackbar("Calendar authorization completed without token.") }
+            }
+        }
     }
 
-    val micPermissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        hasMicPermission = granted
+    LaunchedEffect(viewModel) {
+        viewModel.events.collect { event ->
+            when (event) {
+                is MinigeEvent.ShowMessage -> snackbarHostState.showSnackbar(event.message)
+                is MinigeEvent.LaunchCalendarConsent -> {
+                    calendarConsentLauncher.launch(
+                        IntentSenderRequest.Builder(event.intentSender).build()
+                    )
+                }
+            }
+        }
     }
 
-    val capabilities = remember {
-        listOf(
-            MinigeCapability(
-                icon = Icons.Rounded.Storage,
-                titleRes = R.string.minige_cap_room_title,
-                descriptionRes = R.string.minige_cap_room_desc,
-            ),
-            MinigeCapability(
-                icon = Icons.Rounded.CloudSync,
-                titleRes = R.string.minige_cap_cloud_title,
-                descriptionRes = R.string.minige_cap_cloud_desc,
-            ),
-            MinigeCapability(
-                icon = Icons.Rounded.CalendarMonth,
-                titleRes = R.string.minige_cap_calendar_title,
-                descriptionRes = R.string.minige_cap_calendar_desc,
-            ),
-        )
+    LaunchedEffect(uiState.statusMessage) {
+        val msg = uiState.statusMessage
+        if (msg != null) {
+            snackbarHostState.showSnackbar(msg)
+            viewModel.clearStatusMessage()
+        }
     }
 
     Scaffold(
-        modifier = modifier.fillMaxSize(),
+        modifier = Modifier.fillMaxSize(),
         contentWindowInsets = WindowInsets.safeDrawing,
+        snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
         topBar = {
             CenterAlignedTopAppBar(
                 title = {
@@ -154,230 +212,121 @@ fun MinigeHomeScreen(modifier: Modifier = Modifier) {
                 ),
             )
         },
+        bottomBar = {
+            NavigationBar(windowInsets = WindowInsets.navigationBars) {
+                MinigeTab.entries.forEach { tab ->
+                    NavigationBarItem(
+                        selected = selectedTab == tab,
+                        onClick = { selectedTab = tab },
+                        icon = { Icon(tab.icon, contentDescription = tab.label) },
+                        label = { Text(tab.label) },
+                        modifier = Modifier.testTag("nav_tab_${tab.name.lowercase()}"),
+                    )
+                }
+            }
+        },
+        floatingActionButton = {
+            if (selectedTab == MinigeTab.TODAY) {
+                Box {
+                    FloatingActionButton(
+                        onClick = { showAddMenu = true },
+                        modifier = Modifier.testTag("fab_add_entry"),
+                    ) {
+                        Icon(Icons.Rounded.Add, contentDescription = "Add delivery or expense")
+                    }
+                    DropdownMenu(
+                        expanded = showAddMenu,
+                        onDismissRequest = { showAddMenu = false },
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Log Delivery / Pick-up") },
+                            leadingIcon = { Icon(Icons.Rounded.LocalShipping, contentDescription = null) },
+                            onClick = {
+                                showAddMenu = false
+                                showAddDeliverySheet = true
+                            },
+                            modifier = Modifier.testTag("menu_add_delivery"),
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Log Route Expense") },
+                            leadingIcon = { Icon(Icons.AutoMirrored.Rounded.ReceiptLong, contentDescription = null) },
+                            onClick = {
+                                showAddMenu = false
+                                showAddExpenseSheet = true
+                            },
+                            modifier = Modifier.testTag("menu_add_expense"),
+                        )
+                    }
+                }
+            }
+        },
     ) { innerPadding ->
-        Box(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding),
-            contentAlignment = Alignment.TopCenter,
         ) {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .widthIn(max = 600.dp),
-                contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
-            ) {
-                item {
-                    HeroWelcomeBanner()
-                }
-
-                item {
-                    VoicePermissionCard(
-                        hasMicPermission = hasMicPermission,
-                        onRequestPermission = {
-                            micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                        },
-                    )
-                }
-
-                item {
-                    Text(
-                        text = stringResource(R.string.minige_section_stack),
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 8.dp),
-                    )
-                }
-
-                items(capabilities) { item ->
-                    CapabilityRowCard(item = item)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun HeroWelcomeBanner() {
-    val gradient = Brush.linearGradient(
-        colors = listOf(
-            MaterialTheme.colorScheme.primaryContainer,
-            MaterialTheme.colorScheme.secondaryContainer,
-        ),
-    )
-
-    Surface(
-        shape = RoundedCornerShape(24.dp),
-        tonalElevation = 2.dp,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(
-            modifier = Modifier
-                .background(gradient)
-                .padding(24.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Surface(
-                shape = CircleShape,
-                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
-            ) {
-                Text(
-                    text = stringResource(R.string.minige_tagline),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+            when (selectedTab) {
+                MinigeTab.TODAY -> TodayDashboardScreen(
+                    uiState = uiState,
+                    onShiftDate = viewModel::shiftDate,
+                    onJumpToday = viewModel::jumpToToday,
+                    onEditSukliClick = { showEditSukliDialog = true },
+                    onDeleteDelivery = viewModel::deleteDelivery,
+                    onDeleteExpense = viewModel::deleteExpense,
+                    onSyncCalendarClick = { viewModel.triggerCalendarSync(context) },
+                    onBossSendTriggered = { msg ->
+                        scope.launch { snackbarHostState.showSnackbar(msg) }
+                    },
                 )
-            }
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = stringResource(R.string.minige_hero_title),
-                style = MaterialTheme.typography.headlineMedium,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-            )
-            Text(
-                text = stringResource(R.string.minige_hero_subtitle),
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.86f),
-            )
-        }
-    }
-}
-
-@Composable
-private fun VoicePermissionCard(
-    hasMicPermission: Boolean,
-    onRequestPermission: () -> Unit,
-) {
-    ElevatedCard(
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.elevatedCardColors(
-            containerColor = MaterialTheme.colorScheme.surface,
-        ),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            Surface(
-                shape = CircleShape,
-                color = if (hasMicPermission) {
-                    MaterialTheme.colorScheme.primaryContainer
-                } else {
-                    MaterialTheme.colorScheme.surfaceVariant
-                },
-                modifier = Modifier.size(44.dp),
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(
-                        imageVector = if (hasMicPermission) {
-                            Icons.Rounded.CheckCircle
-                        } else {
-                            Icons.Rounded.Mic
-                        },
-                        contentDescription = stringResource(R.string.minige_mic_title),
-                        tint = MaterialTheme.colorScheme.primary,
-                    )
-                }
-            }
-
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                Text(
-                    text = stringResource(R.string.minige_mic_title),
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
+                MinigeTab.PAUTANG -> PautangScreen(
+                    uiState = uiState,
+                    onRecordPayment = viewModel::recordUtangPayment,
                 )
-                Text(
-                    text = stringResource(
-                        if (hasMicPermission) R.string.minige_mic_granted else R.string.minige_mic_needed
-                    ),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                MinigeTab.WEEKLY -> WeeklyReportScreen(
+                    uiState = uiState,
+                    onSelectDate = { date ->
+                        viewModel.selectDate(date)
+                        selectedTab = MinigeTab.TODAY
+                    },
+                    onSyncCalendarClick = { viewModel.triggerCalendarSync(context) },
                 )
-            }
-
-            if (hasMicPermission) {
-                Surface(
-                    shape = CircleShape,
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                ) {
-                    Text(
-                        text = stringResource(R.string.minige_mic_ready_badge),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                    )
-                }
-            } else {
-                Button(
-                    onClick = onRequestPermission,
-                    modifier = Modifier.testTag("grant_mic_button"),
-                ) {
-                    Text(
-                        text = stringResource(R.string.minige_mic_grant_cta),
-                        style = MaterialTheme.typography.labelLarge,
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun CapabilityRowCard(item: MinigeCapability) {
-    OutlinedCard(
-        shape = RoundedCornerShape(18.dp),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Surface(
-                shape = RoundedCornerShape(12.dp),
-                color = MaterialTheme.colorScheme.secondaryContainer,
-                modifier = Modifier.size(42.dp),
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(
-                        imageVector = item.icon,
-                        contentDescription = stringResource(item.titleRes),
-                        tint = MaterialTheme.colorScheme.onSecondaryContainer,
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.width(14.dp))
-
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(
-                    text = stringResource(item.titleRes),
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-                Text(
-                    text = stringResource(item.descriptionRes),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                MinigeTab.SETTINGS -> SettingsScreen(
+                    uiState = uiState,
+                    userEmail = userEmail,
+                    onSaveSettings = viewModel::updateSettings,
+                    onSyncNow = viewModel::syncNow,
+                    onSignOut = {
+                        signOutFromGoogleAndFirebase(
+                            credentialManager = credentialManager,
+                            scope = scope,
+                        )
+                    },
                 )
             }
         }
     }
-}
 
-@Preview(showBackground = true)
-@Composable
-fun MinigeHomePreview() {
-    MinigeTheme {
-        MinigeHomeScreen()
+    if (showAddDeliverySheet) {
+        AddDeliverySheet(
+            settings = uiState.settings,
+            onDismiss = { showAddDeliverySheet = false },
+            onSave = viewModel::addDelivery,
+        )
+    }
+
+    if (showAddExpenseSheet) {
+        AddExpenseSheet(
+            onDismiss = { showAddExpenseSheet = false },
+            onSave = viewModel::addExpense,
+        )
+    }
+
+    if (showEditSukliDialog) {
+        EditSukliDialog(
+            currentSukli = uiState.dailySummary.startingSukli,
+            onDismiss = { showEditSukliDialog = false },
+            onSave = viewModel::updateStartingSukli,
+        )
     }
 }
