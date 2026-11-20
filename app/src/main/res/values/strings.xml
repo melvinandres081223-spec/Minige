@@ -1,0 +1,19 @@
+<resources>
+    <string name="app_name">Minige</string>
+    <string name="minige_tagline">Voice, schedule &amp; memory workspace</string>
+    <string name="minige_hero_title">Ready for your day</string>
+    <string name="minige_hero_subtitle">Minige connects your local Room vault, Firestore sync, Google Sign-In, and Google Calendar in one calm workspace.</string>
+    <string name="minige_section_stack">Core Capabilities</string>
+    <string name="minige_mic_title">Voice Input</string>
+    <string name="minige_mic_granted">Microphone permission granted</string>
+    <string name="minige_mic_needed">Grant microphone access to enable voice capture</string>
+    <string name="minige_mic_grant_cta">Allow Mic</string>
+    <string name="minige_mic_ready_badge">Ready</string>
+    <string name="minige_cap_room_title">Room Local Vault</string>
+    <string name="minige_cap_room_desc">Offline-first SQLite persistence with KSP compilation</string>
+    <string name="minige_cap_cloud_title">Firestore &amp; Google Sign-In</string>
+    <string name="minige_cap_cloud_desc">Credential Manager authentication and cloud sync</string>
+    <string name="minige_cap_calendar_title">Google Calendar API</string>
+    <string name="minige_cap_calendar_desc">Calendar v3 integration for events and agenda</string>
+    <string name="minige_cd_brand_emblem">Minige emblem</string>
+</resources>

@@ -1,0 +1,6 @@
+{
+  "name": "Minige",
+  "description": "Minige — Smart personal assistant and schedule companion built with Jetpack Compose, Material 3, Room, Firebase, and Google Calendar.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
