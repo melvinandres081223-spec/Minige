@@ -20,7 +20,7 @@ jobs:
       - name: Ensure debug keystore exists
         run: |
           mkdir -p ~/.android
-          [ -f ~/.android/debug.keystore ] || keytool -genkeypair -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -valid 10000 -dname "CN=Android Debug,O=Android,C=US"
+          [ -f ~/.android/debug.keystore ] || keytool -genkeypair -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
       - name: Build Debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
       - name: Upload app-debug.apk Artifact
