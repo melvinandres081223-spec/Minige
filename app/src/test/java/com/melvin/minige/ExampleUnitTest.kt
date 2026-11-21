@@ -10,6 +10,8 @@ import com.melvin.minige.domain.MinigeCustomerUtils
 import com.melvin.minige.domain.PaymentType
 import com.melvin.minige.domain.UtangMethod
 import com.melvin.minige.domain.UtangPaymentRecord
+import com.melvin.minige.sync.GitHubAppUpdater
+import com.melvin.minige.sync.GitHubReleaseInfo
 import com.melvin.minige.ui.components.DailyClosingHelper
 import com.melvin.minige.ui.components.DailyQuotaPrefs
 import com.melvin.minige.ui.components.DeliveryFilterChip
@@ -689,5 +691,43 @@ class ExampleUnitTest {
         assertTrue(firstIndex === secondIndex)
         assertEquals("Aling Rosa", firstIndex.byNormalizedId["aling_rosa"]?.name)
         assertEquals(1, CustomerDirectoryHelper.filterSuggestions(firstIndex.profiles, "centro").size)
+    }
+
+    @Test
+    fun `github app updater compares versioned release tags and avoids false already up to date`() {
+        val release = GitHubReleaseInfo(
+            tagName = "v1.0.42",
+            publishedAt = "2026-11-21T10:00:00Z",
+            apkDownloadUrl = "https://github.com/melvinandres081223-spec/Minige/releases/download/v1.0.42/app-debug.apk",
+            apkFileName = "app-debug.apk",
+        )
+
+        // Newer remote CI build MUST report update available even if publishedAt was previously cached
+        assertTrue(
+            GitHubAppUpdater.isRemoteReleaseNewer(
+                release = release,
+                installedVersionCode = 41,
+                installedVersionName = "1.0.41",
+                lastSavedPublishedAt = "2026-11-21T10:00:00Z",
+            )
+        )
+        // Legacy initial version "1.0" must also update to v1.0.42
+        assertTrue(
+            GitHubAppUpdater.isRemoteReleaseNewer(
+                release = release,
+                installedVersionCode = 1,
+                installedVersionName = "1.0",
+                lastSavedPublishedAt = "",
+            )
+        )
+        // Same installed CI version reports already up to date
+        assertFalse(
+            GitHubAppUpdater.isRemoteReleaseNewer(
+                release = release,
+                installedVersionCode = 42,
+                installedVersionName = "1.0.42",
+                lastSavedPublishedAt = "",
+            )
+        )
     }
 }

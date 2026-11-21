@@ -94,6 +94,26 @@ class ExampleRobolectricTest {
 
         val missingTimestampJson = """{ "tag_name": "latest", "assets": [] }"""
         assertNull(GitHubAppUpdater.parseLatestReleaseJson(missingTimestampJson))
+
+        val ciVersionedJson = """
+            {
+              "tag_name": "v1.0.42",
+              "published_at": "2026-11-21T10:00:00Z",
+              "assets": [
+                {
+                  "name": "app-debug.apk",
+                  "browser_download_url": "https://github.com/melvinandres081223-spec/Minige/releases/download/v1.0.42/app-debug.apk"
+                }
+              ]
+            }
+        """.trimIndent()
+        val ciParsed = GitHubAppUpdater.parseLatestReleaseJson(ciVersionedJson)
+        assertEquals("v1.0.42", ciParsed?.tagName)
+        assertEquals("app-debug.apk", ciParsed?.apkFileName)
+        assertEquals(
+            "https://github.com/melvinandres081223-spec/Minige/releases/download/v1.0.42/app-debug.apk",
+            ciParsed?.apkDownloadUrl,
+        )
     }
 
     @Test

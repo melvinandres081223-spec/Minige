@@ -95,6 +95,48 @@ object GitHubAppUpdater {
         )
     }
 
+    internal data class SemanticVersion(
+        val major: Int,
+        val minor: Int,
+        val patch: Int,
+    ) : Comparable<SemanticVersion> {
+        override fun compareTo(other: SemanticVersion): Int {
+            if (major != other.major) return major.compareTo(other.major)
+            if (minor != other.minor) return minor.compareTo(other.minor)
+            return patch.compareTo(other.patch)
+        }
+    }
+
+    internal fun parseVersion(raw: String?): SemanticVersion? {
+        val cleaned = raw?.trim()?.removePrefix("v")?.removePrefix("V") ?: return null
+        if (cleaned.isEmpty()) return null
+        val core = cleaned.substringBefore('-').substringBefore('+')
+        val parts = core.split('.')
+        if (parts.isEmpty() || parts.any { it.toIntOrNull() == null }) return null
+        val major = parts.getOrNull(0)?.toIntOrNull() ?: return null
+        val minor = parts.getOrNull(1)?.toIntOrNull() ?: 0
+        val patch = parts.getOrNull(2)?.toIntOrNull() ?: 0
+        return SemanticVersion(major, minor, patch)
+    }
+
+    internal fun isRemoteReleaseNewer(
+        release: GitHubReleaseInfo,
+        installedVersionCode: Int,
+        installedVersionName: String,
+        lastSavedPublishedAt: String,
+    ): Boolean {
+        val remoteVersion = parseVersion(release.tagName)
+        if (remoteVersion != null) {
+            val localVersion = parseVersion(installedVersionName)
+            if (localVersion != null) {
+                val cmp = remoteVersion.compareTo(localVersion)
+                if (cmp != 0) return cmp > 0
+            }
+            return remoteVersion.patch > installedVersionCode
+        }
+        return lastSavedPublishedAt.isEmpty() || lastSavedPublishedAt != release.publishedAt
+    }
+
     private fun fetchReleaseFromApi(apiUrl: String): Result<GitHubReleaseInfo> {
         var connection: HttpURLConnection? = null
         return try {
@@ -167,13 +209,13 @@ object GitHubAppUpdater {
     }
 
     suspend fun checkForUpdate(context: Context): UpdateCheckOutcome = withContext(Dispatchers.IO) {
-        val primaryResult = fetchReleaseFromApi(RELEASES_TAG_LATEST_URL)
-        val releaseResult = if (primaryResult.isSuccess) {
-            primaryResult
+        val latestResult = fetchReleaseFromApi(RELEASES_LATEST_URL)
+        val releaseResult = if (latestResult.isSuccess) {
+            latestResult
         } else {
-            val latestResult = fetchReleaseFromApi(RELEASES_LATEST_URL)
-            if (latestResult.isSuccess) {
-                latestResult
+            val tagLatestResult = fetchReleaseFromApi(RELEASES_TAG_LATEST_URL)
+            if (tagLatestResult.isSuccess) {
+                tagLatestResult
             } else {
                 val directResult = probeDirectApkFallback()
                 if (directResult.isSuccess) directResult else latestResult
@@ -182,11 +224,16 @@ object GitHubAppUpdater {
 
         releaseResult.fold(
             onSuccess = { release ->
-                val lastSaved = getLastInstalledPublishedAt(context)
-                if (lastSaved.isNotEmpty() && lastSaved == release.publishedAt) {
-                    UpdateCheckOutcome.AlreadyUpToDate
-                } else {
+                val isNewer = isRemoteReleaseNewer(
+                    release = release,
+                    installedVersionCode = BuildConfig.VERSION_CODE,
+                    installedVersionName = BuildConfig.VERSION_NAME,
+                    lastSavedPublishedAt = getLastInstalledPublishedAt(context),
+                )
+                if (isNewer) {
                     UpdateCheckOutcome.UpdateAvailable(release)
+                } else {
+                    UpdateCheckOutcome.AlreadyUpToDate
                 }
             },
             onFailure = { err ->
