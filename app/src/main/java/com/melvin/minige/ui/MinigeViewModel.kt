@@ -39,7 +39,11 @@ import com.melvin.minige.util.PaidChannel
 import com.melvin.minige.util.PaymentBreakdownHelper
 import com.melvin.minige.util.PaymentChannelBreakdown
 import com.melvin.minige.util.SukiCustomerProfile
+import com.melvin.minige.util.UndoStateHelper
+import com.melvin.minige.util.UndoableAction
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -52,6 +56,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import androidx.lifecycle.viewModelScope
 import java.time.LocalDate
+import java.util.UUID
 
 data class MinigeUiState(
     val selectedDate: LocalDate = LocalDate.now(),
@@ -126,6 +131,9 @@ class MinigeViewModel(
     private val _isSyncing = MutableStateFlow(false)
     private val _isCalendarSyncing = MutableStateFlow(false)
     private val _statusMessage = MutableStateFlow<String?>(null)
+    private val _undoableAction = MutableStateFlow<UndoableAction?>(null)
+    val undoableAction: StateFlow<UndoableAction?> = _undoableAction.asStateFlow()
+    private var undoDismissJob: Job? = null
     private var latestBundle: LocalBundle? = null
     private var pendingCalendarSyncDate: LocalDate? = null
 
@@ -326,6 +334,42 @@ class MinigeViewModel(
         _statusMessage.value = null
     }
 
+    private fun showUndoableAction(action: UndoableAction) {
+        undoDismissJob?.cancel()
+        _undoableAction.value = action
+        undoDismissJob = viewModelScope.launch {
+            delay(UndoStateHelper.UNDO_DURATION_MS)
+            _undoableAction.value = null
+        }
+    }
+
+    fun dismissUndoAction() {
+        undoDismissJob?.cancel()
+        _undoableAction.value = null
+    }
+
+    fun executeUndo() {
+        val action = _undoableAction.value ?: return
+        dismissUndoAction()
+        viewModelScope.launch {
+            val result = when (action) {
+                is UndoableAction.DeliveryDeleted -> repository.restoreDelivery(currentUserId, action.snapshot)
+                is UndoableAction.DeliveryUpdated -> repository.restoreDelivery(currentUserId, action.previousSnapshot)
+                is UndoableAction.UtangPaymentRecorded -> repository.undoUtangPayment(
+                    userId = currentUserId,
+                    previousDelivery = action.previousDelivery,
+                    createdPaymentId = action.createdPaymentId,
+                )
+            }
+            val msg = if (result.isSuccess) {
+                "Undone: ${action.message}"
+            } else {
+                "Undone locally (queued for sync)"
+            }
+            _events.tryEmit(MinigeEvent.ShowMessage(msg))
+        }
+    }
+
     fun addDelivery(
         customerName: String,
         purifiedGallons: Int,
@@ -367,6 +411,7 @@ class MinigeViewModel(
         customUnitPrice: Double? = null,
     ) {
         viewModelScope.launch {
+            val previousSnapshot = repository.getDeliverySnapshot(deliveryId)
             val result = repository.updateDelivery(
                 userId = currentUserId,
                 deliveryId = deliveryId,
@@ -377,20 +422,44 @@ class MinigeViewModel(
                 notes = notes,
                 customUnitPrice = customUnitPrice,
             )
-            val msg = if (result.isSuccess) {
-                "Updated ${customerName.trim()} (${paymentType.label})"
+            if (previousSnapshot != null) {
+                val actionMsg = if (previousSnapshot.paymentType != paymentType) {
+                    "Swapped ${customerName.trim()} to ${paymentType.label}"
+                } else {
+                    "Updated ${customerName.trim()}"
+                }
+                showUndoableAction(
+                    UndoableAction.DeliveryUpdated(
+                        previousSnapshot = previousSnapshot,
+                        message = actionMsg,
+                    )
+                )
             } else {
-                "Updated locally — will sync to cloud when online."
+                val msg = if (result.isSuccess) {
+                    "Updated ${customerName.trim()} (${paymentType.label})"
+                } else {
+                    "Updated locally — will sync to cloud when online."
+                }
+                _events.tryEmit(MinigeEvent.ShowMessage(msg))
             }
-            _events.tryEmit(MinigeEvent.ShowMessage(msg))
         }
     }
 
     fun deleteDelivery(deliveryId: String) {
         viewModelScope.launch {
+            val snapshot = repository.getDeliverySnapshot(deliveryId)
             val result = repository.deleteDelivery(currentUserId, deliveryId)
-            val msg = if (result.isSuccess) "Entry deleted" else "Deleted locally (pending cloud sync)"
-            _events.tryEmit(MinigeEvent.ShowMessage(msg))
+            if (snapshot != null) {
+                showUndoableAction(
+                    UndoableAction.DeliveryDeleted(
+                        snapshot = snapshot,
+                        message = "Deleted ${snapshot.customerName}",
+                    )
+                )
+            } else {
+                val msg = if (result.isSuccess) "Entry deleted" else "Deleted locally (pending cloud sync)"
+                _events.tryEmit(MinigeEvent.ShowMessage(msg))
+            }
         }
     }
 
@@ -402,7 +471,9 @@ class MinigeViewModel(
     ) {
         val paymentDateKey = MinigeDateUtils.toKey(_selectedDate.value)
         val activeRate = uiState.value.activeCommissionRate
+        val paymentId = UUID.randomUUID().toString()
         viewModelScope.launch {
+            val previousDelivery = repository.getDeliverySnapshot(deliveryId)
             val result = repository.recordUtangPayment(
                 userId = currentUserId,
                 deliveryId = deliveryId,
@@ -411,14 +482,30 @@ class MinigeViewModel(
                 paymentDateKey = paymentDateKey,
                 notes = notes,
                 overrideCommissionRate = activeRate,
+                paymentId = paymentId,
             )
             result.onSuccess { fullyPaid ->
-                val msg = if (fullyPaid) {
-                    "Utang fully paid! Commission awarded for $paymentDateKey."
+                if (previousDelivery != null) {
+                    val undoText = if (fullyPaid) {
+                        "Marked ${previousDelivery.customerName} paid"
+                    } else {
+                        "Paid ₱$amount (${previousDelivery.customerName})"
+                    }
+                    showUndoableAction(
+                        UndoableAction.UtangPaymentRecorded(
+                            previousDelivery = previousDelivery,
+                            createdPaymentId = paymentId,
+                            message = undoText,
+                        )
+                    )
                 } else {
-                    "Partial payment recorded (₱0 commission until fully paid)."
+                    val msg = if (fullyPaid) {
+                        "Utang fully paid! Commission awarded for $paymentDateKey."
+                    } else {
+                        "Partial payment recorded (₱0 commission until fully paid)."
+                    }
+                    _events.tryEmit(MinigeEvent.ShowMessage(msg))
                 }
-                _events.tryEmit(MinigeEvent.ShowMessage(msg))
             }.onFailure { err ->
                 _events.tryEmit(MinigeEvent.ShowMessage(err.localizedMessage ?: "Payment saved locally."))
             }
@@ -435,7 +522,9 @@ class MinigeViewModel(
         val paymentDateKey = MinigeDateUtils.toKey(_selectedDate.value)
         val activeRate = uiState.value.activeCommissionRate
         val immediateComm = CommissionRateHistory.calculateCommissionAmount(paidGallons, activeRate)
+        val paymentId = UUID.randomUUID().toString()
         viewModelScope.launch {
+            val previousDelivery = repository.getDeliverySnapshot(deliveryId)
             val result = repository.recordPartialGallonPayment(
                 userId = currentUserId,
                 deliveryId = deliveryId,
@@ -445,14 +534,30 @@ class MinigeViewModel(
                 paymentDateKey = paymentDateKey,
                 notes = notes,
                 overrideCommissionRate = activeRate,
+                paymentId = paymentId,
             )
             result.onSuccess { fullyPaid ->
-                val msg = if (fullyPaid) {
-                    "Settled $paidGallons gal(s)! +₱$immediateComm commission awarded for $paymentDateKey."
+                if (previousDelivery != null) {
+                    val undoText = if (fullyPaid) {
+                        "Settled ${previousDelivery.customerName} (+₱$immediateComm)"
+                    } else {
+                        "Partial pay ${paidGallons}g (${previousDelivery.customerName})"
+                    }
+                    showUndoableAction(
+                        UndoableAction.UtangPaymentRecorded(
+                            previousDelivery = previousDelivery,
+                            createdPaymentId = paymentId,
+                            message = undoText,
+                        )
+                    )
                 } else {
-                    "Partial pay: $paidGallons gal(s) (₱$amount ${channel.label}) → +₱$immediateComm commission today!"
+                    val msg = if (fullyPaid) {
+                        "Settled $paidGallons gal(s)! +₱$immediateComm commission awarded for $paymentDateKey."
+                    } else {
+                        "Partial pay: $paidGallons gal(s) (₱$amount ${channel.label}) → +₱$immediateComm commission today!"
+                    }
+                    _events.tryEmit(MinigeEvent.ShowMessage(msg))
                 }
-                _events.tryEmit(MinigeEvent.ShowMessage(msg))
             }.onFailure { err ->
                 _events.tryEmit(MinigeEvent.ShowMessage(err.localizedMessage ?: "Partial payment saved locally."))
             }

@@ -62,36 +62,38 @@ fun RemittanceSummaryCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    text = "Remittance & Cash on Hand",
-                    style = MaterialTheme.typography.titleMedium,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(end = 8.dp),
-                )
-                FilledTonalButton(
-                    onClick = onSyncCalendarClick,
-                    enabled = !isCalendarSyncing,
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                    modifier = Modifier
-                        .defaultMinSize(minHeight = 48.dp)
-                        .testTag("sync_calendar_button"),
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.CalendarToday,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp),
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = if (isCalendarSyncing) "Syncing..." else "Calendar Sync",
+                        text = "Remittance & Cash",
+                        style = MaterialTheme.typography.titleMedium,
                         maxLines = 1,
-                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 8.dp),
                     )
+                    MinigeTooltipWrapper(label = "Save report to Google Calendar") {
+                        FilledTonalButton(
+                            onClick = onSyncCalendarClick,
+                            enabled = !isCalendarSyncing,
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                            modifier = Modifier
+                                .defaultMinSize(minHeight = 48.dp)
+                                .testTag("sync_calendar_button"),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.CalendarToday,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (isCalendarSyncing) "Syncing..." else "Sync Calendar",
+                                maxLines = 1,
+                                softWrap = false,
+                            )
+                        }
+                    }
                 }
-            }
 
             RemittanceMetricLine(
                 icon = Icons.Rounded.Payments,
@@ -119,6 +121,7 @@ fun RemittanceSummaryCard(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Row(
+                            modifier = Modifier.weight(1f).padding(end = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
@@ -129,14 +132,18 @@ fun RemittanceSummaryCard(
                                 modifier = Modifier.size(18.dp),
                             )
                             Text(
-                                text = "Bank-Paid Total (Boss Account)",
+                                text = "Bank-Paid (Boss)",
                                 style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
                         }
                         Text(
                             text = "₱${breakdown.bankPaidTotal}",
                             style = MaterialTheme.typography.titleMedium,
                             color = MaterialTheme.colorScheme.secondary,
+                            maxLines = 1,
+                            softWrap = false,
                         )
                     }
                     Text(
@@ -203,17 +210,19 @@ fun RemittanceSummaryCard(
                                 )
                             }
                         }
-                        IconButton(
-                            onClick = onEditSukliClick,
-                            modifier = Modifier
-                                .size(48.dp)
-                                .testTag("edit_sukli_button"),
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Edit,
-                                contentDescription = "Edit starting sukli",
-                                modifier = Modifier.size(18.dp),
-                            )
+                        MinigeTooltipWrapper(label = "Edit starting sukli") {
+                            IconButton(
+                                onClick = onEditSukliClick,
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .testTag("edit_sukli_button"),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Edit,
+                                    contentDescription = "Edit starting sukli",
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            }
                         }
                     }
 

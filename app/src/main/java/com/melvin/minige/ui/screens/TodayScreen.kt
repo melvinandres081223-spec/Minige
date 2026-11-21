@@ -78,6 +78,7 @@ import com.melvin.minige.ui.components.DailyQuotaBar
 import com.melvin.minige.ui.components.DeliveryFilterBar
 import com.melvin.minige.ui.components.DeliveryFilterChip
 import com.melvin.minige.ui.components.DeliveryFilterHelper
+import com.melvin.minige.ui.components.MinigeTooltipWrapper
 import com.melvin.minige.ui.components.RemittanceSummaryCard
 import com.melvin.minige.util.CommissionRateHistory
 import com.melvin.minige.util.CustomerDirectoryHelper
@@ -134,7 +135,7 @@ fun TodayScreen(
                 .fillMaxSize()
                 .widthIn(max = 600.dp),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 96.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             item(key = "daily_quota_bar") {
                 DailyQuotaBar(
@@ -200,25 +201,27 @@ fun TodayScreen(
                             .weight(1f)
                             .padding(end = 8.dp),
                     )
-                    FilterChip(
-                        selected = groupByArea,
-                        onClick = { groupByArea = !groupByArea },
-                        label = {
-                            Text(
-                                text = "By Area",
-                                maxLines = 1,
-                                softWrap = false,
-                            )
-                        },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.Rounded.Place,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp),
-                            )
-                        },
-                        modifier = Modifier.testTag("by_area_toggle_chip"),
-                    )
+                    MinigeTooltipWrapper(label = "Group deliveries by route area") {
+                        FilterChip(
+                            selected = groupByArea,
+                            onClick = { groupByArea = !groupByArea },
+                            label = {
+                                Text(
+                                    text = "By Area",
+                                    maxLines = 1,
+                                    softWrap = false,
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Rounded.Place,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp),
+                                )
+                            },
+                            modifier = Modifier.testTag("by_area_toggle_chip"),
+                        )
+                    }
                 }
             }
 
@@ -390,11 +393,13 @@ private fun DateNavigatorBar(
                 .padding(horizontal = 4.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(
-                onClick = onPrev,
-                modifier = Modifier.size(48.dp).testTag("prev_day_button"),
-            ) {
-                Icon(Icons.AutoMirrored.Rounded.KeyboardArrowLeft, contentDescription = "Previous day")
+            MinigeTooltipWrapper(label = "Previous day") {
+                IconButton(
+                    onClick = onPrev,
+                    modifier = Modifier.size(48.dp).testTag("prev_day_button"),
+                ) {
+                    Icon(Icons.AutoMirrored.Rounded.KeyboardArrowLeft, contentDescription = "Previous day")
+                }
             }
 
             Column(
@@ -405,6 +410,8 @@ private fun DateNavigatorBar(
                     text = dateLabel,
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
 
@@ -412,14 +419,16 @@ private fun DateNavigatorBar(
                 onClick = onToday,
                 modifier = Modifier.testTag("today_jump_button"),
             ) {
-                Text("Today")
+                Text("Today", maxLines = 1, softWrap = false)
             }
 
-            IconButton(
-                onClick = onNext,
-                modifier = Modifier.size(48.dp).testTag("next_day_button"),
-            ) {
-                Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, contentDescription = "Next day")
+            MinigeTooltipWrapper(label = "Next day") {
+                IconButton(
+                    onClick = onNext,
+                    modifier = Modifier.size(48.dp).testTag("next_day_button"),
+                ) {
+                    Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, contentDescription = "Next day")
+                }
             }
         }
     }
@@ -488,29 +497,31 @@ private fun CommissionHeroCard(
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                         )
                     }
-                    Surface(
-                        onClick = onOpenClosing,
-                        shape = CircleShape,
-                        color = MaterialTheme.colorScheme.primary,
-                        contentColor = MaterialTheme.colorScheme.onPrimary,
-                        modifier = Modifier.testTag("closing_sheet_button"),
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    MinigeTooltipWrapper(label = "End-of-day private closing") {
+                        Surface(
+                            onClick = onOpenClosing,
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier.testTag("closing_sheet_button"),
                         ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Summarize,
-                                contentDescription = "Open end-of-day closing",
-                                modifier = Modifier.size(14.dp),
-                            )
-                            Text(
-                                text = "Closing",
-                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
-                                maxLines = 1,
-                                softWrap = false,
-                            )
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Summarize,
+                                    contentDescription = "Open end-of-day closing",
+                                    modifier = Modifier.size(14.dp),
+                                )
+                                Text(
+                                    text = "Closing",
+                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                    maxLines = 1,
+                                    softWrap = false,
+                                )
+                            }
                         }
                     }
                 }
@@ -626,8 +637,10 @@ private fun BossPickupUpdateCard(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "1-Tap Update / Send to Boss",
+                        text = "Send Daily Hakot",
                         style = MaterialTheme.typography.labelLarge,
+                        maxLines = 1,
+                        softWrap = false,
                     )
                 }
             }
@@ -683,6 +696,8 @@ private fun DeliveryRowCard(
                     Text(
                         text = delivery.customerName,
                         style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.align(Alignment.CenterVertically),
                     )
                     Surface(

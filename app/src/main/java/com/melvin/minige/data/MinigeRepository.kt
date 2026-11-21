@@ -160,13 +160,16 @@ class MinigeRepository(
         }
 
         dao.getPendingUtangPayments(userId).forEach { entity ->
-            val result = remote.upsertUtangPayment(userId, entity)
-            if (result.isSuccess) {
-                dao.markUtangPaymentSynced(entity.id)
-                syncedCount++
+            val result = if (entity.isDeleted) {
+                remote.deleteUtangPayment(userId, entity.id).also { res ->
+                    if (res.isSuccess) dao.hardDeleteUtangPayment(entity.id)
+                }
             } else {
-                lastError = result.exceptionOrNull()
+                remote.upsertUtangPayment(userId, entity).also { res ->
+                    if (res.isSuccess) dao.markUtangPaymentSynced(entity.id)
+                }
             }
+            if (result.isSuccess) syncedCount++ else lastError = result.exceptionOrNull()
         }
 
         dao.getPendingExpenses(userId).forEach { entity ->
@@ -427,6 +430,7 @@ class MinigeRepository(
         paymentDateKey: String,
         notes: String,
         overrideCommissionRate: Double? = null,
+        paymentId: String = UUID.randomUUID().toString(),
     ): Result<Boolean> {
         val existing = dao.getDeliveryById(deliveryId)
             ?: return Result.failure(IllegalArgumentException("Utang delivery not found."))
@@ -441,7 +445,6 @@ class MinigeRepository(
         val settings = dao.getSettingsOnce()?.toDomain() ?: MinigeSettings()
         val effectiveRate = overrideCommissionRate ?: settings.commissionRate.toDouble()
         val now = System.currentTimeMillis()
-        val paymentId = UUID.randomUUID().toString()
 
         val paymentEntity = UtangPaymentEntity(
             id = paymentId,
@@ -503,6 +506,7 @@ class MinigeRepository(
         paymentDateKey: String,
         notes: String,
         overrideCommissionRate: Double? = null,
+        paymentId: String = UUID.randomUUID().toString(),
     ): Result<Boolean> {
         val settings = dao.getSettingsOnce()?.toDomain() ?: MinigeSettings()
         val effectiveRate = overrideCommissionRate ?: settings.commissionRate.toDouble()
@@ -521,7 +525,57 @@ class MinigeRepository(
             paymentDateKey = paymentDateKey,
             notes = taggedNotes,
             overrideCommissionRate = effectiveRate,
+            paymentId = paymentId,
         )
+    }
+
+    suspend fun getDeliverySnapshot(deliveryId: String): DeliveryRecord? =
+        dao.getDeliveryById(deliveryId)?.toDomain()
+
+    suspend fun restoreDelivery(userId: String, snapshot: DeliveryRecord): Result<Unit> {
+        val now = System.currentTimeMillis()
+        val entity = DeliveryEntity(
+            id = snapshot.id,
+            userId = userId,
+            dateKey = snapshot.dateKey,
+            customerName = snapshot.customerName,
+            purifiedGallons = snapshot.purifiedGallons,
+            alkalineGallons = snapshot.alkalineGallons,
+            purifiedUnitPrice = snapshot.purifiedUnitPrice,
+            alkalineUnitPrice = snapshot.alkalineUnitPrice,
+            totalAmount = snapshot.totalAmount,
+            amountPaid = snapshot.amountPaid,
+            paymentType = snapshot.paymentType.name,
+            commissionRate = snapshot.commissionRate,
+            commissionEarned = snapshot.commissionEarned,
+            settledDateKey = snapshot.settledDateKey,
+            notes = snapshot.notes,
+            calendarEventId = snapshot.calendarEventId,
+            pendingSync = true,
+            isDeleted = false,
+            createdAtEpochMs = snapshot.createdAtEpochMs,
+            updatedAtEpochMs = now,
+        )
+        dao.upsertDelivery(entity)
+        val res = remote.upsertDelivery(userId, entity)
+        if (res.isSuccess) {
+            dao.markDeliverySynced(snapshot.id)
+        }
+        return res
+    }
+
+    suspend fun undoUtangPayment(
+        userId: String,
+        previousDelivery: DeliveryRecord,
+        createdPaymentId: String,
+    ): Result<Unit> {
+        dao.softDeleteUtangPayment(createdPaymentId)
+        val restoreRes = restoreDelivery(userId, previousDelivery)
+        val deleteRes = remote.deleteUtangPayment(userId, createdPaymentId)
+        if (deleteRes.isSuccess) {
+            dao.hardDeleteUtangPayment(createdPaymentId)
+        }
+        return if (restoreRes.isFailure) restoreRes else deleteRes
     }
 
     suspend fun deleteDelivery(userId: String, deliveryId: String): Result<Unit> {

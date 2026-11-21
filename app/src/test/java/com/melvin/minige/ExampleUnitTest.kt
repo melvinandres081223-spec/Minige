@@ -14,6 +14,8 @@ import com.melvin.minige.ui.components.DailyClosingHelper
 import com.melvin.minige.ui.components.DailyQuotaPrefs
 import com.melvin.minige.ui.components.DeliveryFilterChip
 import com.melvin.minige.ui.components.DeliveryFilterHelper
+import com.melvin.minige.ui.components.GuideScreenTab
+import com.melvin.minige.ui.components.ScreenGuideCatalog
 import com.melvin.minige.ui.components.SukiAnalyticsHelper
 import com.melvin.minige.ui.components.SundayMakeupHelper
 import com.melvin.minige.util.CommissionRateHistory
@@ -25,6 +27,8 @@ import com.melvin.minige.util.PartialPaymentHelper
 import com.melvin.minige.util.PautangOverdueHelper
 import com.melvin.minige.util.PaymentBreakdownHelper
 import com.melvin.minige.util.RouteGroupingHelper
+import com.melvin.minige.util.UndoStateHelper
+import com.melvin.minige.util.UndoableAction
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -605,5 +609,40 @@ class ExampleUnitTest {
         assertEquals(50, progress.targetGallons)
         assertEquals(160, progress.commissionEarned)
         assertEquals(0.7f, progress.fraction, 0.001f)
+    }
+
+    @Test
+    fun `undo state helper enforces 5 second auto dismiss window`() {
+        val snapshot = delivery("d1", "2026-11-21", "Ate Maria", 5, 0, PaymentType.PAUTANG, 0)
+        val action = UndoableAction.UtangPaymentRecorded(
+            previousDelivery = snapshot,
+            createdPaymentId = "pay_1",
+            message = "Marked Ate Maria paid",
+            createdAtEpochMs = 10_000L,
+        )
+
+        assertFalse(UndoStateHelper.shouldAutoDismiss(action, nowEpochMs = 12_500L))
+        assertEquals(3, UndoStateHelper.remainingSeconds(action, nowEpochMs = 12_500L))
+        assertTrue(UndoStateHelper.shouldAutoDismiss(action, nowEpochMs = 15_000L))
+        assertEquals(0, UndoStateHelper.remainingSeconds(action, nowEpochMs = 15_000L))
+        assertFalse(UndoStateHelper.shouldAutoDismiss(null, nowEpochMs = 20_000L))
+    }
+
+    @Test
+    fun `screen guide catalog provides taglish explanations and examples for all tabs`() {
+        val todayGuide = ScreenGuideCatalog.forTab(GuideScreenTab.TODAY)
+        assertTrue(todayGuide.items.any { it.badgeOrButton == "Closing" })
+        assertTrue(todayGuide.items.any { it.badgeOrButton == "By Area" })
+        assertTrue(todayGuide.items.any { it.badgeOrButton == "Daily Hakot" })
+        assertTrue(todayGuide.items.any { it.badgeOrButton == "Sync Status Dot" })
+
+        val pautangGuide = ScreenGuideCatalog.forTab(GuideScreenTab.PAUTANG)
+        assertTrue(pautangGuide.items.any { it.badgeOrButton == "Partial Pay" })
+
+        GuideScreenTab.entries.forEach { tab ->
+            val guide = ScreenGuideCatalog.forTab(tab)
+            assertTrue(guide.items.isNotEmpty())
+            assertTrue(guide.items.all { it.taglishExplanation.isNotBlank() && it.example.isNotBlank() })
+        }
     }
 }

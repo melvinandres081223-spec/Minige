@@ -47,6 +47,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.melvin.minige.sync.GitHubAppUpdater
@@ -109,7 +110,7 @@ fun SettingsScreen(
                 .fillMaxSize()
                 .widthIn(max = 600.dp),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 96.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             item {
                 ElevatedCard(
@@ -122,7 +123,7 @@ fun SettingsScreen(
                     ) {
                         Text("Pricing & Commission", style = MaterialTheme.typography.titleLarge)
                         Text(
-                            text = "Editing commission rate applies only to new deliveries and newly settled utang — historical daily commission totals stay intact.",
+                            text = "Rate edits apply only to future logs — past commission stays unchanged.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -204,12 +205,14 @@ fun SettingsScreen(
                     ) {
                         Text("Cloud Sync & Permissions", style = MaterialTheme.typography.titleMedium)
                         Text(
-                            text = "Signed in as: ${userEmail ?: "Google Account"}",
+                            text = "Signed in: ${userEmail ?: "Google Account"}",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                         )
                         Text(
-                            text = "Pending offline sync items: ${uiState.pendingSyncCount}",
+                            text = "Pending offline items: ${uiState.pendingSyncCount}",
                             style = MaterialTheme.typography.bodyMedium,
                         )
 
@@ -223,7 +226,11 @@ fun SettingsScreen(
                         ) {
                             Icon(Icons.Rounded.CloudSync, contentDescription = null)
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text(if (uiState.isSyncing) "Syncing..." else "Sync Pending Changes to Cloud")
+                            Text(
+                                text = if (uiState.isSyncing) "Syncing..." else "Sync Now",
+                                maxLines = 1,
+                                softWrap = false,
+                            )
                         }
 
                         if (!hasMicPermission) {
@@ -233,7 +240,7 @@ fun SettingsScreen(
                             ) {
                                 Icon(Icons.Rounded.Mic, contentDescription = null)
                                 Spacer(modifier = Modifier.width(8.dp))
-                                Text("Enable Microphone for Voice Input")
+                                Text("Enable Mic", maxLines = 1, softWrap = false)
                             }
                         }
 
@@ -286,8 +293,10 @@ fun SettingsScreen(
                             }
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                if (isCheckingOrDownloadingUpdate) (updateStatusText ?: "Checking for updates...")
-                                else "Check for App Updates"
+                                text = if (isCheckingOrDownloadingUpdate) (updateStatusText ?: "Checking...")
+                                else "Check for App Updates",
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
                         }
 

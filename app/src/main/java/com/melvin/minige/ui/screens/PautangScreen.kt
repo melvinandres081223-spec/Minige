@@ -42,7 +42,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.UtangMethod
@@ -91,7 +93,7 @@ fun PautangScreen(
                 .fillMaxSize()
                 .widthIn(max = 600.dp),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 96.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             item {
                 Surface(
@@ -104,17 +106,17 @@ fun PautangScreen(
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
                         Text(
-                            text = "Pautang (Credit) Rule",
+                            text = "Pautang Credits (${uiState.activeUtangList.size} active)",
                             style = MaterialTheme.typography.titleMedium,
                             color = MaterialTheme.colorScheme.onPrimaryContainer,
                         )
                         Text(
-                            text = "Outstanding Balance: ₱$totalOutstanding (${uiState.activeUtangList.size} active)",
-                            style = MaterialTheme.typography.headlineMedium,
+                            text = "₱$totalOutstanding Outstanding",
+                            style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Bold),
                             color = MaterialTheme.colorScheme.onPrimaryContainer,
                         )
                         Text(
-                            text = "Unpaid & partial payments earn ₱0 commission. Full commission (${uiState.settings.commissionRate}/gal) is awarded on the exact date balance reaches ₱0.",
+                            text = "Commission unlocks when paid (₱${uiState.settings.commissionRate}/gal on settlement or Partial Pay).",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f),
                         )
@@ -254,15 +256,22 @@ private fun ActiveUtangCard(
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(item.customerName, style = MaterialTheme.typography.titleMedium)
                     Text(
-                        text = "Delivered ${item.dateKey} • Unpaid: ${partialStatus.remainingUnpaidGallons}/${item.totalGallons} gal(s)",
+                        text = item.customerName,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = "${item.dateKey} • ${partialStatus.remainingUnpaidGallons}/${item.totalGallons} gal unpaid",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
                 Column(
@@ -270,9 +279,11 @@ private fun ActiveUtangCard(
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     Text(
-                        text = "Bal: ₱${item.remainingBalance}",
-                        style = MaterialTheme.typography.titleMedium,
+                        text = "₱${item.remainingBalance}",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                         color = MaterialTheme.colorScheme.error,
+                        maxLines = 1,
+                        softWrap = false,
                     )
                     if (overdueDays != null) {
                         OverduePautangBadge(daysElapsed = overdueDays)
@@ -289,6 +300,8 @@ private fun ActiveUtangCard(
                 text = "Paid ₱${item.amountPaid} / ₱${item.totalAmount} • Potential Comm: ₱${partialStatus.remainingUnpaidGallons * commissionRate}",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
 
             Row(
@@ -302,7 +315,7 @@ private fun ActiveUtangCard(
                         .defaultMinSize(minHeight = 48.dp)
                         .testTag("partial_pay_utang_${item.id}"),
                 ) {
-                    Text("Partial Pay")
+                    Text("Partial Pay", maxLines = 1, softWrap = false)
                 }
                 Button(
                     onClick = onCollectClick,
@@ -310,7 +323,7 @@ private fun ActiveUtangCard(
                         .defaultMinSize(minHeight = 48.dp)
                         .testTag("collect_utang_${item.id}"),
                 ) {
-                    Text("Collect")
+                    Text("Collect", maxLines = 1, softWrap = false)
                 }
             }
         }

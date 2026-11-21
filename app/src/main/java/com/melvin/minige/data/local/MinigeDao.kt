@@ -51,6 +51,12 @@ interface MinigeDao {
     @Query("UPDATE utang_payments SET pendingSync = 0 WHERE id = :id")
     suspend fun markUtangPaymentSynced(id: String)
 
+    @Query("UPDATE utang_payments SET isDeleted = 1, pendingSync = 1 WHERE id = :id")
+    suspend fun softDeleteUtangPayment(id: String)
+
+    @Query("DELETE FROM utang_payments WHERE id = :id")
+    suspend fun hardDeleteUtangPayment(id: String)
+
     @Query("SELECT * FROM expenses WHERE userId = :userId AND isDeleted = 0 ORDER BY createdAtEpochMs DESC")
     fun observeExpenses(userId: String): Flow<List<ExpenseEntity>>
 

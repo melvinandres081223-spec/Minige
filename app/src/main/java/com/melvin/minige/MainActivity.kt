@@ -10,6 +10,7 @@ import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
@@ -20,6 +21,7 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.HelpOutline
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.CreditScore
 import androidx.compose.material.icons.rounded.DateRange
@@ -37,6 +39,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -64,6 +67,11 @@ import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.sync.CalendarSyncManager
 import com.melvin.minige.ui.MinigeEvent
 import com.melvin.minige.ui.MinigeViewModel
+import com.melvin.minige.ui.components.GuideScreenTab
+import com.melvin.minige.ui.components.MinigeTooltipWrapper
+import com.melvin.minige.ui.components.ScreenGuideSheet
+import com.melvin.minige.ui.components.SyncStatusPill
+import com.melvin.minige.ui.components.UndoActionBanner
 import com.melvin.minige.ui.screens.AddDeliverySheet
 import com.melvin.minige.ui.screens.AddExpenseSheet
 import com.melvin.minige.ui.screens.AuthScreen
@@ -131,6 +139,7 @@ fun MinigeMainShell(
     )
 
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val undoableAction by viewModel.undoableAction.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
 
     var selectedTab by rememberSaveable { mutableStateOf(MinigeTab.TODAY) }
@@ -138,6 +147,7 @@ fun MinigeMainShell(
     var showAddDeliverySheet by remember { mutableStateOf(false) }
     var showAddExpenseSheet by remember { mutableStateOf(false) }
     var showEditSukliDialog by remember { mutableStateOf(false) }
+    var showScreenGuideSheet by remember { mutableStateOf(false) }
 
     val calendarConsentLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult(),
@@ -198,6 +208,26 @@ fun MinigeMainShell(
                         )
                     }
                 },
+                actions = {
+                    SyncStatusPill(
+                        pendingSyncCount = uiState.pendingSyncCount,
+                        isSyncing = uiState.isSyncing,
+                        onSyncNow = viewModel::syncNow,
+                    )
+                    MinigeTooltipWrapper(label = "Screen guide (Taglish)") {
+                        IconButton(
+                            onClick = { showScreenGuideSheet = true },
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("screen_guide_help_button"),
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.HelpOutline,
+                                contentDescription = "Open screen guide",
+                            )
+                        }
+                    }
+                },
                 colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
                     containerColor = MaterialTheme.colorScheme.background,
                     titleContentColor = MaterialTheme.colorScheme.onBackground,
@@ -211,7 +241,7 @@ fun MinigeMainShell(
                         selected = selectedTab == tab,
                         onClick = { selectedTab = tab },
                         icon = { Icon(tab.icon, contentDescription = tab.label) },
-                        label = { Text(tab.label) },
+                        label = { Text(tab.label, maxLines = 1, softWrap = false) },
                         modifier = Modifier.testTag("nav_tab_${tab.name.lowercase()}"),
                     )
                 }
@@ -219,23 +249,26 @@ fun MinigeMainShell(
         },
         floatingActionButton = {
             if (selectedTab == MinigeTab.TODAY) {
-                FloatingActionButton(
-                    onClick = {
-                        editingDelivery = null
-                        showAddDeliverySheet = true
-                    },
-                    modifier = Modifier.testTag("fab_add_entry"),
-                ) {
-                    Icon(Icons.Rounded.Add, contentDescription = "Log delivery or pick-up")
+                MinigeTooltipWrapper(label = "Log delivery or pick-up") {
+                    FloatingActionButton(
+                        onClick = {
+                            editingDelivery = null
+                            showAddDeliverySheet = true
+                        },
+                        modifier = Modifier.testTag("fab_add_entry"),
+                    ) {
+                        Icon(Icons.Rounded.Add, contentDescription = "Log delivery or pick-up")
+                    }
                 }
             }
         },
     ) { innerPadding ->
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding),
         ) {
+            Column(modifier = Modifier.fillMaxSize()) {
             when (selectedTab) {
                 MinigeTab.TODAY -> TodayScreen(
                     uiState = uiState,
@@ -286,6 +319,20 @@ fun MinigeMainShell(
                     },
                 )
             }
+            }
+
+            UndoActionBanner(
+                action = undoableAction,
+                onUndoClick = viewModel::executeUndo,
+                onDismiss = viewModel::dismissUndoAction,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(
+                        start = 16.dp,
+                        end = if (selectedTab == MinigeTab.TODAY) 88.dp else 16.dp,
+                        bottom = 14.dp,
+                    ),
+            )
         }
     }
 
@@ -338,6 +385,19 @@ fun MinigeMainShell(
             currentSukli = uiState.dailySummary.startingSukli,
             onDismiss = { showEditSukliDialog = false },
             onSave = viewModel::updateStartingSukli,
+        )
+    }
+
+    if (showScreenGuideSheet) {
+        val guideTab = when (selectedTab) {
+            MinigeTab.TODAY -> GuideScreenTab.TODAY
+            MinigeTab.PAUTANG -> GuideScreenTab.PAUTANG
+            MinigeTab.WEEKLY -> GuideScreenTab.WEEKLY
+            MinigeTab.SETTINGS -> GuideScreenTab.SETTINGS
+        }
+        ScreenGuideSheet(
+            initialTab = guideTab,
+            onDismiss = { showScreenGuideSheet = false },
         )
     }
 }

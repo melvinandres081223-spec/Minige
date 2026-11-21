@@ -187,6 +187,22 @@ class MinigeFirestoreDataSource(
         }
     }
 
+    suspend fun deleteUtangPayment(userId: String, paymentId: String): Result<Unit> {
+        val path = "users/$userId/utangPayments/$paymentId"
+        return try {
+            val uid = requireUserId(userId)
+            db.collection("users").document(uid).collection("utangPayments").document(paymentId)
+                .delete()
+                .await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, path)
+            Result.failure(e)
+        }
+    }
+
     suspend fun upsertExpense(userId: String, entity: ExpenseEntity): Result<Unit> {
         val path = "users/$userId/expenses/${entity.id}"
         return try {

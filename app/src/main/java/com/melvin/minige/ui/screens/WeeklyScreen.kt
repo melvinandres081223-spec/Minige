@@ -29,6 +29,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.melvin.minige.domain.MinigeDateUtils
 import com.melvin.minige.ui.MinigeUiState
@@ -62,7 +63,7 @@ fun WeeklyScreen(
                 .fillMaxSize()
                 .widthIn(max = 600.dp),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 96.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             item {
                 Surface(
@@ -130,7 +131,9 @@ fun WeeklyScreen(
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
                             if (uiState.isCalendarSyncing) "Syncing ${uiState.selectedDateKey}..."
-                            else "Sync Selected Day (${uiState.selectedDateKey}) to Google Calendar"
+                            else "Sync ${uiState.selectedDateKey} to Calendar",
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                         )
                     }
 
@@ -147,7 +150,9 @@ fun WeeklyScreen(
                             Icon(Icons.Rounded.CalendarMonth, contentDescription = null)
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "Sync Sunday Makeup (${uiState.sundayMakeupDaySummary.dateKey}) to Calendar",
+                                text = "Sync Makeup (${uiState.sundayMakeupDaySummary.dateKey})",
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
                         }
                     }
@@ -170,7 +175,7 @@ fun WeeklyScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(14.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
@@ -178,11 +183,15 @@ fun WeeklyScreen(
                                 text = MinigeDateUtils.formatShort(day.date) + suffix,
                                 style = MaterialTheme.typography.titleMedium,
                                 color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
                             Text(
                                 text = "Cash ₱${day.cashCollected} • Bank ₱${day.bankDeposit} • Exp ₱${day.expenses} • Pick-up ${day.pickupGallons}g",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
                         }
                         Column(horizontalAlignment = Alignment.End) {
@@ -190,11 +199,15 @@ fun WeeklyScreen(
                                 text = "₱${day.commission}",
                                 style = MaterialTheme.typography.titleMedium,
                                 color = MaterialTheme.colorScheme.primary,
+                                maxLines = 1,
+                                softWrap = false,
                             )
                             Text(
                                 text = "${day.paidGallons} gals",
                                 style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                softWrap = false,
                             )
                         }
                     }
