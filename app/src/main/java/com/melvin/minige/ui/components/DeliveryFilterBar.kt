@@ -1,5 +1,6 @@
 package com.melvin.minige.ui.components
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -8,6 +9,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Clear
@@ -19,13 +22,17 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.PaymentType
 import com.melvin.minige.util.CustomerClassification
 import com.melvin.minige.util.DeliveryVoiceParser
+import kotlinx.coroutines.launch
 
 enum class DeliveryFilterChip(val label: String) {
     ALL("All"),
@@ -74,6 +81,7 @@ object DeliveryFilterHelper {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun DeliveryFilterBar(
     searchQuery: String,
@@ -84,9 +92,15 @@ fun DeliveryFilterBar(
     chips: List<DeliveryFilterChip> = DeliveryFilterChip.entries,
     placeholderText: String = "Search customer or area...",
     testTagPrefix: String = "delivery_filter",
+    onSearchFocusChanged: (Boolean) -> Unit = {},
 ) {
+    val bringIntoViewRequester = remember { BringIntoViewRequester() }
+    val scope = rememberCoroutineScope()
+
     Column(
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier
+            .fillMaxWidth()
+            .bringIntoViewRequester(bringIntoViewRequester),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         OutlinedTextField(
@@ -119,6 +133,15 @@ fun DeliveryFilterBar(
             shape = RoundedCornerShape(14.dp),
             modifier = Modifier
                 .fillMaxWidth()
+                .onFocusChanged { focusState ->
+                    val focused = focusState.isFocused
+                    onSearchFocusChanged(focused)
+                    if (focused) {
+                        scope.launch {
+                            bringIntoViewRequester.bringIntoView()
+                        }
+                    }
+                }
                 .testTag("${testTagPrefix}_search_input"),
         )
 
@@ -127,7 +150,11 @@ fun DeliveryFilterBar(
             contentPadding = PaddingValues(horizontal = 2.dp),
             modifier = Modifier.fillMaxWidth(),
         ) {
-            items(chips, key = { it.name }) { chip ->
+            items(
+                items = chips,
+                key = { it.name },
+                contentType = { "delivery_filter_chip" },
+            ) { chip ->
                 FilterChip(
                     selected = selectedChip == chip,
                     onClick = {

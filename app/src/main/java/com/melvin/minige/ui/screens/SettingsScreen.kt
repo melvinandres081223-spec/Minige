@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -102,7 +103,9 @@ fun SettingsScreen(
     }
 
     Box(
-        modifier = modifier.fillMaxSize(),
+        modifier = modifier
+            .fillMaxSize()
+            .imePadding(),
         contentAlignment = Alignment.TopCenter,
     ) {
         LazyColumn(
@@ -112,7 +115,7 @@ fun SettingsScreen(
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 96.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            item {
+            item(key = "pricing_commission_card", contentType = "pricing_card") {
                 ElevatedCard(
                     shape = RoundedCornerShape(20.dp),
                     modifier = Modifier.fillMaxWidth(),
@@ -186,7 +189,7 @@ fun SettingsScreen(
                 }
             }
 
-            item(key = "commission_rate_card") {
+            item(key = "commission_rate_card", contentType = "commission_rate_card") {
                 CommissionRateCard(
                     currentRate = uiState.activeCommissionRate,
                     history = uiState.commissionRateHistory,
@@ -194,7 +197,7 @@ fun SettingsScreen(
                 )
             }
 
-            item {
+            item(key = "cloud_sync_permissions_card", contentType = "cloud_sync_card") {
                 OutlinedCard(
                     shape = RoundedCornerShape(20.dp),
                     modifier = Modifier.fillMaxWidth(),

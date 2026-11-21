@@ -1,5 +1,6 @@
 package com.melvin.minige.domain
 
+import androidx.compose.runtime.Immutable
 import com.melvin.minige.util.PartialPaymentHelper
 import java.time.DayOfWeek
 import java.time.LocalDate
@@ -41,6 +42,7 @@ enum class ExpenseCategory(val label: String) {
     }
 }
 
+@Immutable
 data class DeliveryRecord(
     val id: String,
     val userId: String,
@@ -76,6 +78,7 @@ data class DeliveryRecord(
         get() = paymentType == PaymentType.PAUTANG && remainingBalance == 0
 }
 
+@Immutable
 data class UtangPaymentRecord(
     val id: String,
     val deliveryId: String,
@@ -88,6 +91,7 @@ data class UtangPaymentRecord(
     val createdAtEpochMs: Long,
 )
 
+@Immutable
 data class ExpenseRecord(
     val id: String,
     val userId: String,
@@ -100,6 +104,7 @@ data class ExpenseRecord(
     val updatedAtEpochMs: Long,
 )
 
+@Immutable
 data class CustomerRecord(
     val id: String,
     val userId: String,
@@ -132,6 +137,7 @@ object MinigeCustomerUtils {
     }
 }
 
+@Immutable
 data class DailyLedgerRecord(
     val dateKey: String,
     val userId: String,
@@ -141,6 +147,7 @@ data class DailyLedgerRecord(
     val updatedAtEpochMs: Long,
 )
 
+@Immutable
 data class MinigeSettings(
     val purifiedPrice: Int = 30,
     val alkalinePrice: Int = 40,
@@ -148,6 +155,7 @@ data class MinigeSettings(
     val defaultSukli: Int = 0,
 )
 
+@Immutable
 data class DailySummary(
     val dateKey: String,
     val directPaidGallons: Int,
@@ -165,6 +173,7 @@ data class DailySummary(
     val effectiveRateDisplay: Int?,
 )
 
+@Immutable
 data class WeeklyDaySummary(
     val date: LocalDate,
     val dateKey: String,
@@ -176,6 +185,7 @@ data class WeeklyDaySummary(
     val pickupGallons: Int,
 )
 
+@Immutable
 data class WeeklySummary(
     val monday: LocalDate,
     val saturday: LocalDate,

@@ -1,5 +1,6 @@
 package com.melvin.minige.util
 
+import androidx.compose.runtime.Immutable
 import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.PaymentType
 import java.time.Instant
@@ -7,6 +8,7 @@ import java.time.LocalDate
 import java.time.ZoneId
 import java.time.temporal.ChronoUnit
 
+@Immutable
 data class OverduePautangSummary(
     val overdueCount: Int = 0,
     val totalOverdueAmount: Int = 0,

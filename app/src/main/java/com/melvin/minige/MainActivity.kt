@@ -81,17 +81,24 @@ import com.melvin.minige.ui.screens.SettingsScreen
 import com.melvin.minige.ui.screens.TodayScreen
 import com.melvin.minige.ui.screens.WeeklyScreen
 import com.melvin.minige.ui.theme.MinigeTheme
+import com.melvin.minige.util.DisplayRefreshRateHelper
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        DisplayRefreshRateHelper.applyMaxRefreshRate(this)
         setContent {
             MinigeTheme {
                 MinigeRootApp()
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        DisplayRefreshRateHelper.applyMaxRefreshRate(this)
     }
 }
 

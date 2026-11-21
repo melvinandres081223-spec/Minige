@@ -24,6 +24,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -41,6 +42,7 @@ import com.melvin.minige.util.DeliveryVoiceParser
 import com.melvin.minige.util.PartialPaymentHelper
 import java.time.LocalDate
 
+@Immutable
 data class WeeklyCustomerTally(
     val customerId: String,
     val customerName: String,
@@ -51,6 +53,7 @@ data class WeeklyCustomerTally(
     val orderCount: Int,
 )
 
+@Immutable
 data class WeeklySukiAnalytics(
     val outletGallons: Int = 0,
     val outletPaidCommission: Int = 0,

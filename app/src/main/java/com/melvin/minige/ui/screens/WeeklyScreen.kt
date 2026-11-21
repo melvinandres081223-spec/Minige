@@ -26,6 +26,9 @@ import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -48,11 +51,15 @@ fun WeeklyScreen(
     onSyncSundayMakeupClick: (LocalDate) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val weekly = SundayMakeupHelper.applySundayMakeup(
-        baseWeekly = uiState.weeklySummary,
-        sundaySummary = uiState.sundayMakeupDaySummary,
-        enabled = uiState.sundayMakeupEnabled,
-    )
+    val weekly by remember(uiState.weeklySummary, uiState.sundayMakeupDaySummary, uiState.sundayMakeupEnabled) {
+        derivedStateOf {
+            SundayMakeupHelper.applySundayMakeup(
+                baseWeekly = uiState.weeklySummary,
+                sundaySummary = uiState.sundayMakeupDaySummary,
+                enabled = uiState.sundayMakeupEnabled,
+            )
+        }
+    }
 
     Box(
         modifier = modifier.fillMaxSize(),
@@ -65,7 +72,7 @@ fun WeeklyScreen(
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 96.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            item {
+            item(key = "weekly_summary_hero", contentType = "weekly_hero") {
                 Surface(
                     shape = RoundedCornerShape(22.dp),
                     color = MaterialTheme.colorScheme.primaryContainer,
@@ -104,7 +111,7 @@ fun WeeklyScreen(
                 }
             }
 
-            item {
+            item(key = "sunday_makeup_toggle", contentType = "sunday_toggle") {
                 SundayMakeupToggle(
                     enabled = uiState.sundayMakeupEnabled,
                     sundaySummary = uiState.sundayMakeupDaySummary,
@@ -112,11 +119,11 @@ fun WeeklyScreen(
                 )
             }
 
-            item(key = "weekly_suki_analytics") {
+            item(key = "weekly_suki_analytics", contentType = "suki_analytics") {
                 SukiAnalyticsCard(analytics = uiState.weeklySukiAnalytics)
             }
 
-            item {
+            item(key = "weekly_calendar_actions", contentType = "calendar_actions") {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(
                         onClick = onSyncCalendarClick,
@@ -159,7 +166,11 @@ fun WeeklyScreen(
                 }
             }
 
-            items(weekly.days, key = { it.dateKey }) { day ->
+            items(
+                items = weekly.days,
+                key = { it.dateKey },
+                contentType = { "weekly_day_card" },
+            ) { day ->
                 val isSelected = day.dateKey == uiState.selectedDateKey
                 val isSundayMakeup = day.date.dayOfWeek == DayOfWeek.SUNDAY
                 val suffix = buildString {

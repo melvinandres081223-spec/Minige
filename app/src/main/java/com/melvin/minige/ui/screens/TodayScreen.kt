@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -17,12 +18,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -53,9 +56,12 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -85,7 +91,10 @@ import com.melvin.minige.util.CustomerDirectoryHelper
 import com.melvin.minige.util.DeliveryVoiceParser
 import com.melvin.minige.util.PaymentBreakdownHelper
 import com.melvin.minige.util.RouteGroupingHelper
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun TodayScreen(
     uiState: MinigeUiState,
@@ -102,42 +111,61 @@ fun TodayScreen(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
     var searchQuery by remember { mutableStateOf("") }
+    var debouncedSearchQuery by remember { mutableStateOf("") }
     var selectedFilter by remember { mutableStateOf(DeliveryFilterChip.ALL) }
     var groupByArea by remember { mutableStateOf(false) }
     var showClosingSheet by remember { mutableStateOf(false) }
 
-    val filteredDeliveries = remember(uiState.deliveriesForDay, searchQuery, selectedFilter) {
-        DeliveryFilterHelper.filterDeliveries(
-            deliveries = uiState.deliveriesForDay,
-            searchQuery = searchQuery,
-            selectedChip = selectedFilter,
-        )
+    LaunchedEffect(searchQuery) {
+        if (searchQuery.isEmpty()) {
+            debouncedSearchQuery = ""
+        } else {
+            delay(120)
+            debouncedSearchQuery = searchQuery
+        }
     }
 
-    val routeGrouping = remember(groupByArea, filteredDeliveries, uiState.sukiDirectory) {
-        if (groupByArea) {
-            RouteGroupingHelper.groupDeliveriesByArea(
-                deliveriesForDay = filteredDeliveries,
-                sukiDirectory = uiState.sukiDirectory,
+    val filteredDeliveries by remember(uiState.deliveriesForDay, selectedFilter) {
+        derivedStateOf {
+            DeliveryFilterHelper.filterDeliveries(
+                deliveries = uiState.deliveriesForDay,
+                searchQuery = debouncedSearchQuery,
+                selectedChip = selectedFilter,
             )
-        } else {
-            null
+        }
+    }
+
+    val routeGrouping by remember(groupByArea, uiState.sukiDirectory) {
+        derivedStateOf {
+            if (groupByArea) {
+                RouteGroupingHelper.groupDeliveriesByArea(
+                    deliveriesForDay = filteredDeliveries,
+                    sukiDirectory = uiState.sukiDirectory,
+                )
+            } else {
+                null
+            }
         }
     }
 
     Box(
-        modifier = modifier.fillMaxSize(),
+        modifier = modifier
+            .fillMaxSize()
+            .imePadding(),
         contentAlignment = Alignment.TopCenter,
     ) {
         LazyColumn(
+            state = listState,
             modifier = Modifier
                 .fillMaxSize()
                 .widthIn(max = 600.dp),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 96.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            item(key = "daily_quota_bar") {
+            item(key = "daily_quota_bar", contentType = "quota_bar") {
                 DailyQuotaBar(
                     summary = uiState.dailySummary,
                     targetGallons = uiState.dailyQuotaTarget,
@@ -145,7 +173,7 @@ fun TodayScreen(
                 )
             }
 
-            item {
+            item(key = "date_navigator_bar", contentType = "date_nav") {
                 DateNavigatorBar(
                     dateLabel = MinigeDateUtils.formatDisplay(uiState.selectedDate),
                     onPrev = { onShiftDate(-1) },
@@ -154,14 +182,14 @@ fun TodayScreen(
                 )
             }
 
-            item {
+            item(key = "commission_hero_card", contentType = "commission_hero") {
                 CommissionHeroCard(
                     uiState = uiState,
                     onOpenClosing = { showClosingSheet = true },
                 )
             }
 
-            item {
+            item(key = "boss_pickup_update_card", contentType = "boss_pickup") {
                 BossPickupUpdateCard(
                     pickupMessage = uiState.bossPickupMessage,
                     pickupGallons = uiState.dailySummary.pickupGallons,
@@ -172,7 +200,7 @@ fun TodayScreen(
                 )
             }
 
-            item {
+            item(key = "remittance_summary_card", contentType = "remittance_summary") {
                 RemittanceSummaryCard(
                     summary = uiState.dailySummary,
                     breakdown = uiState.todayPaymentBreakdown,
@@ -183,102 +211,136 @@ fun TodayScreen(
                 )
             }
 
-            item {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
+            stickyHeader(key = "today_sticky_filter_header", contentType = "sticky_filter_header") {
+                Surface(
+                    color = MaterialTheme.colorScheme.background,
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text(
-                        text = "Deliveries & Pick-ups (${filteredDeliveries.size}/${uiState.deliveriesForDay.size})",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
+                    Column(
                         modifier = Modifier
-                            .weight(1f)
-                            .padding(end = 8.dp),
-                    )
-                    MinigeTooltipWrapper(label = "Group deliveries by route area") {
-                        FilterChip(
-                            selected = groupByArea,
-                            onClick = { groupByArea = !groupByArea },
-                            label = {
-                                Text(
-                                    text = "By Area",
-                                    maxLines = 1,
-                                    softWrap = false,
+                            .fillMaxWidth()
+                            .padding(top = 4.dp, bottom = 6.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = "Deliveries & Pick-ups (${filteredDeliveries.size}/${uiState.deliveriesForDay.size})",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(end = 8.dp),
+                            )
+                            MinigeTooltipWrapper(label = "Group deliveries by route area") {
+                                FilterChip(
+                                    selected = groupByArea,
+                                    onClick = { groupByArea = !groupByArea },
+                                    label = {
+                                        Text(
+                                            text = "By Area",
+                                            maxLines = 1,
+                                            softWrap = false,
+                                        )
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Place,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp),
+                                        )
+                                    },
+                                    modifier = Modifier.testTag("by_area_toggle_chip"),
                                 )
+                            }
+                        }
+
+                        DeliveryFilterBar(
+                            searchQuery = searchQuery,
+                            onSearchQueryChange = { searchQuery = it },
+                            selectedChip = selectedFilter,
+                            onSelectChip = { selectedFilter = it },
+                            testTagPrefix = "today_filter",
+                            onSearchFocusChanged = { focused ->
+                                if (focused) {
+                                    scope.launch {
+                                        listState.animateScrollToItem(index = 5)
+                                    }
+                                }
                             },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = Icons.Rounded.Place,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp),
-                                )
-                            },
-                            modifier = Modifier.testTag("by_area_toggle_chip"),
                         )
                     }
                 }
             }
 
-            item(key = "today_delivery_filter_bar") {
-                DeliveryFilterBar(
-                    searchQuery = searchQuery,
-                    onSearchQueryChange = { searchQuery = it },
-                    selectedChip = selectedFilter,
-                    onSelectChip = { selectedFilter = it },
-                    testTagPrefix = "today_filter",
-                )
-            }
-
             if (uiState.deliveriesForDay.isEmpty()) {
-                item {
+                item(key = "empty_deliveries", contentType = "empty_card") {
                     EmptySectionCard(
                         icon = Icons.Rounded.WaterDrop,
                         message = "No deliveries or pick-ups logged for this date. Tap + to add one.",
                     )
                 }
             } else if (filteredDeliveries.isEmpty()) {
-                item {
+                item(key = "empty_filtered_deliveries", contentType = "empty_card") {
                     EmptySectionCard(
                         icon = Icons.Rounded.WaterDrop,
                         message = "No deliveries match \"${searchQuery.ifBlank { selectedFilter.label }}\".",
                     )
                 }
-            } else if (routeGrouping != null) {
-                routeGrouping.groups.forEach { group ->
-                    item(key = "area_header_${group.areaName}") {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 4.dp, vertical = 2.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                text = "${group.areaName} • ${group.totalGallons} gal",
-                                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
-                                color = MaterialTheme.colorScheme.primary,
-                            )
-                            if (group.unvisitedSuki.isNotEmpty()) {
-                                val missedNames = group.unvisitedSuki.take(2).joinToString(", ") { it.name }
-                                val extra = if (group.unvisitedSuki.size > 2) " +${group.unvisitedSuki.size - 2}" else ""
+            } else {
+                val activeGrouping = routeGrouping
+                if (activeGrouping != null) {
+                    activeGrouping.groups.forEach { group ->
+                        item(key = "area_header_${group.areaName}", contentType = "area_header") {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 4.dp, vertical = 2.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
                                 Text(
-                                    text = "Next: $missedNames$extra",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.padding(start = 8.dp),
+                                    text = "${group.areaName} • ${group.totalGallons} gal",
+                                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                                    color = MaterialTheme.colorScheme.primary,
                                 )
+                                if (group.unvisitedSuki.isNotEmpty()) {
+                                    val missedNames = group.unvisitedSuki.take(2).joinToString(", ") { it.name }
+                                    val extra = if (group.unvisitedSuki.size > 2) " +${group.unvisitedSuki.size - 2}" else ""
+                                    Text(
+                                        text = "Next: $missedNames$extra",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.padding(start = 8.dp),
+                                    )
+                                }
                             }
                         }
+                        items(
+                            items = group.deliveries,
+                            key = { "area_${group.areaName}_${it.id}" },
+                            contentType = { "delivery_card" },
+                        ) { delivery ->
+                            DeliveryRowCard(
+                                delivery = delivery,
+                                onEdit = { onEditDelivery(delivery) },
+                                onDelete = { onDeleteDelivery(delivery.id) },
+                            )
+                        }
                     }
-                    items(group.deliveries, key = { "area_${group.areaName}_${it.id}" }) { delivery ->
+                } else {
+                    items(
+                        items = filteredDeliveries,
+                        key = { "delivery_${it.id}" },
+                        contentType = { "delivery_card" },
+                    ) { delivery ->
                         DeliveryRowCard(
                             delivery = delivery,
                             onEdit = { onEditDelivery(delivery) },
@@ -286,17 +348,9 @@ fun TodayScreen(
                         )
                     }
                 }
-            } else {
-                items(filteredDeliveries, key = { it.id }) { delivery ->
-                    DeliveryRowCard(
-                        delivery = delivery,
-                        onEdit = { onEditDelivery(delivery) },
-                        onDelete = { onDeleteDelivery(delivery.id) },
-                    )
-                }
             }
 
-            item {
+            item(key = "route_expenses_header", contentType = "section_header") {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -330,14 +384,18 @@ fun TodayScreen(
             }
 
             if (uiState.expensesForDay.isEmpty()) {
-                item {
+                item(key = "empty_expenses", contentType = "empty_card") {
                     EmptySectionCard(
                         icon = Icons.AutoMirrored.Rounded.ReceiptLong,
                         message = "No route expenses logged for this date.",
                     )
                 }
             } else {
-                items(uiState.expensesForDay, key = { it.id }) { expense ->
+                items(
+                    items = uiState.expensesForDay,
+                    key = { "expense_${it.id}" },
+                    contentType = { "expense_card" },
+                ) { expense ->
                     ExpenseRowCard(
                         expense = expense,
                         onDelete = { onDeleteExpense(expense.id) },

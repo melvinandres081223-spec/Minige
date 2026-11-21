@@ -1,5 +1,6 @@
 package com.melvin.minige.util
 
+import androidx.compose.runtime.Immutable
 import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.ExpenseRecord
 import com.melvin.minige.domain.PaymentType
@@ -32,6 +33,7 @@ enum class PaidChannel(
     ),
 }
 
+@Immutable
 data class PaymentChannelBreakdown(
     val cashPaidGallons: Int,
     val bankTransferGallons: Int,

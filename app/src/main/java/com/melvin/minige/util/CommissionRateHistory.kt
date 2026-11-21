@@ -1,10 +1,12 @@
 package com.melvin.minige.util
 
 import android.content.Context
+import androidx.compose.runtime.Immutable
 import com.melvin.minige.domain.MinigeDateUtils
 import java.time.LocalDate
 import kotlin.math.roundToInt
 
+@Immutable
 data class CommissionRateEntry(
     val effectiveDateKey: String,
     val ratePerGallon: Double,

@@ -59,7 +59,11 @@ fun CustomerSuggestionBar(
             contentPadding = PaddingValues(horizontal = 2.dp),
             modifier = Modifier.fillMaxWidth(),
         ) {
-            items(suggestions, key = { it.id }) { profile ->
+            items(
+                items = suggestions,
+                key = { it.id },
+                contentType = { "suki_suggestion_card" },
+            ) { profile ->
                 ElevatedCard(
                     onClick = { onSelectCustomer(profile) },
                     shape = RoundedCornerShape(16.dp),

@@ -22,6 +22,8 @@ import com.melvin.minige.util.CommissionRateHistory
 import com.melvin.minige.util.CustomerClassification
 import com.melvin.minige.util.CustomerDirectoryHelper
 import com.melvin.minige.util.DeliveryVoiceParser
+import com.melvin.minige.util.DisplayModeSpec
+import com.melvin.minige.util.DisplayRefreshRateHelper
 import com.melvin.minige.util.PaidChannel
 import com.melvin.minige.util.PartialPaymentHelper
 import com.melvin.minige.util.PautangOverdueHelper
@@ -644,5 +646,48 @@ class ExampleUnitTest {
             assertTrue(guide.items.isNotEmpty())
             assertTrue(guide.items.all { it.taglishExplanation.isNotBlank() && it.example.isNotBlank() })
         }
+    }
+
+    @Test
+    fun `display refresh rate helper locks highest native fps without downgrading resolution`() {
+        val modes = listOf(
+            DisplayModeSpec(modeId = 1, physicalWidth = 1080, physicalHeight = 2400, refreshRate = 60f),
+            DisplayModeSpec(modeId = 2, physicalWidth = 1080, physicalHeight = 2400, refreshRate = 90f),
+            DisplayModeSpec(modeId = 3, physicalWidth = 1080, physicalHeight = 2400, refreshRate = 120f),
+            DisplayModeSpec(modeId = 4, physicalWidth = 720, physicalHeight = 1600, refreshRate = 144f),
+        )
+
+        val optimal = DisplayRefreshRateHelper.selectHighestRefreshRateMode(
+            modes = modes,
+            activeWidth = 1080,
+            activeHeight = 2400,
+        )
+        assertEquals(3, optimal?.modeId)
+        assertEquals(120f, optimal?.refreshRate ?: 0f, 0.001f)
+
+        val fallbackOverall = DisplayRefreshRateHelper.selectHighestRefreshRateMode(
+            modes = modes,
+            activeWidth = null,
+            activeHeight = null,
+        )
+        assertEquals(4, fallbackOverall?.modeId)
+        assertNull(DisplayRefreshRateHelper.selectHighestRefreshRateMode(emptyList(), 1080, 2400))
+    }
+
+    @Test
+    fun `customer directory helper caches indexed lookup and fast searchable entries`() {
+        val customers = listOf(
+            CustomerRecord(id = "aling_rosa", userId = "u1", name = "Aling Rosa", lastUnitPrice = 25.0, updatedAtEpochMs = 10L),
+        )
+        val deliveries = listOf(
+            delivery("d1", "2026-11-21", "Aling Rosa", 4, 0, PaymentType.CASH, 100, 8, 32, "2026-11-21")
+                .copy(notes = "[Outlet] [Area:Centro]"),
+        )
+        val firstIndex = CustomerDirectoryHelper.buildIndexedDirectory(customers, deliveries, emptyList())
+        val secondIndex = CustomerDirectoryHelper.buildIndexedDirectory(customers, deliveries, emptyList())
+
+        assertTrue(firstIndex === secondIndex)
+        assertEquals("Aling Rosa", firstIndex.byNormalizedId["aling_rosa"]?.name)
+        assertEquals(1, CustomerDirectoryHelper.filterSuggestions(firstIndex.profiles, "centro").size)
     }
 }

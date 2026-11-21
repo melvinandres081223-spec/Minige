@@ -1,6 +1,8 @@
 package com.melvin.minige.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -40,8 +42,14 @@ fun UndoActionBanner(
 ) {
     AnimatedVisibility(
         visible = action != null,
-        enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-        exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
+        enter = slideInVertically(
+            animationSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing),
+            initialOffsetY = { it },
+        ) + fadeIn(animationSpec = tween(durationMillis = 140)),
+        exit = slideOutVertically(
+            animationSpec = tween(durationMillis = 140, easing = FastOutSlowInEasing),
+            targetOffsetY = { it },
+        ) + fadeOut(animationSpec = tween(durationMillis = 120)),
         modifier = modifier,
     ) {
         if (action != null) {

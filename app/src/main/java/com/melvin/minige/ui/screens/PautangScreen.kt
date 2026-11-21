@@ -1,5 +1,6 @@
 package com.melvin.minige.ui.screens
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,11 +12,13 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -35,9 +38,12 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -60,7 +66,10 @@ import com.melvin.minige.util.PaidChannel
 import com.melvin.minige.util.PartialPaymentHelper
 import com.melvin.minige.util.PautangOverdueHelper
 import com.melvin.minige.util.PaymentBreakdownHelper
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun PautangScreen(
     uiState: MinigeUiState,
@@ -68,34 +77,55 @@ fun PautangScreen(
     onRecordPartialGallonPayment: (deliveryId: String, paidGallons: Int, amount: Int, channel: PaidChannel, notes: String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
     var selectedUtang by remember { mutableStateOf<DeliveryRecord?>(null) }
     var partialPayTarget by remember { mutableStateOf<DeliveryRecord?>(null) }
     var searchQuery by remember { mutableStateOf("") }
+    var debouncedSearchQuery by remember { mutableStateOf("") }
     var selectedFilter by remember { mutableStateOf(DeliveryFilterChip.ALL) }
 
-    val totalOutstanding = uiState.activeUtangList.sumOf { it.remainingBalance }
-    val overdueSummary = remember(uiState.activeUtangList) {
-        PautangOverdueHelper.summarizeOverdue(uiState.activeUtangList)
+    LaunchedEffect(searchQuery) {
+        if (searchQuery.isEmpty()) {
+            debouncedSearchQuery = ""
+        } else {
+            delay(120)
+            debouncedSearchQuery = searchQuery
+        }
     }
-    val filteredActiveUtang = remember(uiState.activeUtangList, searchQuery, selectedFilter) {
-        DeliveryFilterHelper.filterDeliveries(uiState.activeUtangList, searchQuery, selectedFilter)
+
+    val totalOutstanding by remember(uiState.activeUtangList) {
+        derivedStateOf { uiState.activeUtangList.sumOf { it.remainingBalance } }
     }
-    val filteredSettledUtang = remember(uiState.settledUtangList, searchQuery, selectedFilter) {
-        DeliveryFilterHelper.filterDeliveries(uiState.settledUtangList, searchQuery, selectedFilter)
+    val overdueSummary by remember(uiState.activeUtangList) {
+        derivedStateOf { PautangOverdueHelper.summarizeOverdue(uiState.activeUtangList) }
+    }
+    val filteredActiveUtang by remember(uiState.activeUtangList, selectedFilter) {
+        derivedStateOf {
+            DeliveryFilterHelper.filterDeliveries(uiState.activeUtangList, debouncedSearchQuery, selectedFilter)
+        }
+    }
+    val filteredSettledUtang by remember(uiState.settledUtangList, selectedFilter) {
+        derivedStateOf {
+            DeliveryFilterHelper.filterDeliveries(uiState.settledUtangList, debouncedSearchQuery, selectedFilter)
+        }
     }
 
     Box(
-        modifier = modifier.fillMaxSize(),
+        modifier = modifier
+            .fillMaxSize()
+            .imePadding(),
         contentAlignment = Alignment.TopCenter,
     ) {
         LazyColumn(
+            state = listState,
             modifier = Modifier
                 .fillMaxSize()
                 .widthIn(max = 600.dp),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 96.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            item {
+            item(key = "pautang_summary_header", contentType = "summary_header") {
                 Surface(
                     shape = RoundedCornerShape(20.dp),
                     color = MaterialTheme.colorScheme.primaryContainer,
@@ -125,22 +155,36 @@ fun PautangScreen(
             }
 
             if (overdueSummary.overdueCount > 0) {
-                item(key = "overdue_pautang_banner") {
+                item(key = "overdue_pautang_banner", contentType = "overdue_banner") {
                     OverduePautangBanner(summary = overdueSummary)
                 }
             }
 
-            item(key = "pautang_filter_bar") {
-                DeliveryFilterBar(
-                    searchQuery = searchQuery,
-                    onSearchQueryChange = { searchQuery = it },
-                    selectedChip = selectedFilter,
-                    onSelectChip = { selectedFilter = it },
-                    testTagPrefix = "pautang_filter",
-                )
+            val filterHeaderIndex = if (overdueSummary.overdueCount > 0) 2 else 1
+            stickyHeader(key = "pautang_sticky_filter_header", contentType = "sticky_filter_header") {
+                Surface(
+                    color = MaterialTheme.colorScheme.background,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    DeliveryFilterBar(
+                        searchQuery = searchQuery,
+                        onSearchQueryChange = { searchQuery = it },
+                        selectedChip = selectedFilter,
+                        onSelectChip = { selectedFilter = it },
+                        testTagPrefix = "pautang_filter",
+                        modifier = Modifier.padding(vertical = 4.dp),
+                        onSearchFocusChanged = { focused ->
+                            if (focused) {
+                                scope.launch {
+                                    listState.animateScrollToItem(index = filterHeaderIndex)
+                                }
+                            }
+                        },
+                    )
+                }
             }
 
-            item {
+            item(key = "unpaid_utang_section_header", contentType = "section_header") {
                 Text(
                     text = "Unpaid / Partial Utang (${filteredActiveUtang.size})",
                     style = MaterialTheme.typography.titleMedium,
@@ -149,7 +193,7 @@ fun PautangScreen(
             }
 
             if (filteredActiveUtang.isEmpty()) {
-                item {
+                item(key = "empty_active_utang", contentType = "empty_card") {
                     Surface(
                         shape = RoundedCornerShape(16.dp),
                         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
@@ -173,7 +217,11 @@ fun PautangScreen(
                     }
                 }
             } else {
-                items(filteredActiveUtang, key = { it.id }) { item ->
+                items(
+                    items = filteredActiveUtang,
+                    key = { "active_utang_${it.id}" },
+                    contentType = { "active_utang_card" },
+                ) { item ->
                     val overdueDays = overdueSummary.daysElapsedByDeliveryId[item.id]
                         ?.takeIf { it >= PautangOverdueHelper.OVERDUE_THRESHOLD_DAYS }
                     ActiveUtangCard(
@@ -188,14 +236,18 @@ fun PautangScreen(
             }
 
             if (filteredSettledUtang.isNotEmpty()) {
-                item {
+                item(key = "settled_utang_section_header", contentType = "section_header") {
                     Text(
                         text = "Fully Paid Utang (${filteredSettledUtang.size})",
                         style = MaterialTheme.typography.titleMedium,
                         modifier = Modifier.padding(top = 8.dp),
                     )
                 }
-                items(filteredSettledUtang, key = { it.id }) { settled ->
+                items(
+                    items = filteredSettledUtang,
+                    key = { "settled_utang_${it.id}" },
+                    contentType = { "settled_utang_card" },
+                ) { settled ->
                     SettledUtangCard(item = settled)
                 }
             }

@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -47,6 +48,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -155,7 +157,7 @@ fun AddDeliverySheet(
 
     LaunchedEffect(initialDelivery?.id) {
         if (initialDelivery == null) {
-            delay(150)
+            delay(80)
             runCatching { customerFocusRequester.requestFocus() }
             keyboardController?.show()
         }
@@ -165,6 +167,16 @@ fun AddDeliverySheet(
     val alkalineQty = alkalineText.toIntOrNull()?.coerceAtLeast(0) ?: 0
     val totalGallons = purifiedQty + alkalineQty
 
+    var debouncedCustomerQuery by remember(initialDelivery?.id) { mutableStateOf(customerName) }
+    LaunchedEffect(customerName) {
+        if (customerName.isBlank()) {
+            debouncedCustomerQuery = ""
+        } else {
+            delay(120)
+            debouncedCustomerQuery = customerName
+        }
+    }
+
     val normalizedTypedId = remember(customerName) {
         if (customerName.isBlank()) "" else MinigeCustomerUtils.normalizeCustomerId(customerName)
     }
@@ -173,8 +185,10 @@ fun AddDeliverySheet(
         else customers.firstOrNull { it.id == normalizedTypedId }
     }
 
-    val sukiSuggestions = remember(customerName, sukiDirectory) {
-        CustomerDirectoryHelper.filterSuggestions(sukiDirectory, customerName, limit = 10)
+    val sukiSuggestions by remember(sukiDirectory) {
+        derivedStateOf {
+            CustomerDirectoryHelper.filterSuggestions(sukiDirectory, debouncedCustomerQuery, limit = 10)
+        }
     }
 
     val defaultUnitPriceForSelection = remember(purifiedQty, alkalineQty, settings) {
@@ -281,6 +295,7 @@ fun AddDeliverySheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .imePadding()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 28.dp),

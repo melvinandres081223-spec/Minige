@@ -1,8 +1,10 @@
 package com.melvin.minige.util
 
+import androidx.compose.runtime.Immutable
 import com.melvin.minige.domain.DeliveryRecord
 import kotlin.math.ceil
 
+@Immutable
 sealed interface UndoableAction {
     val message: String
     val createdAtEpochMs: Long

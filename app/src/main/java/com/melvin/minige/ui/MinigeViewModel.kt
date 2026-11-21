@@ -41,7 +41,9 @@ import com.melvin.minige.util.PaymentChannelBreakdown
 import com.melvin.minige.util.SukiCustomerProfile
 import com.melvin.minige.util.UndoStateHelper
 import com.melvin.minige.util.UndoableAction
+import androidx.compose.runtime.Immutable
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -52,12 +54,14 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import androidx.lifecycle.viewModelScope
 import java.time.LocalDate
 import java.util.UUID
 
+@Immutable
 data class MinigeUiState(
     val selectedDate: LocalDate = LocalDate.now(),
     val selectedDateKey: String = MinigeDateUtils.toKey(LocalDate.now()),
@@ -134,6 +138,7 @@ class MinigeViewModel(
     private val _undoableAction = MutableStateFlow<UndoableAction?>(null)
     val undoableAction: StateFlow<UndoableAction?> = _undoableAction.asStateFlow()
     private var undoDismissJob: Job? = null
+    @Volatile
     private var latestBundle: LocalBundle? = null
     private var pendingCalendarSyncDate: LocalDate? = null
 
@@ -301,7 +306,7 @@ class MinigeViewModel(
             isCalendarSyncing = calSyncing,
             statusMessage = status,
         )
-    }.stateIn(
+    }.flowOn(Dispatchers.Default).stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000L),
         initialValue = MinigeUiState(),

@@ -1,9 +1,12 @@
 package com.melvin.minige.util
 
+import androidx.compose.runtime.Immutable
 import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.MinigeCustomerUtils
 import com.melvin.minige.domain.PaymentType
+import java.util.Locale
 
+@Immutable
 data class RouteAreaGroup(
     val areaName: String,
     val deliveries: List<DeliveryRecord>,
@@ -12,6 +15,7 @@ data class RouteAreaGroup(
     val unvisitedSuki: List<SukiCustomerProfile>,
 )
 
+@Immutable
 data class RouteGroupingResult(
     val groups: List<RouteAreaGroup>,
     val totalUnvisitedCount: Int,
@@ -21,6 +25,14 @@ object RouteGroupingHelper {
 
     const val UNASSIGNED_AREA = "Unassigned Area"
 
+    @Volatile
+    private var lastDeliveriesRef: List<DeliveryRecord>? = null
+    @Volatile
+    private var lastDirectoryRef: List<SukiCustomerProfile>? = null
+    @Volatile
+    private var lastGroupingResult: RouteGroupingResult? = null
+    private val cacheLock = Any()
+
     fun groupDeliveriesByArea(
         deliveriesForDay: List<DeliveryRecord>,
         sukiDirectory: List<SukiCustomerProfile>,
@@ -29,9 +41,24 @@ object RouteGroupingHelper {
             return RouteGroupingResult(groups = emptyList(), totalUnvisitedCount = 0)
         }
 
+        lastGroupingResult?.let { cached ->
+            if (lastDeliveriesRef === deliveriesForDay && lastDirectoryRef === sukiDirectory) {
+                return cached
+            }
+        }
+
         val deliveredIds = deliveriesForDay
-            .map { MinigeCustomerUtils.normalizeCustomerId(it.customerName) }
-            .toSet()
+            .mapTo(HashSet(deliveriesForDay.size)) {
+                MinigeCustomerUtils.normalizeCustomerId(it.customerName)
+            }
+
+        val sukiByAreaKey = HashMap<String, MutableList<SukiCustomerProfile>>()
+        for (profile in sukiDirectory) {
+            val areaKey = profile.routeArea?.trim()?.lowercase(Locale.ENGLISH)
+            if (!areaKey.isNullOrEmpty() && profile.id !in deliveredIds) {
+                sukiByAreaKey.getOrPut(areaKey) { mutableListOf() }.add(profile)
+            }
+        }
 
         val displayNameByAreaKey = linkedMapOf<String, String>()
         val deliveriesByAreaKey = linkedMapOf<String, MutableList<DeliveryRecord>>()
@@ -41,7 +68,7 @@ object RouteGroupingHelper {
                 ?.trim()
                 ?.takeIf { it.isNotEmpty() }
                 ?: UNASSIGNED_AREA
-            val key = rawArea.lowercase()
+            val key = rawArea.lowercase(Locale.ENGLISH)
             if (!displayNameByAreaKey.containsKey(key)) {
                 displayNameByAreaKey[key] = rawArea
             }
@@ -58,10 +85,7 @@ object RouteGroupingHelper {
             val unvisited = if (areaLabel == UNASSIGNED_AREA) {
                 emptyList()
             } else {
-                sukiDirectory.filter { profile ->
-                    val profileArea = profile.routeArea?.trim()?.lowercase()
-                    profileArea == areaKey && profile.id !in deliveredIds
-                }
+                sukiByAreaKey[areaKey].orEmpty()
             }
 
             RouteAreaGroup(
@@ -73,12 +97,20 @@ object RouteGroupingHelper {
             )
         }.sortedWith(
             compareBy<RouteAreaGroup> { it.areaName == UNASSIGNED_AREA }
-                .thenBy { it.areaName.lowercase() }
+                .thenBy { it.areaName.lowercase(Locale.ENGLISH) }
         )
 
-        return RouteGroupingResult(
+        val result = RouteGroupingResult(
             groups = groups,
             totalUnvisitedCount = groups.sumOf { it.unvisitedSuki.size },
         )
+
+        synchronized(cacheLock) {
+            lastDeliveriesRef = deliveriesForDay
+            lastDirectoryRef = sukiDirectory
+            lastGroupingResult = result
+        }
+
+        return result
     }
 }
