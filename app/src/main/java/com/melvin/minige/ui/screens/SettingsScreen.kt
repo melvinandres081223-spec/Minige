@@ -55,6 +55,7 @@ import com.melvin.minige.sync.GitHubAppUpdater
 import com.melvin.minige.sync.UpdateCheckOutcome
 import com.melvin.minige.ui.MinigeUiState
 import com.melvin.minige.ui.components.CommissionRateCard
+import com.melvin.minige.ui.components.DeveloperSignatureCard
 import kotlinx.coroutines.launch
 import java.time.LocalDate
 
@@ -325,6 +326,10 @@ fun SettingsScreen(
                         }
                     }
                 }
+            }
+
+            item(key = "developer_signature_card", contentType = "developer_signature") {
+                DeveloperSignatureCard()
             }
         }
     }

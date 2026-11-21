@@ -16,6 +16,7 @@ import com.melvin.minige.ui.components.DailyClosingHelper
 import com.melvin.minige.ui.components.DailyQuotaPrefs
 import com.melvin.minige.ui.components.DeliveryFilterChip
 import com.melvin.minige.ui.components.DeliveryFilterHelper
+import com.melvin.minige.ui.components.DeveloperSignatureConfig
 import com.melvin.minige.ui.components.GuideScreenTab
 import com.melvin.minige.ui.components.ScreenGuideCatalog
 import com.melvin.minige.ui.components.SukiAnalyticsHelper
@@ -729,5 +730,14 @@ class ExampleUnitTest {
                 lastSavedPublishedAt = "",
             )
         )
+    }
+
+    @Test
+    fun `developer signature share message includes version and latest release url`() {
+        val msg = DeveloperSignatureConfig.buildShareMessage("1.0.42")
+        assertTrue(msg.contains("v1.0.42"))
+        assertTrue(msg.contains("https://github.com/melvinandres081223-spec/Minige/releases/latest"))
+        assertEquals(5, DeveloperSignatureConfig.EASTER_EGG_TAPS)
+        assertTrue(DeveloperSignatureConfig.EASTER_EGG_MESSAGE.contains("Melvin"))
     }
 }
