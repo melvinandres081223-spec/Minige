@@ -28,7 +28,10 @@ import com.melvin.minige.domain.WeeklyDaySummary
 import com.melvin.minige.domain.WeeklySummary
 import com.melvin.minige.sync.CalendarAuthResult
 import com.melvin.minige.sync.CalendarSyncManager
+import com.melvin.minige.ui.components.DailyQuotaPrefs
+import com.melvin.minige.ui.components.SukiAnalyticsHelper
 import com.melvin.minige.ui.components.SundayMakeupHelper
+import com.melvin.minige.ui.components.WeeklySukiAnalytics
 import com.melvin.minige.util.CommissionRateEntry
 import com.melvin.minige.util.CommissionRateHistory
 import com.melvin.minige.util.CustomerDirectoryHelper
@@ -91,6 +94,8 @@ data class MinigeUiState(
     val sukiDirectory: List<SukiCustomerProfile> = emptyList(),
     val commissionRateHistory: List<CommissionRateEntry> = emptyList(),
     val activeCommissionRate: Double = CommissionRateHistory.DEFAULT_RATE,
+    val dailyQuotaTarget: Int = DailyQuotaPrefs.DEFAULT_QUOTA_GALLONS,
+    val weeklySukiAnalytics: WeeklySukiAnalytics = WeeklySukiAnalytics(),
     val pendingSyncCount: Int = 0,
     val isSyncing: Boolean = false,
     val isCalendarSyncing: Boolean = false,
@@ -113,6 +118,10 @@ class MinigeViewModel(
     private val _sundayMakeupEnabled = MutableStateFlow(false)
     private val _commissionRateHistory = MutableStateFlow(
         appContext?.let { CommissionRateHistory.loadHistory(it, currentUserId) } ?: emptyList()
+    )
+    private val _dailyQuotaTarget = MutableStateFlow(
+        appContext?.let { DailyQuotaPrefs.loadQuotaTarget(it, currentUserId) }
+            ?: DailyQuotaPrefs.DEFAULT_QUOTA_GALLONS
     )
     private val _isSyncing = MutableStateFlow(false)
     private val _isCalendarSyncing = MutableStateFlow(false)
@@ -160,15 +169,26 @@ class MinigeViewModel(
         LocalBundle(deliveries, payments, expenses, ledgers, settings, customers)
     }
 
+    private data class ViewPrefsSnapshot(
+        val date: LocalDate,
+        val sundayEnabled: Boolean,
+        val rateHistory: List<CommissionRateEntry>,
+        val quotaTarget: Int,
+    )
+
     val uiState: StateFlow<MinigeUiState> = combine(
-        combine(_selectedDate, _sundayMakeupEnabled, _commissionRateHistory) { date, sundayEnabled, rateHist ->
-            Triple(date, sundayEnabled, rateHist)
+        combine(_selectedDate, _sundayMakeupEnabled, _commissionRateHistory, _dailyQuotaTarget) { date, sundayEnabled, rateHist, quotaTarget ->
+            ViewPrefsSnapshot(date, sundayEnabled, rateHist, quotaTarget)
         },
         localDataFlow,
         _isSyncing,
         _isCalendarSyncing,
         _statusMessage,
-    ) { (date, sundayEnabled, rateHist), bundle, syncing, calSyncing, status ->
+    ) { prefs, bundle, syncing, calSyncing, status ->
+        val date = prefs.date
+        val sundayEnabled = prefs.sundayEnabled
+        val rateHist = prefs.rateHistory
+        val quotaTarget = prefs.quotaTarget
         latestBundle = bundle
         val dateKey = MinigeDateUtils.toKey(date)
         val deliveriesForDay = bundle.deliveries.filter { it.dateKey == dateKey }
@@ -228,6 +248,18 @@ class MinigeViewModel(
             fallbackRate = bundle.settings.commissionRate.toDouble(),
         )
 
+        val baseWeekDates = MinigeDateUtils.weekMonToSat(date)
+        val effectiveWeekDates = if (sundayEnabled) {
+            baseWeekDates + baseWeekDates.last().plusDays(1)
+        } else {
+            baseWeekDates
+        }
+        val weeklySukiAnalytics = SukiAnalyticsHelper.compute(
+            weekDates = effectiveWeekDates,
+            deliveries = bundle.deliveries,
+            utangPayments = bundle.payments,
+        )
+
         val pendingCount = bundle.deliveries.count { it.pendingSync } +
             bundle.payments.count { it.pendingSync } +
             bundle.expenses.count { it.pendingSync } +
@@ -254,6 +286,8 @@ class MinigeViewModel(
             sukiDirectory = sukiDirectory,
             commissionRateHistory = rateHist,
             activeCommissionRate = activeRate,
+            dailyQuotaTarget = quotaTarget,
+            weeklySukiAnalytics = weeklySukiAnalytics,
             pendingSyncCount = pendingCount,
             isSyncing = syncing,
             isCalendarSyncing = calSyncing,
@@ -279,6 +313,13 @@ class MinigeViewModel(
 
     fun setSundayMakeupMode(enabled: Boolean) {
         _sundayMakeupEnabled.value = enabled
+    }
+
+    fun updateDailyQuotaTarget(targetGallons: Int) {
+        val saved = appContext?.let { DailyQuotaPrefs.saveQuotaTarget(it, currentUserId, targetGallons) }
+            ?: targetGallons.coerceIn(DailyQuotaPrefs.MIN_QUOTA_GALLONS, DailyQuotaPrefs.MAX_QUOTA_GALLONS)
+        _dailyQuotaTarget.value = saved
+        _events.tryEmit(MinigeEvent.ShowMessage("Daily hakot quota set to $saved gal"))
     }
 
     fun clearStatusMessage() {

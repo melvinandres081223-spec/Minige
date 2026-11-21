@@ -35,12 +35,15 @@ import androidx.compose.material.icons.rounded.CloudUpload
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.LocalShipping
+import androidx.compose.material.icons.rounded.Place
+import androidx.compose.material.icons.rounded.Summarize
 import androidx.compose.material.icons.rounded.WaterDrop
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -62,12 +65,16 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.ExpenseRecord
 import com.melvin.minige.domain.MinigeDateUtils
 import com.melvin.minige.domain.PaymentType
 import com.melvin.minige.ui.MinigeUiState
+import com.melvin.minige.ui.components.DailyClosingHelper
+import com.melvin.minige.ui.components.DailyClosingSheet
+import com.melvin.minige.ui.components.DailyQuotaBar
 import com.melvin.minige.ui.components.DeliveryFilterBar
 import com.melvin.minige.ui.components.DeliveryFilterChip
 import com.melvin.minige.ui.components.DeliveryFilterHelper
@@ -76,6 +83,7 @@ import com.melvin.minige.util.CommissionRateHistory
 import com.melvin.minige.util.CustomerDirectoryHelper
 import com.melvin.minige.util.DeliveryVoiceParser
 import com.melvin.minige.util.PaymentBreakdownHelper
+import com.melvin.minige.util.RouteGroupingHelper
 
 @Composable
 fun TodayScreen(
@@ -89,11 +97,14 @@ fun TodayScreen(
     onDeleteExpense: (String) -> Unit,
     onSyncCalendarClick: () -> Unit,
     onBossSendTriggered: (String) -> Unit,
+    onUpdateQuotaTarget: (Int) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     var searchQuery by remember { mutableStateOf("") }
     var selectedFilter by remember { mutableStateOf(DeliveryFilterChip.ALL) }
+    var groupByArea by remember { mutableStateOf(false) }
+    var showClosingSheet by remember { mutableStateOf(false) }
 
     val filteredDeliveries = remember(uiState.deliveriesForDay, searchQuery, selectedFilter) {
         DeliveryFilterHelper.filterDeliveries(
@@ -101,6 +112,17 @@ fun TodayScreen(
             searchQuery = searchQuery,
             selectedChip = selectedFilter,
         )
+    }
+
+    val routeGrouping = remember(groupByArea, filteredDeliveries, uiState.sukiDirectory) {
+        if (groupByArea) {
+            RouteGroupingHelper.groupDeliveriesByArea(
+                deliveriesForDay = filteredDeliveries,
+                sukiDirectory = uiState.sukiDirectory,
+            )
+        } else {
+            null
+        }
     }
 
     Box(
@@ -114,6 +136,14 @@ fun TodayScreen(
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 96.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
+            item(key = "daily_quota_bar") {
+                DailyQuotaBar(
+                    summary = uiState.dailySummary,
+                    targetGallons = uiState.dailyQuotaTarget,
+                    onUpdateTarget = onUpdateQuotaTarget,
+                )
+            }
+
             item {
                 DateNavigatorBar(
                     dateLabel = MinigeDateUtils.formatDisplay(uiState.selectedDate),
@@ -124,7 +154,10 @@ fun TodayScreen(
             }
 
             item {
-                CommissionHeroCard(uiState = uiState)
+                CommissionHeroCard(
+                    uiState = uiState,
+                    onOpenClosing = { showClosingSheet = true },
+                )
             }
 
             item {
@@ -150,12 +183,43 @@ fun TodayScreen(
             }
 
             item {
-                Text(
-                    text = "Deliveries & Pick-ups (${filteredDeliveries.size}/${uiState.deliveriesForDay.size})",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.padding(top = 4.dp),
-                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "Deliveries & Pick-ups (${filteredDeliveries.size}/${uiState.deliveriesForDay.size})",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 8.dp),
+                    )
+                    FilterChip(
+                        selected = groupByArea,
+                        onClick = { groupByArea = !groupByArea },
+                        label = {
+                            Text(
+                                text = "By Area",
+                                maxLines = 1,
+                                softWrap = false,
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Rounded.Place,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                            )
+                        },
+                        modifier = Modifier.testTag("by_area_toggle_chip"),
+                    )
+                }
             }
 
             item(key = "today_delivery_filter_bar") {
@@ -181,6 +245,43 @@ fun TodayScreen(
                         icon = Icons.Rounded.WaterDrop,
                         message = "No deliveries match \"${searchQuery.ifBlank { selectedFilter.label }}\".",
                     )
+                }
+            } else if (routeGrouping != null) {
+                routeGrouping.groups.forEach { group ->
+                    item(key = "area_header_${group.areaName}") {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 4.dp, vertical = 2.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = "${group.areaName} • ${group.totalGallons} gal",
+                                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                            if (group.unvisitedSuki.isNotEmpty()) {
+                                val missedNames = group.unvisitedSuki.take(2).joinToString(", ") { it.name }
+                                val extra = if (group.unvisitedSuki.size > 2) " +${group.unvisitedSuki.size - 2}" else ""
+                                Text(
+                                    text = "Next: $missedNames$extra",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(start = 8.dp),
+                                )
+                            }
+                        }
+                    }
+                    items(group.deliveries, key = { "area_${group.areaName}_${it.id}" }) { delivery ->
+                        DeliveryRowCard(
+                            delivery = delivery,
+                            onEdit = { onEditDelivery(delivery) },
+                            onDelete = { onDeleteDelivery(delivery.id) },
+                        )
+                    }
                 }
             } else {
                 items(filteredDeliveries, key = { it.id }) { delivery ->
@@ -242,6 +343,32 @@ fun TodayScreen(
             }
         }
     }
+
+    if (showClosingSheet) {
+        val closingData = remember(
+            uiState.selectedDateKey,
+            uiState.dailySummary,
+            uiState.todayPaymentBreakdown,
+            uiState.activeCommissionRate,
+            uiState.settings.defaultSukli,
+        ) {
+            DailyClosingHelper.compute(
+                dateKey = uiState.selectedDateKey,
+                summary = uiState.dailySummary,
+                breakdown = uiState.todayPaymentBreakdown,
+                activeCommissionRate = uiState.activeCommissionRate,
+                defaultStartingSukli = uiState.settings.defaultSukli,
+            )
+        }
+        DailyClosingSheet(
+            closingData = closingData,
+            dateLabel = MinigeDateUtils.formatDisplay(uiState.selectedDate),
+            onCopiedPrivateSummary = {
+                onBossSendTriggered("Private closing summary copied")
+            },
+            onDismiss = { showClosingSheet = false },
+        )
+    }
 }
 
 @Composable
@@ -299,7 +426,10 @@ private fun DateNavigatorBar(
 }
 
 @Composable
-private fun CommissionHeroCard(uiState: MinigeUiState) {
+private fun CommissionHeroCard(
+    uiState: MinigeUiState,
+    onOpenClosing: () -> Unit,
+) {
     val summary = uiState.dailySummary
     val weekly = uiState.weeklySummary
     val gradient = Brush.linearGradient(
@@ -332,20 +462,57 @@ private fun CommissionHeroCard(uiState: MinigeUiState) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = "Daily Commission (Personal)",
+                    text = "Daily Commission",
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 6.dp),
                 )
-                Surface(
-                    shape = CircleShape,
-                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.8f),
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(
-                        text = "Rate: ₱${CommissionRateHistory.formatRate(uiState.activeCommissionRate)}/gal",
-                        style = MaterialTheme.typography.labelMedium,
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.8f),
+                    ) {
+                        Text(
+                            text = "₱${CommissionRateHistory.formatRate(uiState.activeCommissionRate)}/gal",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            softWrap = false,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        )
+                    }
+                    Surface(
+                        onClick = onOpenClosing,
+                        shape = CircleShape,
                         color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                    )
+                        contentColor = MaterialTheme.colorScheme.onPrimary,
+                        modifier = Modifier.testTag("closing_sheet_button"),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Summarize,
+                                contentDescription = "Open end-of-day closing",
+                                modifier = Modifier.size(14.dp),
+                            )
+                            Text(
+                                text = "Closing",
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                maxLines = 1,
+                                softWrap = false,
+                            )
+                        }
+                    }
                 }
             }
 

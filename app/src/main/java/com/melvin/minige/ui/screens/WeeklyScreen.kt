@@ -32,6 +32,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.melvin.minige.domain.MinigeDateUtils
 import com.melvin.minige.ui.MinigeUiState
+import com.melvin.minige.ui.components.SukiAnalyticsCard
 import com.melvin.minige.ui.components.SundayMakeupHelper
 import com.melvin.minige.ui.components.SundayMakeupToggle
 import java.time.DayOfWeek
@@ -108,6 +109,10 @@ fun WeeklyScreen(
                     sundaySummary = uiState.sundayMakeupDaySummary,
                     onToggle = onToggleSundayMakeup,
                 )
+            }
+
+            item(key = "weekly_suki_analytics") {
+                SukiAnalyticsCard(analytics = uiState.weeklySukiAnalytics)
             }
 
             item {

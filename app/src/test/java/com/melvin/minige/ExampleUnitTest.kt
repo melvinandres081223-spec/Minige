@@ -10,8 +10,11 @@ import com.melvin.minige.domain.MinigeCustomerUtils
 import com.melvin.minige.domain.PaymentType
 import com.melvin.minige.domain.UtangMethod
 import com.melvin.minige.domain.UtangPaymentRecord
+import com.melvin.minige.ui.components.DailyClosingHelper
+import com.melvin.minige.ui.components.DailyQuotaPrefs
 import com.melvin.minige.ui.components.DeliveryFilterChip
 import com.melvin.minige.ui.components.DeliveryFilterHelper
+import com.melvin.minige.ui.components.SukiAnalyticsHelper
 import com.melvin.minige.ui.components.SundayMakeupHelper
 import com.melvin.minige.util.CommissionRateHistory
 import com.melvin.minige.util.CustomerClassification
@@ -21,6 +24,7 @@ import com.melvin.minige.util.PaidChannel
 import com.melvin.minige.util.PartialPaymentHelper
 import com.melvin.minige.util.PautangOverdueHelper
 import com.melvin.minige.util.PaymentBreakdownHelper
+import com.melvin.minige.util.RouteGroupingHelper
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -477,5 +481,129 @@ class ExampleUnitTest {
         assertEquals(listOf(unpaidPautang), DeliveryFilterHelper.filterDeliveries(all, "", DeliveryFilterChip.PAUTANG))
         assertEquals(listOf(residentialBank), DeliveryFilterHelper.filterDeliveries(all, "", DeliveryFilterChip.BANK))
         assertEquals(listOf(unpaidPautang), DeliveryFilterHelper.filterDeliveries(all, "Market", DeliveryFilterChip.ALL))
+    }
+
+    @Test
+    fun `daily closing helper computes private remittance metrics separate from boss pickup format`() {
+        val today = "2026-11-21"
+        val cash = delivery("c1", today, "Ate Maria", 10, 0, PaymentType.CASH, 300, 8, 80, today)
+        val bank = delivery("b1", today, "Canteen", 5, 0, PaymentType.BANK_DEPOSIT, 150, 8, 40, today)
+            .copy(notes = PaymentBreakdownHelper.applyChannelTag("", PaidChannel.BANK_TRANSFER))
+        val pautang = delivery("u1", today, "Kuya Jun", 3, 0, PaymentType.PAUTANG, 0, 8, 0, null)
+        val pickup = delivery("p1", today, "Nene", 12, 0, PaymentType.PICK_UP, 0, 8, 0, null)
+        val expenses = listOf(ExpenseRecord("e1", "u1", today, ExpenseCategory.GAS, 80, "", false, 0L, 0L))
+
+        val deliveries = listOf(cash, bank, pautang, pickup)
+        val summary = MinigeCalculator.calculateDailySummary(today, deliveries, emptyList(), expenses, startingSukli = 300)
+        val breakdown = PaymentBreakdownHelper.calculateBreakdown(today, deliveries, emptyList(), expenses)
+        val closing = DailyClosingHelper.compute(
+            dateKey = today,
+            summary = summary,
+            breakdown = breakdown,
+            activeCommissionRate = 8.0,
+            defaultStartingSukli = 250,
+        )
+
+        assertEquals(12, closing.totalPickedUpGallons)
+        assertEquals(15, closing.totalPaidGallons)
+        assertEquals(3, closing.pautangUnpaidGallons)
+        assertEquals(120, closing.totalCommissionEarned)
+        assertEquals(150, closing.bankTransferAmount)
+        assertEquals(300, closing.retainedSukli)
+        assertEquals(250, closing.defaultStartingSukli)
+        assertEquals(220, closing.netCashToRemitToBoss)
+
+        // Boss pickup message still contains ONLY pick-up data
+        val bossMsg = BossPickupFormatter.format(LocalDate.of(2026, 11, 21), listOf(pickup))
+        assertFalse(bossMsg.contains("₱"))
+        assertFalse(bossMsg.contains("Remit", ignoreCase = true))
+        assertTrue(DailyClosingHelper.formatPrivateClosingText(closing).contains("Net Cash to Remit to Boss: ₱220"))
+    }
+
+    @Test
+    fun `route grouping helper groups by area tag and detects unvisited suki stops`() {
+        val today = "2026-11-21"
+        val maria = delivery("d1", today, "Ate Maria", 6, 0, PaymentType.CASH, 180, 8, 48, today)
+            .copy(notes = "[Area:Poblacion]")
+        val untagged = delivery("d2", today, "Walkin", 2, 0, PaymentType.PICK_UP, 0)
+        val sukiDirectory = CustomerDirectoryHelper.buildDirectory(
+            pricingCustomers = emptyList(),
+            deliveries = listOf(
+                maria,
+                delivery("d0", "2026-11-19", "Kuya Jun", 4, 0, PaymentType.CASH, 120, 8, 32, "2026-11-19")
+                    .copy(notes = "[Area:Poblacion]"),
+            ),
+            utangPayments = emptyList(),
+        )
+
+        val result = RouteGroupingHelper.groupDeliveriesByArea(
+            deliveriesForDay = listOf(maria, untagged),
+            sukiDirectory = sukiDirectory,
+        )
+
+        assertEquals(2, result.groups.size)
+        assertEquals("Poblacion", result.groups[0].areaName)
+        assertEquals(6, result.groups[0].totalGallons)
+        assertEquals(listOf("Kuya Jun"), result.groups[0].unvisitedSuki.map { it.name })
+        assertEquals(RouteGroupingHelper.UNASSIGNED_AREA, result.groups[1].areaName)
+        assertEquals(1, result.totalUnvisitedCount)
+    }
+
+    @Test
+    fun `suki analytics helper computes weekly outlet vs residential totals and top suki`() {
+        val monday = LocalDate.of(2026, 11, 16)
+        val weekDates = com.melvin.minige.domain.MinigeDateUtils.weekMonToSat(monday)
+        val canteen = delivery("1", "2026-11-17", "Canteen Alpha", 20, 0, PaymentType.CASH, 600, 8, 160, "2026-11-17")
+            .copy(notes = "[Outlet]")
+        val home = delivery("2", "2026-11-18", "House Beta", 5, 0, PaymentType.CASH, 150, 8, 40, "2026-11-18")
+            .copy(notes = "[Residential]")
+        val partialUtang = delivery("3", "2026-11-19", "Canteen Alpha", 10, 0, PaymentType.PAUTANG, 60, 8, 0, null)
+            .copy(notes = "[Outlet]")
+        val partialPay = UtangPaymentRecord(
+            id = "p1",
+            deliveryId = "3",
+            userId = "u1",
+            dateKey = "2026-11-20",
+            amount = 60,
+            method = UtangMethod.CASH,
+            notes = PartialPaymentHelper.applyPartialGallonTag("", paidGallons = 2, commissionEarned = 16, channel = PaidChannel.CASH),
+            pendingSync = false,
+            createdAtEpochMs = 1L,
+        )
+
+        val analytics = SukiAnalyticsHelper.compute(
+            weekDates = weekDates,
+            deliveries = listOf(canteen, home, partialUtang),
+            utangPayments = listOf(partialPay),
+        )
+
+        assertEquals(30, analytics.outletGallons)
+        assertEquals(176, analytics.outletPaidCommission) // 160 direct + 16 partial pay
+        assertEquals(5, analytics.residentialGallons)
+        assertEquals(40, analytics.residentialPaidCommission)
+        assertEquals("Canteen Alpha", analytics.topSuki.first().customerName)
+        assertEquals(30, analytics.topSuki.first().totalGallons)
+        assertEquals(176, analytics.topSuki.first().commissionEarned)
+    }
+
+    @Test
+    fun `daily quota progress computes handled gallons and clamps fraction`() {
+        val today = "2026-11-21"
+        val summary = MinigeCalculator.calculateDailySummary(
+            dateKey = today,
+            deliveries = listOf(
+                delivery("c1", today, "A", 20, 0, PaymentType.CASH, 600, 8, 160, today),
+                delivery("u1", today, "B", 5, 0, PaymentType.PAUTANG, 0, 8, 0, null),
+                delivery("p1", today, "C", 10, 0, PaymentType.PICK_UP, 0, 8, 0, null),
+            ),
+            utangPayments = emptyList(),
+            expenses = emptyList(),
+            startingSukli = 0,
+        )
+        val progress = DailyQuotaPrefs.computeProgress(summary, targetGallons = 50)
+        assertEquals(35, progress.currentGallons)
+        assertEquals(50, progress.targetGallons)
+        assertEquals(160, progress.commissionEarned)
+        assertEquals(0.7f, progress.fraction, 0.001f)
     }
 }

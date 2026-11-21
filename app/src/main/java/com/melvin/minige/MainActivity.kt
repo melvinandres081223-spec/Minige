@@ -253,6 +253,7 @@ fun MinigeMainShell(
                     onBossSendTriggered = { msg ->
                         scope.launch { snackbarHostState.showSnackbar(msg) }
                     },
+                    onUpdateQuotaTarget = viewModel::updateDailyQuotaTarget,
                 )
                 MinigeTab.PAUTANG -> PautangScreen(
                     uiState = uiState,
