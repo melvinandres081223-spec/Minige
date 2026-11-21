@@ -2,6 +2,7 @@ package com.melvin.minige.ui.screens
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -10,10 +11,12 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -26,7 +29,9 @@ import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.CloudSync
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.Save
+import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -40,6 +45,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -50,6 +56,9 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.melvin.minige.domain.MinigeDateUtils
 import com.melvin.minige.ui.MinigeUiState
+import com.melvin.minige.update.GitHubAppUpdater
+import com.melvin.minige.update.UpdateCheckOutcome
+import kotlinx.coroutines.launch
 
 @Composable
 fun WeeklyReportScreen(
@@ -110,9 +119,10 @@ fun WeeklyReportScreen(
                 Button(
                     onClick = onSyncCalendarClick,
                     enabled = !uiState.isCalendarSyncing,
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(48.dp)
+                        .defaultMinSize(minHeight = 52.dp)
                         .testTag("weekly_calendar_sync_button"),
                 ) {
                     Icon(Icons.Rounded.CalendarMonth, contentDescription = null)
@@ -179,6 +189,10 @@ fun SettingsScreen(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    var isCheckingOrDownloadingUpdate by remember { mutableStateOf(false) }
+    var updateStatusText by remember { mutableStateOf<String?>(null) }
 
     var purifiedText by remember(uiState.settings.purifiedPrice) {
         mutableStateOf(uiState.settings.purifiedPrice.toString())
@@ -335,6 +349,69 @@ fun SettingsScreen(
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text("Enable Microphone for Voice Input")
                             }
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                if (isCheckingOrDownloadingUpdate) return@OutlinedButton
+                                isCheckingOrDownloadingUpdate = true
+                                updateStatusText = "Checking for updates..."
+                                Toast.makeText(context, "Checking for updates...", Toast.LENGTH_SHORT).show()
+
+                                scope.launch {
+                                    when (val outcome = GitHubAppUpdater.checkForUpdate(context)) {
+                                        is UpdateCheckOutcome.AlreadyUpToDate -> {
+                                            isCheckingOrDownloadingUpdate = false
+                                            updateStatusText = "Already up to date!"
+                                            Toast.makeText(context, "Already up to date!", Toast.LENGTH_SHORT).show()
+                                        }
+                                        is UpdateCheckOutcome.Error -> {
+                                            isCheckingOrDownloadingUpdate = false
+                                            updateStatusText = outcome.message
+                                            Toast.makeText(context, outcome.message, Toast.LENGTH_LONG).show()
+                                        }
+                                        is UpdateCheckOutcome.UpdateAvailable -> {
+                                            updateStatusText = "Downloading update..."
+                                            Toast.makeText(context, "Downloading update...", Toast.LENGTH_SHORT).show()
+                                            GitHubAppUpdater.startDownloadAndInstall(
+                                                context = context,
+                                                release = outcome.release,
+                                                onStatus = { status -> updateStatusText = status },
+                                                onFinished = { isCheckingOrDownloadingUpdate = false },
+                                            )
+                                        }
+                                    }
+                                }
+                            },
+                            enabled = !isCheckingOrDownloadingUpdate,
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .defaultMinSize(minHeight = 48.dp)
+                                .testTag("check_updates_button"),
+                        ) {
+                            if (isCheckingOrDownloadingUpdate) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp,
+                                )
+                            } else {
+                                Icon(Icons.Rounded.SystemUpdate, contentDescription = null)
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                if (isCheckingOrDownloadingUpdate) (updateStatusText ?: "Checking for updates...")
+                                else "Check for App Updates"
+                            )
+                        }
+
+                        if (!updateStatusText.isNullOrBlank()) {
+                            Text(
+                                text = updateStatusText ?: "",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.testTag("update_status_text"),
+                            )
                         }
 
                         OutlinedButton(
