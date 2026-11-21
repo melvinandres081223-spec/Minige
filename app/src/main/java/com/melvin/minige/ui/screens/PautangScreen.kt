@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -45,6 +46,9 @@ import androidx.compose.ui.unit.dp
 import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.UtangMethod
 import com.melvin.minige.ui.MinigeUiState
+import com.melvin.minige.ui.components.OverduePautangBadge
+import com.melvin.minige.ui.components.OverduePautangBanner
+import com.melvin.minige.util.PautangOverdueHelper
 
 @Composable
 fun PautangScreen(
@@ -55,6 +59,9 @@ fun PautangScreen(
     var selectedUtang by remember { mutableStateOf<DeliveryRecord?>(null) }
 
     val totalOutstanding = uiState.activeUtangList.sumOf { it.remainingBalance }
+    val overdueSummary = remember(uiState.activeUtangList) {
+        PautangOverdueHelper.summarizeOverdue(uiState.activeUtangList)
+    }
 
     Box(
         modifier = modifier.fillMaxSize(),
@@ -96,6 +103,12 @@ fun PautangScreen(
                 }
             }
 
+            if (overdueSummary.overdueCount > 0) {
+                item(key = "overdue_pautang_banner") {
+                    OverduePautangBanner(summary = overdueSummary)
+                }
+            }
+
             item {
                 Text(
                     text = "Unpaid / Partial Utang (${uiState.activeUtangList.size})",
@@ -126,9 +139,12 @@ fun PautangScreen(
                 }
             } else {
                 items(uiState.activeUtangList, key = { it.id }) { item ->
+                    val overdueDays = overdueSummary.daysElapsedByDeliveryId[item.id]
+                        ?.takeIf { it >= PautangOverdueHelper.OVERDUE_THRESHOLD_DAYS }
                     ActiveUtangCard(
                         item = item,
                         commissionRate = uiState.settings.commissionRate,
+                        overdueDays = overdueDays,
                         onCollectClick = { selectedUtang = item },
                     )
                 }
@@ -167,6 +183,7 @@ fun PautangScreen(
 private fun ActiveUtangCard(
     item: DeliveryRecord,
     commissionRate: Int,
+    overdueDays: Long?,
     onCollectClick: () -> Unit,
 ) {
     val progress = if (item.totalAmount > 0) {
@@ -194,11 +211,19 @@ private fun ActiveUtangCard(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                Text(
-                    text = "Bal: ₱${item.remainingBalance}",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.error,
-                )
+                Column(
+                    horizontalAlignment = Alignment.End,
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(
+                        text = "Bal: ₱${item.remainingBalance}",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    if (overdueDays != null) {
+                        OverduePautangBadge(daysElapsed = overdueDays)
+                    }
+                }
             }
 
             LinearProgressIndicator(
@@ -219,7 +244,9 @@ private fun ActiveUtangCard(
                 )
                 Button(
                     onClick = onCollectClick,
-                    modifier = Modifier.testTag("collect_utang_${item.id}"),
+                    modifier = Modifier
+                        .defaultMinSize(minHeight = 48.dp)
+                        .testTag("collect_utang_${item.id}"),
                 ) {
                     Text("Collect")
                 }

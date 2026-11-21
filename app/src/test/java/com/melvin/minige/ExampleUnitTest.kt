@@ -9,8 +9,10 @@ import com.melvin.minige.domain.MinigeCustomerUtils
 import com.melvin.minige.domain.PaymentType
 import com.melvin.minige.domain.UtangMethod
 import com.melvin.minige.domain.UtangPaymentRecord
+import com.melvin.minige.util.PautangOverdueHelper
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.LocalDate
 
@@ -141,5 +143,51 @@ class ExampleUnitTest {
         assertEquals("aling_nena_s_store", MinigeCustomerUtils.normalizeCustomerId("ALING NENA'S STORE"))
         assertEquals("25", MinigeCustomerUtils.formatPrice(25.0))
         assertEquals("27.5", MinigeCustomerUtils.formatPrice(27.5))
+    }
+
+    @Test
+    fun `pautang overdue helper flags 3 or more days unpaid and clears when fully paid`() {
+        val today = LocalDate.of(2026, 11, 21)
+
+        // 2 days old -> NOT overdue
+        val recentUtang = delivery("u2d", "2026-11-19", "Recent Customer", 3, 0, PaymentType.PAUTANG, 0)
+        // Exactly 3 days old (partial payment, ₱60 left of ₱90) -> OVERDUE
+        val exact3DaysUtang = delivery("u3d", "2026-11-18", "3-Day Customer", 3, 0, PaymentType.PAUTANG, 30)
+        // 5 days old unpaid -> OVERDUE
+        val old5DaysUtang = delivery("u5d", "2026-11-16", "5-Day Customer", 4, 0, PaymentType.PAUTANG, 0)
+        // 7 days old but fully paid -> NOT overdue
+        val paidOldUtang = delivery("upaid", "2026-11-14", "Paid Customer", 2, 0, PaymentType.PAUTANG, 60, 8, 16, "2026-11-21")
+        // Old direct cash -> NOT overdue
+        val oldCash = delivery("ucash", "2026-11-10", "Cash Customer", 5, 0, PaymentType.CASH, 150, 8, 40, "2026-11-10")
+
+        val summary = PautangOverdueHelper.summarizeOverdue(
+            deliveries = listOf(recentUtang, exact3DaysUtang, old5DaysUtang, paidOldUtang, oldCash),
+            referenceDate = today,
+        )
+
+        assertFalse(PautangOverdueHelper.isOverdue(recentUtang, today))
+        assertTrue(PautangOverdueHelper.isOverdue(exact3DaysUtang, today))
+        assertTrue(PautangOverdueHelper.isOverdue(old5DaysUtang, today))
+        assertFalse(PautangOverdueHelper.isOverdue(paidOldUtang, today))
+        assertFalse(PautangOverdueHelper.isOverdue(oldCash, today))
+
+        assertEquals(2, summary.overdueCount)
+        assertEquals(180, summary.totalOverdueAmount) // 60 + 120
+        assertEquals(setOf("u3d", "u5d"), summary.overdueIds)
+        assertEquals(3L, summary.daysElapsedByDeliveryId["u3d"])
+        assertEquals(5L, summary.daysElapsedByDeliveryId["u5d"])
+
+        // When u3d and u5d are marked paid, overdue alert clears completely
+        val clearedSummary = PautangOverdueHelper.summarizeOverdue(
+            deliveries = listOf(
+                recentUtang,
+                exact3DaysUtang.copy(amountPaid = 90, settledDateKey = "2026-11-21"),
+                old5DaysUtang.copy(amountPaid = 120, settledDateKey = "2026-11-21"),
+                paidOldUtang,
+            ),
+            referenceDate = today,
+        )
+        assertEquals(0, clearedSummary.overdueCount)
+        assertEquals(0, clearedSummary.totalOverdueAmount)
     }
 }
