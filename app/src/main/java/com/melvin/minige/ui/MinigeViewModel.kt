@@ -663,22 +663,24 @@ class MinigeViewModel(
     }
 
     fun syncNow() {
+        if (_isSyncing.value) return
         viewModelScope.launch {
-            _isSyncing.value = true
-            val res = repository.syncPendingToCloud(currentUserId)
-            _isSyncing.value = false
-            res.onSuccess { count ->
-                _statusMessage.value = null
-                _events.tryEmit(
-                    MinigeEvent.ShowMessage(FirestoreSyncHelper.formatSyncSuccessMessage(count))
-                )
-            }.onFailure { err ->
-                val friendlyMsg = FirestoreSyncHelper.formatSyncErrorMessage(err)
-                if (FirestoreSyncHelper.isOfflineFirestoreError(err)) {
-                    _statusMessage.value = friendlyMsg
-                }
-                _events.tryEmit(MinigeEvent.ShowMessage(friendlyMsg))
-            }
+            repository.forceCloudSync(
+                userId = currentUserId,
+                onSyncStart = { _isSyncing.value = true },
+                onSyncSuccess = { count ->
+                    _isSyncing.value = false
+                    _statusMessage.value = null
+                    _events.tryEmit(
+                        MinigeEvent.ShowMessage(FirestoreSyncHelper.formatSyncSuccessMessage(count))
+                    )
+                },
+                onSyncFailure = { message ->
+                    _isSyncing.value = false
+                    _statusMessage.value = message
+                    _events.tryEmit(MinigeEvent.ShowMessage(message))
+                },
+            )
         }
     }
 

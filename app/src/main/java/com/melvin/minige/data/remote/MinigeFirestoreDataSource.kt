@@ -84,6 +84,24 @@ class MinigeFirestoreDataSource(
         }
     }
 
+    suspend fun forceCloudSync(
+        onSyncStart: () -> Unit = {},
+        onSyncSuccess: (Int) -> Unit = {},
+        onSyncFailure: (String) -> Unit = {},
+        syncPendingItems: suspend () -> Result<Int>,
+    ) {
+        var syncedItemsCount = 0
+        FirestoreSyncHelper.forceCloudSync(
+            firestore = db,
+            onSyncStart = onSyncStart,
+            onSyncSuccess = { onSyncSuccess(syncedItemsCount) },
+            onSyncFailure = onSyncFailure,
+            extraPendingUpload = {
+                syncPendingItems().onSuccess { count -> syncedItemsCount = count }
+            },
+        )
+    }
+
     /**
      * Emits whenever Firestore receives a confirmed, non-cached snapshot with zero pending writes,
      * allowing Room's pending queue to drain automatically once mobile data or Wi-Fi reconnects.

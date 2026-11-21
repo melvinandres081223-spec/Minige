@@ -4,7 +4,10 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.firebase.firestore.FirebaseFirestoreSettings
 import com.google.firebase.firestore.PersistentCacheSettings
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withTimeout
 import java.io.IOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
@@ -17,8 +20,10 @@ class FirestoreOfflineQueuedException(
 
 object FirestoreSyncHelper {
 
+    const val FORCE_SYNC_TIMEOUT_MS = 15_000L
     const val MSG_SYNCED_TO_CLOUD = "Synced to Cloud ✓"
     const val MSG_SAVED_OFFLINE = "Saved offline — will auto-sync when online"
+    const val MSG_SYNC_TIMEOUT = "Sync timed out (15s). Mahina o walang internet connection."
 
     /**
      * Safely enables Firestore persistent local cache before the instance executes queries.
@@ -32,6 +37,61 @@ object FirestoreSyncHelper {
             db.firestoreSettings = settings
         } catch (_: IllegalStateException) {
             // Firestore already started for this named instance; existing settings remain active.
+        }
+    }
+
+    /**
+     * Resets Firestore's network socket (helps when switching between Wi-Fi and mobile data)
+     * and flushes all pending local writes within a 15-second timeout.
+     */
+    suspend fun forceCloudSync(
+        firestore: FirebaseFirestore,
+        onSyncStart: () -> Unit,
+        onSyncSuccess: () -> Unit,
+        onSyncFailure: (String) -> Unit,
+        extraPendingUpload: (suspend () -> Result<Int>)? = null,
+    ) {
+        onSyncStart()
+        try {
+            withTimeout(FORCE_SYNC_TIMEOUT_MS) {
+                // 1. Reset Firestore network socket (helpful when switching Wi-Fi / mobile data)
+                firestore.disableNetwork().await()
+                firestore.enableNetwork().await()
+
+                // 2. Upload any local Room pending records if supplied
+                if (extraPendingUpload != null) {
+                    val uploadResult = extraPendingUpload()
+                    val error = uploadResult.exceptionOrNull()
+                    if (error != null) {
+                        throw error
+                    }
+                }
+
+                // 3. Force and await upload of all pending local Firestore writes
+                firestore.waitForPendingWrites().await()
+            }
+            onSyncSuccess()
+        } catch (e: TimeoutCancellationException) {
+            ensureNetworkRestored(firestore)
+            onSyncFailure(MSG_SYNC_TIMEOUT)
+        } catch (e: CancellationException) {
+            ensureNetworkRestored(firestore)
+            throw e
+        } catch (e: Exception) {
+            ensureNetworkRestored(firestore)
+            val failureMessage = if (isOfflineFirestoreError(e)) {
+                MSG_SAVED_OFFLINE
+            } else {
+                "Sync failed: ${e.localizedMessage ?: "Hindi makakonekta sa server."}"
+            }
+            onSyncFailure(failureMessage)
+        }
+    }
+
+    private fun ensureNetworkRestored(firestore: FirebaseFirestore) {
+        try {
+            firestore.enableNetwork()
+        } catch (_: Exception) {
         }
     }
 
@@ -91,7 +151,21 @@ object FirestoreSyncHelper {
         return if (isOfflineFirestoreError(error)) {
             MSG_SAVED_OFFLINE
         } else {
-            "Sync issue: ${error.localizedMessage ?: "Please check connection and try again."}"
+            "Sync issue: ${error.localizedMessage ?: "Hindi makakonekta sa server."}"
         }
     }
+}
+
+suspend fun forceCloudSync(
+    firestore: FirebaseFirestore,
+    onSyncStart: () -> Unit,
+    onSyncSuccess: () -> Unit,
+    onSyncFailure: (String) -> Unit,
+) {
+    FirestoreSyncHelper.forceCloudSync(
+        firestore = firestore,
+        onSyncStart = onSyncStart,
+        onSyncSuccess = onSyncSuccess,
+        onSyncFailure = onSyncFailure,
+    )
 }

@@ -178,8 +178,34 @@ class MinigeRepository(
             dao.getPendingCustomers(userId).isNotEmpty()
     }
 
+    suspend fun forceCloudSync(
+        userId: String,
+        onSyncStart: () -> Unit,
+        onSyncSuccess: (Int) -> Unit,
+        onSyncFailure: (String) -> Unit,
+    ) {
+        remote.forceCloudSync(
+            onSyncStart = onSyncStart,
+            onSyncSuccess = onSyncSuccess,
+            onSyncFailure = onSyncFailure,
+            syncPendingItems = { uploadPendingRoomItems(userId) },
+        )
+    }
+
     suspend fun syncPendingToCloud(userId: String): Result<Int> {
         remote.ensureNetworkEnabled()
+        val uploadRes = uploadPendingRoomItems(userId)
+        if (uploadRes.isFailure) return uploadRes
+
+        val flushRes = remote.flushPendingWrites()
+        return if (flushRes.isFailure) {
+            Result.failure(flushRes.exceptionOrNull()!!)
+        } else {
+            uploadRes
+        }
+    }
+
+    private suspend fun uploadPendingRoomItems(userId: String): Result<Int> {
         var syncedCount = 0
         var lastError: Throwable? = null
 
@@ -246,13 +272,6 @@ class MinigeRepository(
         val (custSynced, custError) = pricingRepository.syncPendingCustomers(userId)
         syncedCount += custSynced
         if (custError != null) lastError = custError
-
-        if (lastError == null) {
-            val flushRes = remote.flushPendingWrites()
-            if (flushRes.isFailure) {
-                lastError = flushRes.exceptionOrNull()
-            }
-        }
 
         return if (lastError != null) {
             Result.failure(lastError)

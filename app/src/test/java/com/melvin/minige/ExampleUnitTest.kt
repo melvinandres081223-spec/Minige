@@ -766,5 +766,10 @@ class ExampleUnitTest {
         assertFalse(FirestoreSyncHelper.formatSyncErrorMessage(offlineMessageEx).contains("Failed to get document"))
         assertEquals("Synced to Cloud ✓", FirestoreSyncHelper.formatSyncSuccessMessage(0))
         assertEquals("Synced 3 item(s) — Synced to Cloud ✓", FirestoreSyncHelper.formatSyncSuccessMessage(3))
+        assertEquals(15_000L, FirestoreSyncHelper.FORCE_SYNC_TIMEOUT_MS)
+        assertEquals(
+            "Sync timed out (15s). Mahina o walang internet connection.",
+            FirestoreSyncHelper.MSG_SYNC_TIMEOUT,
+        )
     }
 }
