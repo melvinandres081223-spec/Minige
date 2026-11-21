@@ -19,6 +19,22 @@ android {
     versionCode = 1
     versionName = "1.0"
 
+    buildConfigField(
+      "String",
+      "GITHUB_RELEASE_API",
+      "\"https://api.github.com/repos/melvinandres081223-spec/Minige/releases/tags/latest\"",
+    )
+    buildConfigField(
+      "String",
+      "GITHUB_RELEASE_FALLBACK_API",
+      "\"https://api.github.com/repos/melvinandres081223-spec/Minige/releases/latest\"",
+    )
+    buildConfigField(
+      "String",
+      "GITHUB_APK_URL",
+      "\"https://github.com/melvinandres081223-spec/Minige/releases/download/latest/app-debug.apk\"",
+    )
+
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 

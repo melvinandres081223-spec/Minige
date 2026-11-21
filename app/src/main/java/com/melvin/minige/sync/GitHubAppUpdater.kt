@@ -10,6 +10,7 @@ import android.os.Environment
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import com.melvin.minige.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -32,12 +33,12 @@ sealed interface UpdateCheckOutcome {
 
 object GitHubAppUpdater {
 
-    internal const val RELEASES_TAG_LATEST_URL =
-        "https://api.github.com/repos/melvinandres081223-spec/Minige/releases/tags/latest"
-    internal const val RELEASES_LATEST_URL =
-        "https://api.github.com/repos/melvinandres081223-spec/Minige/releases/latest"
-    internal const val DIRECT_APK_DOWNLOAD_URL =
-        "https://github.com/melvinandres081223-spec/Minige/releases/download/latest/app-debug.apk"
+    internal val RELEASES_TAG_LATEST_URL: String
+        get() = BuildConfig.GITHUB_RELEASE_API
+    internal val RELEASES_LATEST_URL: String
+        get() = BuildConfig.GITHUB_RELEASE_FALLBACK_API
+    internal val DIRECT_APK_DOWNLOAD_URL: String
+        get() = BuildConfig.GITHUB_APK_URL
 
     internal const val USER_AGENT = "Minige-Android-Updater"
     internal const val ACCEPT_HEADER = "application/vnd.github+json"
