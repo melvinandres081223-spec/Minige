@@ -1,4 +1,4 @@
-package com.melvin.minige.update
+package com.melvin.minige.sync
 
 import android.app.DownloadManager
 import android.content.BroadcastReceiver
@@ -32,8 +32,16 @@ sealed interface UpdateCheckOutcome {
 
 object GitHubAppUpdater {
 
-    private const val RELEASES_LATEST_URL =
+    internal const val RELEASES_TAG_LATEST_URL =
+        "https://api.github.com/repos/melvinandres081223-spec/Minige/releases/tags/latest"
+    internal const val RELEASES_LATEST_URL =
         "https://api.github.com/repos/melvinandres081223-spec/Minige/releases/latest"
+    internal const val DIRECT_APK_DOWNLOAD_URL =
+        "https://github.com/melvinandres081223-spec/Minige/releases/download/latest/app-debug.apk"
+
+    internal const val USER_AGENT = "Minige-Android-Updater"
+    internal const val ACCEPT_HEADER = "application/vnd.github+json"
+
     private const val PREFS_NAME = "minige_updater_prefs"
     private const val KEY_LAST_PUBLISHED_AT = "last_installed_published_at"
     private const val APK_FILE_NAME = "Minige-update.apk"
@@ -54,24 +62,30 @@ object GitHubAppUpdater {
         val root = JSONObject(jsonBody)
         val publishedAt = root.optString("published_at")
             .ifBlank { root.optString("updated_at") }
+            .ifBlank { root.optString("created_at") }
             .trim()
-        val tagName = root.optString("tag_name").trim()
-        val assets = root.optJSONArray("assets") ?: return null
+        val tagName = root.optString("tag_name").trim().ifBlank { "latest" }
+        val assets = root.optJSONArray("assets")
 
         var apkUrl: String? = null
-        var apkName = APK_FILE_NAME
-        for (i in 0 until assets.length()) {
-            val asset = assets.optJSONObject(i) ?: continue
-            val name = asset.optString("name").trim()
-            val url = asset.optString("browser_download_url").trim()
-            if (name.endsWith(".apk", ignoreCase = true) && url.isNotEmpty()) {
-                apkUrl = url
-                apkName = name
-                break
+        var apkName = "app-debug.apk"
+        if (assets != null) {
+            for (i in 0 until assets.length()) {
+                val asset = assets.optJSONObject(i) ?: continue
+                val name = asset.optString("name").trim()
+                val url = asset.optString("browser_download_url").trim()
+                if (name.endsWith(".apk", ignoreCase = true) && url.isNotEmpty()) {
+                    apkUrl = url
+                    apkName = name
+                    break
+                }
             }
         }
 
-        if (apkUrl.isNullOrBlank() || publishedAt.isBlank()) return null
+        if (apkUrl.isNullOrBlank()) {
+            apkUrl = DIRECT_APK_DOWNLOAD_URL
+        }
+        if (publishedAt.isBlank()) return null
         return GitHubReleaseInfo(
             tagName = tagName,
             publishedAt = publishedAt,
@@ -80,16 +94,15 @@ object GitHubAppUpdater {
         )
     }
 
-    suspend fun checkForUpdate(context: Context): UpdateCheckOutcome = withContext(Dispatchers.IO) {
+    private fun fetchReleaseFromApi(apiUrl: String): Result<GitHubReleaseInfo> {
         var connection: HttpURLConnection? = null
-        try {
-            val url = URL(RELEASES_LATEST_URL)
-            connection = (url.openConnection() as HttpURLConnection).apply {
+        return try {
+            connection = (URL(apiUrl).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 connectTimeout = 15_000
                 readTimeout = 15_000
-                setRequestProperty("Accept", "application/vnd.github+json")
-                setRequestProperty("User-Agent", "Minige-Android")
+                setRequestProperty("User-Agent", USER_AGENT)
+                setRequestProperty("Accept", ACCEPT_HEADER)
             }
 
             val code = connection.responseCode
@@ -98,26 +111,87 @@ object GitHubAppUpdater {
                 val errMsg = runCatching { JSONObject(errBody).optString("message") }
                     .getOrNull()
                     ?.takeIf { it.isNotBlank() }
-                return@withContext UpdateCheckOutcome.Error(
-                    errMsg?.let { "GitHub error ($code): $it" } ?: "Update check failed (HTTP $code)"
+                return Result.failure(
+                    IllegalStateException(
+                        errMsg?.let { "GitHub error ($code): $it" } ?: "Update check failed (HTTP $code)"
+                    )
                 )
             }
 
             val body = connection.inputStream.bufferedReader().use { it.readText() }
             val release = parseLatestReleaseJson(body)
-                ?: return@withContext UpdateCheckOutcome.Error("No APK asset found in latest release.")
-
-            val lastSaved = getLastInstalledPublishedAt(context)
-            if (lastSaved.isNotEmpty() && lastSaved == release.publishedAt) {
-                UpdateCheckOutcome.AlreadyUpToDate
-            } else {
-                UpdateCheckOutcome.UpdateAvailable(release)
-            }
+                ?: return Result.failure(IllegalStateException("Release metadata missing timestamp."))
+            Result.success(release)
         } catch (e: Exception) {
-            UpdateCheckOutcome.Error(e.localizedMessage ?: "Network error while checking updates.")
+            Result.failure(e)
         } finally {
             connection?.disconnect()
         }
+    }
+
+    private fun probeDirectApkFallback(): Result<GitHubReleaseInfo> {
+        var connection: HttpURLConnection? = null
+        return try {
+            connection = (URL(DIRECT_APK_DOWNLOAD_URL).openConnection() as HttpURLConnection).apply {
+                requestMethod = "HEAD"
+                instanceFollowRedirects = true
+                connectTimeout = 15_000
+                readTimeout = 15_000
+                setRequestProperty("User-Agent", USER_AGENT)
+                setRequestProperty("Accept", ACCEPT_HEADER)
+            }
+
+            val code = connection.responseCode
+            if (code in 200..299) {
+                val versionToken = connection.getHeaderField("Last-Modified")?.trim()
+                    ?.takeIf { it.isNotEmpty() }
+                    ?: connection.getHeaderField("ETag")?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: "direct-latest"
+                Result.success(
+                    GitHubReleaseInfo(
+                        tagName = "latest",
+                        publishedAt = versionToken,
+                        apkDownloadUrl = DIRECT_APK_DOWNLOAD_URL,
+                        apkFileName = "app-debug.apk",
+                    )
+                )
+            } else {
+                Result.failure(IllegalStateException("Update check failed (HTTP $code)"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        } finally {
+            connection?.disconnect()
+        }
+    }
+
+    suspend fun checkForUpdate(context: Context): UpdateCheckOutcome = withContext(Dispatchers.IO) {
+        val primaryResult = fetchReleaseFromApi(RELEASES_TAG_LATEST_URL)
+        val releaseResult = if (primaryResult.isSuccess) {
+            primaryResult
+        } else {
+            val latestResult = fetchReleaseFromApi(RELEASES_LATEST_URL)
+            if (latestResult.isSuccess) {
+                latestResult
+            } else {
+                val directResult = probeDirectApkFallback()
+                if (directResult.isSuccess) directResult else latestResult
+            }
+        }
+
+        releaseResult.fold(
+            onSuccess = { release ->
+                val lastSaved = getLastInstalledPublishedAt(context)
+                if (lastSaved.isNotEmpty() && lastSaved == release.publishedAt) {
+                    UpdateCheckOutcome.AlreadyUpToDate
+                } else {
+                    UpdateCheckOutcome.UpdateAvailable(release)
+                }
+            },
+            onFailure = { err ->
+                UpdateCheckOutcome.Error(err.localizedMessage ?: "Network error while checking updates.")
+            },
+        )
     }
 
     /**
@@ -139,6 +213,7 @@ object GitHubAppUpdater {
 
         val downloadManager = appContext.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
         val request = DownloadManager.Request(Uri.parse(release.apkDownloadUrl)).apply {
+            addRequestHeader("User-Agent", USER_AGENT)
             setTitle("Minige Update")
             setDescription("Downloading ${release.apkFileName}...")
             setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)

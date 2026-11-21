@@ -46,8 +46,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.credentials.CredentialManager
 import com.melvin.minige.R
-import com.melvin.minige.auth.attemptAutoSignIn
-import com.melvin.minige.auth.onGoogleSignInClicked
+import com.melvin.minige.auth.GoogleAuthManager
 
 @Composable
 fun AuthScreen(
@@ -62,7 +61,7 @@ fun AuthScreen(
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
-        attemptAutoSignIn(
+        GoogleAuthManager.attemptAutoSignIn(
             context = context,
             credentialManager = credentialManager,
             onAuthSuccess = {
@@ -152,7 +151,7 @@ fun AuthScreen(
                         onClick = {
                             errorMessage = null
                             isLoading = true
-                            onGoogleSignInClicked(
+                            GoogleAuthManager.signInWithGoogle(
                                 context = context,
                                 credentialManager = credentialManager,
                                 onAuthSuccess = {

@@ -6,7 +6,7 @@ import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.test.core.app.ApplicationProvider
 import com.melvin.minige.data.local.CustomerEntity
 import com.melvin.minige.data.local.MinigeDatabase
-import com.melvin.minige.update.GitHubAppUpdater
+import com.melvin.minige.sync.GitHubAppUpdater
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -62,10 +62,25 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `github release parser returns null when no apk asset exists`() {
+    fun `github release parser falls back to direct apk download url and checks required endpoints and headers`() {
+        assertEquals(
+            "https://api.github.com/repos/melvinandres081223-spec/Minige/releases/tags/latest",
+            GitHubAppUpdater.RELEASES_TAG_LATEST_URL
+        )
+        assertEquals(
+            "https://api.github.com/repos/melvinandres081223-spec/Minige/releases/latest",
+            GitHubAppUpdater.RELEASES_LATEST_URL
+        )
+        assertEquals(
+            "https://github.com/melvinandres081223-spec/Minige/releases/download/latest/app-debug.apk",
+            GitHubAppUpdater.DIRECT_APK_DOWNLOAD_URL
+        )
+        assertEquals("Minige-Android-Updater", GitHubAppUpdater.USER_AGENT)
+        assertEquals("application/vnd.github+json", GitHubAppUpdater.ACCEPT_HEADER)
+
         val noApkJson = """
             {
-              "tag_name": "v1.2.0",
+              "tag_name": "latest",
               "published_at": "2026-11-20T14:30:00Z",
               "assets": [
                 { "name": "source.zip", "browser_download_url": "https://example.com/source.zip" }
@@ -73,7 +88,12 @@ class ExampleRobolectricTest {
             }
         """.trimIndent()
 
-        assertNull(GitHubAppUpdater.parseLatestReleaseJson(noApkJson))
+        val fallbackParsed = GitHubAppUpdater.parseLatestReleaseJson(noApkJson)
+        assertEquals(GitHubAppUpdater.DIRECT_APK_DOWNLOAD_URL, fallbackParsed?.apkDownloadUrl)
+        assertEquals("app-debug.apk", fallbackParsed?.apkFileName)
+
+        val missingTimestampJson = """{ "tag_name": "latest", "assets": [] }"""
+        assertNull(GitHubAppUpdater.parseLatestReleaseJson(missingTimestampJson))
     }
 
     @Test

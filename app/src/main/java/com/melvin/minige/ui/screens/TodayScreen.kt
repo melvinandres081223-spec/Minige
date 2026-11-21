@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,7 +15,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -48,18 +48,18 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Surface
-import androidx.compose.foundation.clickable
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.ExpenseRecord
@@ -68,7 +68,7 @@ import com.melvin.minige.domain.PaymentType
 import com.melvin.minige.ui.MinigeUiState
 
 @Composable
-fun TodayDashboardScreen(
+fun TodayScreen(
     uiState: MinigeUiState,
     onShiftDate: (Long) -> Unit,
     onJumpToday: () -> Unit,
@@ -393,7 +393,6 @@ private fun BossPickupUpdateCard(
                     }
                 }
 
-                // Prominent full-width 1-Tap Update / Send to Boss button underneath summary
                 Button(
                     onClick = onSendToBoss,
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
@@ -548,7 +547,7 @@ private fun RemittanceBreakdownCard(
 
 @Composable
 private fun MetricLine(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    icon: ImageVector,
     label: String,
     value: String,
 ) {
@@ -719,7 +718,7 @@ private fun ExpenseRowCard(
 
 @Composable
 private fun EmptySectionCard(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    icon: ImageVector,
     message: String,
 ) {
     Surface(

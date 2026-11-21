@@ -1,7 +1,6 @@
 package com.melvin.minige.data
 
 import com.melvin.minige.data.local.AppSettingsEntity
-import com.melvin.minige.data.local.CustomerEntity
 import com.melvin.minige.data.local.DailyLedgerEntity
 import com.melvin.minige.data.local.DeliveryEntity
 import com.melvin.minige.data.local.ExpenseEntity
@@ -13,7 +12,6 @@ import com.melvin.minige.domain.DailyLedgerRecord
 import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.ExpenseCategory
 import com.melvin.minige.domain.ExpenseRecord
-import com.melvin.minige.domain.MinigeCustomerUtils
 import com.melvin.minige.domain.MinigeSettings
 import com.melvin.minige.domain.PaymentType
 import com.melvin.minige.domain.UtangMethod
@@ -31,6 +29,7 @@ import kotlin.math.roundToInt
 class MinigeRepository(
     private val dao: MinigeDao,
     private val remote: MinigeFirestoreDataSource,
+    private val pricingRepository: PricingRepository = PricingRepository(dao, remote),
 ) {
     fun observeDeliveries(userId: String): Flow<List<DeliveryRecord>> =
         dao.observeDeliveries(userId).map { list -> list.map { it.toDomain() } }
@@ -48,7 +47,7 @@ class MinigeRepository(
         dao.observeSettings().map { it?.toDomain() ?: MinigeSettings() }
 
     fun observeCustomers(userId: String): Flow<List<CustomerRecord>> =
-        dao.observeCustomers(userId).map { list -> list.map { it.toDomain() } }
+        pricingRepository.observeCustomers(userId)
 
     /**
      * Streams Firestore collections into local Room cache while preserving any un-synced local edits.
@@ -135,11 +134,7 @@ class MinigeRepository(
                     onError(e)
                 }
                 .collectLatest { remoteCustomers ->
-                    val pendingIds = dao.getPendingCustomers(userId).map { it.id }.toSet()
-                    val filtered = remoteCustomers.filterNot { it.id in pendingIds }
-                    if (filtered.isNotEmpty()) {
-                        dao.upsertCustomers(filtered)
-                    }
+                    pricingRepository.applyRemoteCustomers(userId, remoteCustomers)
                 }
         }
     }
@@ -205,15 +200,9 @@ class MinigeRepository(
             }
         }
 
-        dao.getPendingCustomers(userId).forEach { customer ->
-            val result = remote.upsertCustomer(userId, customer)
-            if (result.isSuccess) {
-                dao.markCustomerSynced(customer.id)
-                syncedCount++
-            } else {
-                lastError = result.exceptionOrNull()
-            }
-        }
+        val (custSynced, custError) = pricingRepository.syncPendingCustomers(userId)
+        syncedCount += custSynced
+        if (custError != null) lastError = custError
 
         return if (lastError != null && syncedCount == 0) {
             Result.failure(lastError)
@@ -303,7 +292,7 @@ class MinigeRepository(
             dao.markDeliverySynced(id)
         }
 
-        rememberCustomerPrice(
+        pricingRepository.rememberCustomerPrice(
             userId = userId,
             customerName = cleanName,
             unitPriceToSave = if (paymentType != PaymentType.PICK_UP) {
@@ -401,7 +390,7 @@ class MinigeRepository(
             dao.markDeliverySynced(deliveryId)
         }
 
-        rememberCustomerPrice(
+        pricingRepository.rememberCustomerPrice(
             userId = userId,
             customerName = cleanName,
             unitPriceToSave = if (paymentType != PaymentType.PICK_UP) {
@@ -415,30 +404,6 @@ class MinigeRepository(
         )
 
         return syncResult
-    }
-
-    private suspend fun rememberCustomerPrice(
-        userId: String,
-        customerName: String,
-        unitPriceToSave: Double?,
-        now: Long,
-    ) {
-        val customerId = MinigeCustomerUtils.normalizeCustomerId(customerName)
-        val existingCustomer = dao.getCustomerById(customerId)
-        val resolvedPrice = unitPriceToSave ?: existingCustomer?.lastUnitPrice
-        val customerEntity = CustomerEntity(
-            id = customerId,
-            userId = userId,
-            name = customerName,
-            lastUnitPrice = resolvedPrice,
-            pendingSync = true,
-            updatedAtEpochMs = now,
-        )
-        dao.upsertCustomer(customerEntity)
-        val custSync = remote.upsertCustomer(userId, customerEntity)
-        if (custSync.isSuccess) {
-            dao.markCustomerSynced(customerId)
-        }
     }
 
     /**

@@ -1,4 +1,4 @@
-package com.melvin.minige.calendar
+package com.melvin.minige.sync
 
 import android.content.Context
 import android.content.Intent
@@ -28,7 +28,7 @@ sealed interface CalendarAuthResult {
     data class Failure(val message: String) : CalendarAuthResult
 }
 
-object GoogleCalendarSyncHelper {
+object CalendarSyncManager {
 
     private val calendarScope = Scope(CalendarScopes.CALENDAR_EVENTS)
 

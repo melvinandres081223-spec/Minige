@@ -8,9 +8,8 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.google.firebase.firestore.FirebaseFirestore
 import com.melvin.minige.R
-import com.melvin.minige.calendar.CalendarAuthResult
-import com.melvin.minige.calendar.GoogleCalendarSyncHelper
 import com.melvin.minige.data.MinigeRepository
+import com.melvin.minige.data.PricingRepository
 import com.melvin.minige.data.local.MinigeDatabase
 import com.melvin.minige.data.remote.MinigeFirestoreDataSource
 import com.melvin.minige.domain.BossPickupFormatter
@@ -20,13 +19,14 @@ import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.ExpenseCategory
 import com.melvin.minige.domain.ExpenseRecord
 import com.melvin.minige.domain.MinigeCalculator
-import com.melvin.minige.domain.MinigeCustomerUtils
 import com.melvin.minige.domain.MinigeDateUtils
 import com.melvin.minige.domain.MinigeSettings
 import com.melvin.minige.domain.PaymentType
 import com.melvin.minige.domain.UtangMethod
 import com.melvin.minige.domain.UtangPaymentRecord
 import com.melvin.minige.domain.WeeklySummary
+import com.melvin.minige.sync.CalendarAuthResult
+import com.melvin.minige.sync.CalendarSyncManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -79,6 +79,7 @@ sealed interface MinigeEvent {
 
 class MinigeViewModel(
     private val repository: MinigeRepository,
+    private val pricingRepository: PricingRepository,
     private val currentUserId: String,
 ) : ViewModel() {
 
@@ -163,24 +164,10 @@ class MinigeViewModel(
         val activeUtang = allUtang.filter { !it.isUtangFullyPaid }
         val settledUtang = allUtang.filter { it.isUtangFullyPaid }
 
-        // Merge saved customer records with any historical delivery names not yet in customers table
-        val customerById = bundle.customers.associateBy { it.id }.toMutableMap()
-        bundle.deliveries.forEach { d ->
-            val cid = MinigeCustomerUtils.normalizeCustomerId(d.customerName)
-            if (cid !in customerById) {
-                val fallbackPrice = if (d.paymentType != PaymentType.PICK_UP) {
-                    (if (d.alkalineGallons > 0 && d.purifiedGallons == 0) d.alkalineUnitPrice else d.purifiedUnitPrice).toDouble()
-                } else null
-                customerById[cid] = CustomerRecord(
-                    id = cid,
-                    userId = d.userId,
-                    name = d.customerName,
-                    lastUnitPrice = fallbackPrice,
-                    updatedAtEpochMs = d.updatedAtEpochMs,
-                )
-            }
-        }
-        val mergedCustomers = customerById.values.sortedByDescending { it.updatedAtEpochMs }
+        val mergedCustomers = pricingRepository.mergeWithHistoricalDeliveries(
+            savedCustomers = bundle.customers,
+            deliveries = bundle.deliveries,
+        )
 
         val pendingCount = bundle.deliveries.count { it.pendingSync } +
             bundle.payments.count { it.pendingSync } +
@@ -402,7 +389,7 @@ class MinigeViewModel(
     fun triggerCalendarSync(context: android.content.Context) {
         viewModelScope.launch {
             _isCalendarSyncing.value = true
-            when (val auth = GoogleCalendarSyncHelper.requestCalendarAuthorization(context)) {
+            when (val auth = CalendarSyncManager.requestCalendarAuthorization(context)) {
                 is CalendarAuthResult.Authorized -> {
                     syncDayWithCalendarToken(auth.accessToken)
                 }
@@ -422,7 +409,7 @@ class MinigeViewModel(
         val snapshot = uiState.value
         viewModelScope.launch {
             _isCalendarSyncing.value = true
-            val res = GoogleCalendarSyncHelper.syncDailyDeliveriesToCalendar(
+            val res = CalendarSyncManager.syncDailyDeliveriesToCalendar(
                 accessToken = accessToken,
                 dateKey = snapshot.selectedDateKey,
                 deliveries = snapshot.deliveriesForDay,
@@ -464,11 +451,19 @@ class MinigeViewModel(
                 val databaseId = app.getString(R.string.firestore_database_id)
                 val firestore = FirebaseFirestore.getInstance(databaseId)
                 val roomDb = MinigeDatabase.getInstance(app)
+                val dao = roomDb.minigeDao()
+                val remote = MinigeFirestoreDataSource(firestore)
+                val pricingRepo = PricingRepository(dao = dao, remote = remote)
                 val repo = MinigeRepository(
-                    dao = roomDb.minigeDao(),
-                    remote = MinigeFirestoreDataSource(firestore),
+                    dao = dao,
+                    remote = remote,
+                    pricingRepository = pricingRepo,
                 )
-                MinigeViewModel(repo, currentUserId)
+                MinigeViewModel(
+                    repository = repo,
+                    pricingRepository = pricingRepo,
+                    currentUserId = currentUserId,
+                )
             }
         }
     }

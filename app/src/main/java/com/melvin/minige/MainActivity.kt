@@ -59,12 +59,9 @@ import androidx.compose.ui.unit.dp
 import androidx.credentials.CredentialManager
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.google.firebase.Firebase
-import com.google.firebase.auth.auth
-import com.melvin.minige.auth.authStateFlow
-import com.melvin.minige.auth.signOutFromGoogleAndFirebase
-import com.melvin.minige.calendar.GoogleCalendarSyncHelper
+import com.melvin.minige.auth.GoogleAuthManager
 import com.melvin.minige.domain.DeliveryRecord
+import com.melvin.minige.sync.CalendarSyncManager
 import com.melvin.minige.ui.MinigeEvent
 import com.melvin.minige.ui.MinigeViewModel
 import com.melvin.minige.ui.screens.AddDeliverySheet
@@ -73,8 +70,8 @@ import com.melvin.minige.ui.screens.AuthScreen
 import com.melvin.minige.ui.screens.EditSukliDialog
 import com.melvin.minige.ui.screens.PautangScreen
 import com.melvin.minige.ui.screens.SettingsScreen
-import com.melvin.minige.ui.screens.TodayDashboardScreen
-import com.melvin.minige.ui.screens.WeeklyReportScreen
+import com.melvin.minige.ui.screens.TodayScreen
+import com.melvin.minige.ui.screens.WeeklyScreen
 import com.melvin.minige.ui.theme.MinigeTheme
 import kotlinx.coroutines.launch
 
@@ -102,8 +99,8 @@ private enum class MinigeTab(
 
 @Composable
 fun MinigeRootApp() {
-    val auth = Firebase.auth
-    val currentUser by auth.authStateFlow().collectAsStateWithLifecycle(initialValue = auth.currentUser)
+    val currentUser by GoogleAuthManager.authStateFlow()
+        .collectAsStateWithLifecycle(initialValue = GoogleAuthManager.currentUser())
     val user = currentUser
 
     if (user == null) {
@@ -146,7 +143,7 @@ fun MinigeMainShell(
         contract = ActivityResultContracts.StartIntentSenderForResult(),
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
-            val token = GoogleCalendarSyncHelper.extractTokenFromIntent(context, result.data)
+            val token = CalendarSyncManager.extractTokenFromIntent(context, result.data)
             if (!token.isNullOrBlank()) {
                 viewModel.syncDayWithCalendarToken(token)
             } else {
@@ -240,7 +237,7 @@ fun MinigeMainShell(
                 .padding(innerPadding),
         ) {
             when (selectedTab) {
-                MinigeTab.TODAY -> TodayDashboardScreen(
+                MinigeTab.TODAY -> TodayScreen(
                     uiState = uiState,
                     onShiftDate = viewModel::shiftDate,
                     onJumpToday = viewModel::jumpToToday,
@@ -261,7 +258,7 @@ fun MinigeMainShell(
                     uiState = uiState,
                     onRecordPayment = viewModel::recordUtangPayment,
                 )
-                MinigeTab.WEEKLY -> WeeklyReportScreen(
+                MinigeTab.WEEKLY -> WeeklyScreen(
                     uiState = uiState,
                     onSelectDate = { date ->
                         viewModel.selectDate(date)
@@ -275,7 +272,7 @@ fun MinigeMainShell(
                     onSaveSettings = viewModel::updateSettings,
                     onSyncNow = viewModel::syncNow,
                     onSignOut = {
-                        signOutFromGoogleAndFirebase(
+                        GoogleAuthManager.signOut(
                             credentialManager = credentialManager,
                             scope = scope,
                         )
