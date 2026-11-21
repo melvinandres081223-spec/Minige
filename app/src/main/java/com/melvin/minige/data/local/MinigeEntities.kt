@@ -2,6 +2,7 @@ package com.melvin.minige.data.local
 
 import androidx.room.Entity
 import androidx.room.PrimaryKey
+import com.melvin.minige.domain.CustomerRecord
 import com.melvin.minige.domain.DailyLedgerRecord
 import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.ExpenseCategory
@@ -144,5 +145,24 @@ data class AppSettingsEntity(
         alkalinePrice = alkalinePrice,
         commissionRate = commissionRate,
         defaultSukli = defaultSukli,
+    )
+}
+
+@Entity(tableName = "customers")
+data class CustomerEntity(
+    @PrimaryKey val id: String,
+    val userId: String,
+    val name: String,
+    val lastUnitPrice: Double?,
+    val pendingSync: Boolean,
+    val updatedAtEpochMs: Long,
+) {
+    fun toDomain(): CustomerRecord = CustomerRecord(
+        id = id,
+        userId = userId,
+        name = name,
+        lastUnitPrice = lastUnitPrice,
+        pendingSync = pendingSync,
+        updatedAtEpochMs = updatedAtEpochMs,
     )
 }

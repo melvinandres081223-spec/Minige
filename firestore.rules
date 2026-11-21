@@ -83,6 +83,12 @@ service cloud.firestore {
              data.defaultSukli is int && data.defaultSukli >= 0 && data.defaultSukli <= 1000000;
     }
 
+    function isValidCustomer(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
+             (!('lastUnitPrice' in data) || data.lastUnitPrice == null || (data.lastUnitPrice is number && data.lastUnitPrice >= 0 && data.lastUnitPrice <= 10000));
+    }
+
     match /users/{userId}/deliveries/{deliveryId} {
       allow get: if isOwner(userId) && isValidId(deliveryId);
       allow list: if isOwner(userId);
@@ -247,6 +253,36 @@ service cloud.firestore {
                        ]);
 
       allow delete: if isOwner(userId) && isValidId(settingId);
+    }
+
+    match /users/{userId}/customers/{customerId} {
+      allow get: if isOwner(userId) && isValidId(customerId);
+      allow list: if isOwner(userId);
+
+      allow create: if isOwner(userId) &&
+                       isValidId(customerId) &&
+                       incoming().userId == userId &&
+                       incoming().keys().hasAll([
+                         'userId', 'name', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'name', 'lastUnitPrice', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                       isValidCustomer(incoming());
+
+      allow update: if isOwner(userId) &&
+                       isValidId(customerId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                       isValidCustomer(incoming()) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'name', 'lastUnitPrice', 'updatedAt'
+                       ]);
+
+      allow delete: if isOwner(userId) && isValidId(customerId);
     }
   }
 }

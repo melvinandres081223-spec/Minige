@@ -5,6 +5,7 @@ import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.ExpenseCategory
 import com.melvin.minige.domain.ExpenseRecord
 import com.melvin.minige.domain.MinigeCalculator
+import com.melvin.minige.domain.MinigeCustomerUtils
 import com.melvin.minige.domain.PaymentType
 import com.melvin.minige.domain.UtangMethod
 import com.melvin.minige.domain.UtangPaymentRecord
@@ -132,5 +133,13 @@ class ExampleUnitTest {
         assertFalse(formatted.contains("Secret Cash"))
         assertFalse(formatted.contains("₱"))
         assertFalse(formatted.contains("Commission", ignoreCase = true))
+    }
+
+    @Test
+    fun `customer utils normalize ids and format prices cleanly`() {
+        assertEquals("aling_nena_s_store", MinigeCustomerUtils.normalizeCustomerId("  Aling Nena's Store! "))
+        assertEquals("aling_nena_s_store", MinigeCustomerUtils.normalizeCustomerId("ALING NENA'S STORE"))
+        assertEquals("25", MinigeCustomerUtils.formatPrice(25.0))
+        assertEquals("27.5", MinigeCustomerUtils.formatPrice(27.5))
     }
 }

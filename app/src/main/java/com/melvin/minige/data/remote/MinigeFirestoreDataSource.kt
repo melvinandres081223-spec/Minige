@@ -10,6 +10,7 @@ import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.firebase.firestore.snapshots
 import com.melvin.minige.R
 import com.melvin.minige.data.local.AppSettingsEntity
+import com.melvin.minige.data.local.CustomerEntity
 import com.melvin.minige.data.local.DailyLedgerEntity
 import com.melvin.minige.data.local.DeliveryEntity
 import com.melvin.minige.data.local.ExpenseEntity
@@ -242,6 +243,45 @@ class MinigeFirestoreDataSource(
         return try {
             val uid = requireUserId(userId)
             val docRef = db.collection("users").document(uid).collection("settings").document("config")
+            val snap = docRef.get().await()
+            if (snap.exists()) {
+                docRef.update(entity.toFirestoreUpdateMap()).await()
+            } else {
+                docRef.set(entity.toFirestoreCreateMap(uid)).await()
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, path)
+            Result.failure(e)
+        }
+    }
+
+    fun observeCustomers(userId: String): Flow<List<CustomerEntity>> = flow {
+        val uid = requireUserId(userId)
+        val path = "users/$uid/customers"
+        emitAll(
+            db.collection("users").document(uid).collection("customers")
+                .snapshots()
+                .map { snap ->
+                    snap.toObjects(
+                        FirestoreCustomer::class.java,
+                        DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
+                    ).map { it.toEntity(pendingSync = false) }
+                }
+                .catch { error ->
+                    logSnapshotErrorIfActive(error, uid, path)
+                    throw error
+                }
+        )
+    }
+
+    suspend fun upsertCustomer(userId: String, entity: CustomerEntity): Result<Unit> {
+        val path = "users/$userId/customers/${entity.id}"
+        return try {
+            val uid = requireUserId(userId)
+            val docRef = db.collection("users").document(uid).collection("customers").document(entity.id)
             val snap = docRef.get().await()
             if (snap.exists()) {
                 docRef.update(entity.toFirestoreUpdateMap()).await()

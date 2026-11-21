@@ -1,8 +1,14 @@
 package com.melvin.minige
 
 import android.content.Context
+import androidx.room.Room
+import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.test.core.app.ApplicationProvider
+import com.melvin.minige.data.local.CustomerEntity
+import com.melvin.minige.data.local.MinigeDatabase
 import com.melvin.minige.update.GitHubAppUpdater
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -68,5 +74,76 @@ class ExampleRobolectricTest {
         """.trimIndent()
 
         assertNull(GitHubAppUpdater.parseLatestReleaseJson(noApkJson))
+    }
+
+    @Test
+    fun `room customer dao persists and updates per-customer custom unit price`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, MinigeDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        try {
+            val dao = db.minigeDao()
+            dao.upsertCustomer(
+                CustomerEntity(
+                    id = "aling_nena",
+                    userId = "u1",
+                    name = "Aling Nena",
+                    lastUnitPrice = 25.0,
+                    pendingSync = true,
+                    updatedAtEpochMs = 100L,
+                )
+            )
+
+            val saved = dao.getCustomerById("aling_nena")
+            assertEquals(25.0, saved?.lastUnitPrice ?: 0.0, 0.001)
+
+            // Update price on subsequent delivery
+            dao.upsertCustomer(
+                CustomerEntity(
+                    id = "aling_nena",
+                    userId = "u1",
+                    name = "Aling Nena",
+                    lastUnitPrice = 28.0,
+                    pendingSync = false,
+                    updatedAtEpochMs = 200L,
+                )
+            )
+            val list = dao.observeCustomers("u1").first()
+            assertEquals(1, list.size)
+            assertEquals(28.0, list.first().lastUnitPrice ?: 0.0, 0.001)
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun `migration 1 to 2 creates customers table without errors`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val helper = FrameworkSQLiteOpenHelperFactory().create(
+            androidx.sqlite.db.SupportSQLiteOpenHelper.Configuration.builder(context)
+                .name(null) // in-memory SQLite
+                .callback(object : androidx.sqlite.db.SupportSQLiteOpenHelper.Callback(1) {
+                    override fun onCreate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                        db.execSQL("CREATE TABLE deliveries (id TEXT NOT NULL PRIMARY KEY)")
+                    }
+                    override fun onUpgrade(db: androidx.sqlite.db.SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) {}
+                })
+                .build()
+        )
+        val sqliteDb = helper.writableDatabase
+        MinigeDatabase.MIGRATION_1_2.migrate(sqliteDb)
+        sqliteDb.execSQL(
+            "INSERT INTO customers (id, userId, name, lastUnitPrice, pendingSync, updatedAtEpochMs) " +
+                "VALUES ('kuya_ben', 'u1', 'Kuya Ben', 25.0, 1, 12345)"
+        )
+        val cursor = sqliteDb.query("SELECT lastUnitPrice FROM customers WHERE id = 'kuya_ben'")
+        try {
+            assertEquals(true, cursor.moveToFirst())
+            assertEquals(25.0, cursor.getDouble(0), 0.001)
+        } finally {
+            cursor.close()
+            helper.close()
+        }
     }
 }

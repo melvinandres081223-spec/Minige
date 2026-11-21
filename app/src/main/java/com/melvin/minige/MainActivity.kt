@@ -10,7 +10,6 @@ import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
@@ -21,17 +20,12 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.ReceiptLong
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.CreditScore
 import androidx.compose.material.icons.rounded.DateRange
-import androidx.compose.material.icons.rounded.LocalShipping
-import androidx.compose.material.icons.rounded.ReceiptLong
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Today
 import androidx.compose.material3.CenterAlignedTopAppBar
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
@@ -70,6 +64,7 @@ import com.google.firebase.auth.auth
 import com.melvin.minige.auth.authStateFlow
 import com.melvin.minige.auth.signOutFromGoogleAndFirebase
 import com.melvin.minige.calendar.GoogleCalendarSyncHelper
+import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.ui.MinigeEvent
 import com.melvin.minige.ui.MinigeViewModel
 import com.melvin.minige.ui.screens.AddDeliverySheet
@@ -142,7 +137,7 @@ fun MinigeMainShell(
     val snackbarHostState = remember { SnackbarHostState() }
 
     var selectedTab by rememberSaveable { mutableStateOf(MinigeTab.TODAY) }
-    var showAddMenu by remember { mutableStateOf(false) }
+    var editingDelivery by remember { mutableStateOf<DeliveryRecord?>(null) }
     var showAddDeliverySheet by remember { mutableStateOf(false) }
     var showAddExpenseSheet by remember { mutableStateOf(false) }
     var showEditSukliDialog by remember { mutableStateOf(false) }
@@ -227,36 +222,14 @@ fun MinigeMainShell(
         },
         floatingActionButton = {
             if (selectedTab == MinigeTab.TODAY) {
-                Box {
-                    FloatingActionButton(
-                        onClick = { showAddMenu = true },
-                        modifier = Modifier.testTag("fab_add_entry"),
-                    ) {
-                        Icon(Icons.Rounded.Add, contentDescription = "Add delivery or expense")
-                    }
-                    DropdownMenu(
-                        expanded = showAddMenu,
-                        onDismissRequest = { showAddMenu = false },
-                    ) {
-                        DropdownMenuItem(
-                            text = { Text("Log Delivery / Pick-up") },
-                            leadingIcon = { Icon(Icons.Rounded.LocalShipping, contentDescription = null) },
-                            onClick = {
-                                showAddMenu = false
-                                showAddDeliverySheet = true
-                            },
-                            modifier = Modifier.testTag("menu_add_delivery"),
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Log Route Expense") },
-                            leadingIcon = { Icon(Icons.AutoMirrored.Rounded.ReceiptLong, contentDescription = null) },
-                            onClick = {
-                                showAddMenu = false
-                                showAddExpenseSheet = true
-                            },
-                            modifier = Modifier.testTag("menu_add_expense"),
-                        )
-                    }
+                FloatingActionButton(
+                    onClick = {
+                        editingDelivery = null
+                        showAddDeliverySheet = true
+                    },
+                    modifier = Modifier.testTag("fab_add_entry"),
+                ) {
+                    Icon(Icons.Rounded.Add, contentDescription = "Log delivery or pick-up")
                 }
             }
         },
@@ -272,7 +245,12 @@ fun MinigeMainShell(
                     onShiftDate = viewModel::shiftDate,
                     onJumpToday = viewModel::jumpToToday,
                     onEditSukliClick = { showEditSukliDialog = true },
+                    onEditDelivery = { delivery ->
+                        editingDelivery = delivery
+                        showAddDeliverySheet = true
+                    },
                     onDeleteDelivery = viewModel::deleteDelivery,
+                    onAddExpenseClick = { showAddExpenseSheet = true },
                     onDeleteExpense = viewModel::deleteExpense,
                     onSyncCalendarClick = { viewModel.triggerCalendarSync(context) },
                     onBossSendTriggered = { msg ->
@@ -310,8 +288,35 @@ fun MinigeMainShell(
     if (showAddDeliverySheet) {
         AddDeliverySheet(
             settings = uiState.settings,
-            onDismiss = { showAddDeliverySheet = false },
-            onSave = viewModel::addDelivery,
+            customers = uiState.customers,
+            initialDelivery = editingDelivery,
+            onDismiss = {
+                showAddDeliverySheet = false
+                editingDelivery = null
+            },
+            onSave = { customerName, purifiedGallons, alkalineGallons, paymentType, notes, customUnitPrice ->
+                val editing = editingDelivery
+                if (editing == null) {
+                    viewModel.addDelivery(
+                        customerName = customerName,
+                        purifiedGallons = purifiedGallons,
+                        alkalineGallons = alkalineGallons,
+                        paymentType = paymentType,
+                        notes = notes,
+                        customUnitPrice = customUnitPrice,
+                    )
+                } else {
+                    viewModel.updateDelivery(
+                        deliveryId = editing.id,
+                        customerName = customerName,
+                        purifiedGallons = purifiedGallons,
+                        alkalineGallons = alkalineGallons,
+                        paymentType = paymentType,
+                        notes = notes,
+                        customUnitPrice = customUnitPrice,
+                    )
+                }
+            },
         )
     }
 

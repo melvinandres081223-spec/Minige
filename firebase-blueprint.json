@@ -144,6 +144,24 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "Customer": {
+      "title": "Customer",
+      "description": "Saved customer profile storing remembered custom unit price for auto-recall.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID" },
+        "name": { "type": "string", "description": "Customer display name" },
+        "lastUnitPrice": { "type": "number", "description": "Optional remembered unit price per gallon in PHP" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server creation timestamp" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server update timestamp" }
+      },
+      "required": [
+        "userId",
+        "name",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -166,6 +184,10 @@
     "/users/{userId}/settings/{settingId}": {
       "schema": { "$ref": "#/entities/UserSettings" },
       "description": "User-owned unit prices and commission settings."
+    },
+    "/users/{userId}/customers/{customerId}": {
+      "schema": { "$ref": "#/entities/Customer" },
+      "description": "User-owned customers with last remembered unit price."
     }
   }
 }

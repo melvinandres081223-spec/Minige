@@ -99,6 +99,38 @@ data class ExpenseRecord(
     val updatedAtEpochMs: Long,
 )
 
+data class CustomerRecord(
+    val id: String,
+    val userId: String,
+    val name: String,
+    val lastUnitPrice: Double? = null,
+    val pendingSync: Boolean = false,
+    val updatedAtEpochMs: Long = 0L,
+)
+
+object MinigeCustomerUtils {
+    fun normalizeCustomerId(rawName: String): String {
+        val cleaned = rawName.trim()
+            .lowercase(Locale.ENGLISH)
+            .replace(Regex("[^a-z0-9_\\-]+"), "_")
+            .trim('_')
+            .take(120)
+        return cleaned.ifEmpty {
+            val hash = kotlin.math.abs(rawName.trim().lowercase(Locale.ENGLISH).hashCode())
+            "cust_$hash"
+        }
+    }
+
+    fun formatPrice(price: Double): String {
+        val rounded = kotlin.math.round(price * 100.0) / 100.0
+        return if (rounded % 1.0 == 0.0) {
+            rounded.toInt().toString()
+        } else {
+            rounded.toString()
+        }
+    }
+}
+
 data class DailyLedgerRecord(
     val dateKey: String,
     val userId: String,

@@ -7,6 +7,7 @@ import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.IgnoreExtraProperties
 import com.google.firebase.firestore.ServerTimestamp
 import com.melvin.minige.data.local.AppSettingsEntity
+import com.melvin.minige.data.local.CustomerEntity
 import com.melvin.minige.data.local.DailyLedgerEntity
 import com.melvin.minige.data.local.DeliveryEntity
 import com.melvin.minige.data.local.ExpenseEntity
@@ -247,3 +248,37 @@ internal fun AppSettingsEntity.toFirestoreUpdateMap(): Map<String, Any> = mapOf(
     "defaultSukli" to defaultSukli.toLong(),
     "updatedAt" to FieldValue.serverTimestamp(),
 )
+
+@Keep
+@IgnoreExtraProperties
+data class FirestoreCustomer(
+    @DocumentId val id: String = "",
+    val userId: String = "",
+    val name: String = "",
+    val lastUnitPrice: Double? = null,
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null,
+) {
+    fun toEntity(pendingSync: Boolean = false): CustomerEntity = CustomerEntity(
+        id = id,
+        userId = userId,
+        name = name,
+        lastUnitPrice = lastUnitPrice,
+        pendingSync = pendingSync,
+        updatedAtEpochMs = updatedAt?.toDate()?.time ?: System.currentTimeMillis(),
+    )
+}
+
+internal fun CustomerEntity.toFirestoreCreateMap(uid: String): Map<String, Any> = buildMap {
+    put("userId", uid)
+    put("name", name.take(80))
+    lastUnitPrice?.let { put("lastUnitPrice", it) }
+    put("createdAt", FieldValue.serverTimestamp())
+    put("updatedAt", FieldValue.serverTimestamp())
+}
+
+internal fun CustomerEntity.toFirestoreUpdateMap(): Map<String, Any> = buildMap {
+    put("name", name.take(80))
+    lastUnitPrice?.let { put("lastUnitPrice", it) }
+    put("updatedAt", FieldValue.serverTimestamp())
+}

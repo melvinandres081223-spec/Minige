@@ -7,29 +7,35 @@ import android.content.pm.PackageManager
 import android.speech.RecognizerIntent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.PersonSearch
 import androidx.compose.material.icons.rounded.Remove
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -40,27 +46,37 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.melvin.minige.domain.CustomerRecord
+import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.ExpenseCategory
+import com.melvin.minige.domain.MinigeCustomerUtils
 import com.melvin.minige.domain.MinigeSettings
 import com.melvin.minige.domain.PaymentType
+import kotlinx.coroutines.delay
 import java.util.Locale
+import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun AddDeliverySheet(
     settings: MinigeSettings,
+    customers: List<CustomerRecord>,
+    initialDelivery: DeliveryRecord? = null,
     onDismiss: () -> Unit,
     onSave: (
         customerName: String,
@@ -68,17 +84,93 @@ fun AddDeliverySheet(
         alkalineGallons: Int,
         paymentType: PaymentType,
         notes: String,
+        customUnitPrice: Double?,
     ) -> Unit,
 ) {
     val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val customerFocusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
 
-    var customerName by remember { mutableStateOf("") }
-    var purifiedText by remember { mutableStateOf("0") }
-    var alkalineText by remember { mutableStateOf("0") }
-    var paymentType by remember { mutableStateOf(PaymentType.CASH) }
-    var notes by remember { mutableStateOf("") }
+    val initialPriceText = remember(initialDelivery?.id, settings) {
+        if (initialDelivery != null && initialDelivery.paymentType != PaymentType.PICK_UP && initialDelivery.totalGallons > 0) {
+            val expectedSettingsSplit = (initialDelivery.purifiedGallons * initialDelivery.purifiedUnitPrice) +
+                (initialDelivery.alkalineGallons * initialDelivery.alkalineUnitPrice)
+            val derivedPrice = if (initialDelivery.totalAmount != expectedSettingsSplit && initialDelivery.totalAmount > 0) {
+                initialDelivery.totalAmount.toDouble() / initialDelivery.totalGallons
+            } else if (initialDelivery.alkalineGallons > 0 && initialDelivery.purifiedGallons == 0) {
+                initialDelivery.alkalineUnitPrice.toDouble()
+            } else {
+                initialDelivery.purifiedUnitPrice.toDouble()
+            }
+            MinigeCustomerUtils.formatPrice(derivedPrice)
+        } else {
+            settings.purifiedPrice.toString()
+        }
+    }
+
+    var customerName by remember(initialDelivery?.id) { mutableStateOf(initialDelivery?.customerName ?: "") }
+    var purifiedText by remember(initialDelivery?.id) {
+        mutableStateOf((initialDelivery?.purifiedGallons ?: 0).toString())
+    }
+    var alkalineText by remember(initialDelivery?.id) {
+        mutableStateOf((initialDelivery?.alkalineGallons ?: 0).toString())
+    }
+    var paymentType by remember(initialDelivery?.id) {
+        mutableStateOf(initialDelivery?.paymentType ?: PaymentType.CASH)
+    }
+    var notes by remember(initialDelivery?.id) { mutableStateOf(initialDelivery?.notes ?: "") }
+    var unitPriceText by remember(initialDelivery?.id) { mutableStateOf(initialPriceText) }
+    var hasManualPriceOverride by remember(initialDelivery?.id) { mutableStateOf(initialDelivery != null) }
+    var showSuggestions by remember { mutableStateOf(false) }
     var formError by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(initialDelivery?.id) {
+        if (initialDelivery == null) {
+            delay(150)
+            runCatching { customerFocusRequester.requestFocus() }
+            keyboardController?.show()
+        }
+    }
+
+    val purifiedQty = purifiedText.toIntOrNull()?.coerceAtLeast(0) ?: 0
+    val alkalineQty = alkalineText.toIntOrNull()?.coerceAtLeast(0) ?: 0
+    val totalGallons = purifiedQty + alkalineQty
+
+    val normalizedTypedId = remember(customerName) {
+        if (customerName.isBlank()) "" else MinigeCustomerUtils.normalizeCustomerId(customerName)
+    }
+    val matchedCustomer = remember(normalizedTypedId, customers) {
+        if (normalizedTypedId.isEmpty()) null
+        else customers.firstOrNull { it.id == normalizedTypedId }
+    }
+
+    val filteredSuggestions = remember(customerName, customers) {
+        val q = customerName.trim()
+        if (q.isEmpty()) {
+            emptyList()
+        } else {
+            customers.filter {
+                it.name.contains(q, ignoreCase = true) &&
+                    !it.name.equals(q, ignoreCase = true)
+            }.take(5)
+        }
+    }
+
+    val defaultUnitPriceForSelection = remember(purifiedQty, alkalineQty, settings) {
+        if (alkalineQty > 0 && purifiedQty == 0) settings.alkalinePrice else settings.purifiedPrice
+    }
+
+    LaunchedEffect(matchedCustomer?.id, matchedCustomer?.lastUnitPrice, defaultUnitPriceForSelection, hasManualPriceOverride) {
+        if (!hasManualPriceOverride) {
+            val remembered = matchedCustomer?.lastUnitPrice
+            unitPriceText = if (remembered != null && remembered >= 0.0) {
+                MinigeCustomerUtils.formatPrice(remembered)
+            } else {
+                defaultUnitPriceForSelection.toString()
+            }
+        }
+    }
 
     val voiceLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult(),
@@ -89,6 +181,8 @@ fun AddDeliverySheet(
                 ?.firstOrNull()
             if (!spoken.isNullOrBlank()) {
                 customerName = spoken.trim().take(80)
+                hasManualPriceOverride = false
+                showSuggestions = true
             }
         }
     }
@@ -109,13 +203,17 @@ fun AddDeliverySheet(
         }
     }
 
-    val purifiedQty = purifiedText.toIntOrNull()?.coerceAtLeast(0) ?: 0
-    val alkalineQty = alkalineText.toIntOrNull()?.coerceAtLeast(0) ?: 0
-    val totalGallons = purifiedQty + alkalineQty
-    val billAmount = if (paymentType == PaymentType.PICK_UP) {
-        0
-    } else {
-        (purifiedQty * settings.purifiedPrice) + (alkalineQty * settings.alkalinePrice)
+    val isMixedDefaultPrice = purifiedQty > 0 &&
+        alkalineQty > 0 &&
+        matchedCustomer?.lastUnitPrice == null &&
+        !hasManualPriceOverride
+    val parsedUnitPrice = unitPriceText.toDoubleOrNull()?.takeIf { it >= 0.0 }
+        ?: defaultUnitPriceForSelection.toDouble()
+
+    val billAmount = when {
+        paymentType == PaymentType.PICK_UP -> 0
+        isMixedDefaultPrice -> (purifiedQty * settings.purifiedPrice) + (alkalineQty * settings.alkalinePrice)
+        else -> (totalGallons * parsedUnitPrice).roundToInt()
     }
     val previewCommission = when (paymentType) {
         PaymentType.CASH, PaymentType.BANK_DEPOSIT -> totalGallons * settings.commissionRate
@@ -135,50 +233,122 @@ fun AddDeliverySheet(
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Text(
-                text = "Log Delivery / Pick-up",
+                text = if (initialDelivery == null) "Log Delivery / Pick-up" else "Edit Delivery / Pick-up",
                 style = MaterialTheme.typography.titleLarge,
             )
 
-            OutlinedTextField(
-                value = customerName,
-                onValueChange = {
-                    customerName = it.take(80)
-                    formError = null
-                },
-                label = { Text("Customer Name") },
-                singleLine = true,
-                trailingIcon = {
-                    IconButton(
-                        onClick = {
-                            val granted = ContextCompat.checkSelfPermission(
-                                context,
-                                Manifest.permission.RECORD_AUDIO,
-                            ) == PackageManager.PERMISSION_GRANTED
-                            if (granted) {
-                                val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                                    putExtra(
-                                        RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                                        RecognizerIntent.LANGUAGE_MODEL_FREE_FORM,
-                                    )
-                                    putExtra(RecognizerIntent.EXTRA_PROMPT, "Say customer name")
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                OutlinedTextField(
+                    value = customerName,
+                    onValueChange = {
+                        customerName = it.take(80)
+                        hasManualPriceOverride = false
+                        showSuggestions = true
+                        formError = null
+                    },
+                    label = { Text("Customer Name") },
+                    singleLine = true,
+                    trailingIcon = {
+                        IconButton(
+                            onClick = {
+                                val granted = ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.RECORD_AUDIO,
+                                ) == PackageManager.PERMISSION_GRANTED
+                                if (granted) {
+                                    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                                        putExtra(
+                                            RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                                            RecognizerIntent.LANGUAGE_MODEL_FREE_FORM,
+                                        )
+                                        putExtra(RecognizerIntent.EXTRA_PROMPT, "Say customer name")
+                                    }
+                                    runCatching { voiceLauncher.launch(intent) }
+                                } else {
+                                    micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                                 }
-                                runCatching { voiceLauncher.launch(intent) }
-                            } else {
-                                micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                            }
-                        },
-                        modifier = Modifier.testTag("voice_customer_button"),
+                            },
+                            modifier = Modifier.testTag("voice_customer_button"),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Mic,
+                                contentDescription = "Voice input customer name",
+                            )
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusRequester(customerFocusRequester)
+                        .testTag("delivery_customer_input"),
+                )
+
+                if (showSuggestions && filteredSuggestions.isNotEmpty()) {
+                    ElevatedCard(
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("customer_autocomplete_list"),
                     ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Mic,
-                            contentDescription = "Voice input customer name",
-                        )
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            filteredSuggestions.forEachIndexed { index, suggestion ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .defaultMinSize(minHeight = 48.dp)
+                                        .clickable {
+                                            customerName = suggestion.name
+                                            showSuggestions = false
+                                            hasManualPriceOverride = false
+                                            unitPriceText = suggestion.lastUnitPrice
+                                                ?.takeIf { it >= 0.0 }
+                                                ?.let { MinigeCustomerUtils.formatPrice(it) }
+                                                ?: defaultUnitPriceForSelection.toString()
+                                            formError = null
+                                        }
+                                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                                        .testTag("customer_suggestion_${suggestion.id}"),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        modifier = Modifier.weight(1f),
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.PersonSearch,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(18.dp),
+                                        )
+                                        Text(
+                                            text = suggestion.name,
+                                            style = MaterialTheme.typography.bodyLarge,
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                        )
+                                    }
+                                    if (suggestion.lastUnitPrice != null) {
+                                        Surface(
+                                            shape = CircleShape,
+                                            color = MaterialTheme.colorScheme.primaryContainer,
+                                        ) {
+                                            Text(
+                                                text = "₱${MinigeCustomerUtils.formatPrice(suggestion.lastUnitPrice)}/gal",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                            )
+                                        }
+                                    }
+                                }
+                                if (index < filteredSuggestions.lastIndex) {
+                                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                                }
+                            }
+                        }
                     }
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("delivery_customer_input"),
-            )
+                }
+            }
 
             GallonStepperRow(
                 label = "Purified (₱${settings.purifiedPrice}/gal)",
@@ -208,6 +378,34 @@ fun AddDeliverySheet(
                     formError = null
                 },
                 testTagPrefix = "alkaline",
+            )
+
+            OutlinedTextField(
+                value = unitPriceText,
+                onValueChange = { raw ->
+                    unitPriceText = sanitizeDecimalPrice(raw)
+                    hasManualPriceOverride = true
+                    formError = null
+                },
+                enabled = paymentType != PaymentType.PICK_UP,
+                label = { Text("Unit Price (₱/gal)") },
+                supportingText = {
+                    val savedPrice = matchedCustomer?.lastUnitPrice
+                    val hint = when {
+                        paymentType == PaymentType.PICK_UP -> "Pick-up entries earn ₱0 remittance & commission"
+                        savedPrice != null && !hasManualPriceOverride ->
+                            "Auto-filled from ${matchedCustomer.name}'s saved rate (₱${MinigeCustomerUtils.formatPrice(savedPrice)}/gal)"
+                        isMixedDefaultPrice ->
+                            "Using Settings rates (₱${settings.purifiedPrice} Purified / ₱${settings.alkalinePrice} Alkaline)"
+                        else -> "Edit to override & remember this customer's rate"
+                    }
+                    Text(hint)
+                },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("delivery_unit_price_input"),
             )
 
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -292,11 +490,25 @@ fun AddDeliverySheet(
 
             Button(
                 onClick = {
+                    val priceToSave = when {
+                        paymentType == PaymentType.PICK_UP -> null
+                        isMixedDefaultPrice -> null
+                        else -> unitPriceText.toDoubleOrNull()?.takeIf { it >= 0.0 }
+                    }
                     when {
                         customerName.isBlank() -> formError = "Please enter the customer name."
                         totalGallons <= 0 -> formError = "Please enter at least 1 gallon."
+                        paymentType != PaymentType.PICK_UP && !isMixedDefaultPrice && priceToSave == null ->
+                            formError = "Please enter a valid unit price."
                         else -> {
-                            onSave(customerName.trim(), purifiedQty, alkalineQty, paymentType, notes)
+                            onSave(
+                                customerName.trim(),
+                                purifiedQty,
+                                alkalineQty,
+                                paymentType,
+                                notes,
+                                priceToSave,
+                            )
                             onDismiss()
                         }
                     }
@@ -306,10 +518,29 @@ fun AddDeliverySheet(
                     .height(50.dp)
                     .testTag("save_delivery_button"),
             ) {
-                Text("Save Entry", style = MaterialTheme.typography.labelLarge)
+                Text(
+                    text = if (initialDelivery == null) "Save Entry" else "Update Entry",
+                    style = MaterialTheme.typography.labelLarge,
+                )
             }
         }
     }
+}
+
+private fun sanitizeDecimalPrice(raw: String): String {
+    val sb = StringBuilder()
+    var hasDot = false
+    for (ch in raw) {
+        if (ch.isDigit()) {
+            sb.append(ch)
+        } else if (ch == '.' && !hasDot) {
+            if (sb.isEmpty()) sb.append('0')
+            sb.append('.')
+            hasDot = true
+        }
+        if (sb.length >= 7) break
+    }
+    return sb.toString()
 }
 
 @Composable

@@ -14,11 +14,13 @@ import com.melvin.minige.data.MinigeRepository
 import com.melvin.minige.data.local.MinigeDatabase
 import com.melvin.minige.data.remote.MinigeFirestoreDataSource
 import com.melvin.minige.domain.BossPickupFormatter
+import com.melvin.minige.domain.CustomerRecord
 import com.melvin.minige.domain.DailySummary
 import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.ExpenseCategory
 import com.melvin.minige.domain.ExpenseRecord
 import com.melvin.minige.domain.MinigeCalculator
+import com.melvin.minige.domain.MinigeCustomerUtils
 import com.melvin.minige.domain.MinigeDateUtils
 import com.melvin.minige.domain.MinigeSettings
 import com.melvin.minige.domain.PaymentType
@@ -63,6 +65,7 @@ data class MinigeUiState(
         expenses = emptyList(),
     ),
     val bossPickupMessage: String = "",
+    val customers: List<CustomerRecord> = emptyList(),
     val pendingSyncCount: Int = 0,
     val isSyncing: Boolean = false,
     val isCalendarSyncing: Boolean = false,
@@ -108,8 +111,20 @@ class MinigeViewModel(
         repository.observeExpenses(currentUserId),
         repository.observeDailyLedgers(currentUserId),
         repository.observeSettings(),
-    ) { deliveries, payments, expenses, ledgers, settings ->
-        LocalBundle(deliveries, payments, expenses, ledgers, settings)
+        repository.observeCustomers(currentUserId),
+    ) { values ->
+        @Suppress("UNCHECKED_CAST")
+        val deliveries = values[0] as List<DeliveryRecord>
+        @Suppress("UNCHECKED_CAST")
+        val payments = values[1] as List<UtangPaymentRecord>
+        @Suppress("UNCHECKED_CAST")
+        val expenses = values[2] as List<ExpenseRecord>
+        @Suppress("UNCHECKED_CAST")
+        val ledgers = values[3] as List<com.melvin.minige.domain.DailyLedgerRecord>
+        val settings = values[4] as MinigeSettings
+        @Suppress("UNCHECKED_CAST")
+        val customers = values[5] as List<CustomerRecord>
+        LocalBundle(deliveries, payments, expenses, ledgers, settings, customers)
     }
 
     val uiState: StateFlow<MinigeUiState> = combine(
@@ -148,10 +163,30 @@ class MinigeViewModel(
         val activeUtang = allUtang.filter { !it.isUtangFullyPaid }
         val settledUtang = allUtang.filter { it.isUtangFullyPaid }
 
+        // Merge saved customer records with any historical delivery names not yet in customers table
+        val customerById = bundle.customers.associateBy { it.id }.toMutableMap()
+        bundle.deliveries.forEach { d ->
+            val cid = MinigeCustomerUtils.normalizeCustomerId(d.customerName)
+            if (cid !in customerById) {
+                val fallbackPrice = if (d.paymentType != PaymentType.PICK_UP) {
+                    (if (d.alkalineGallons > 0 && d.purifiedGallons == 0) d.alkalineUnitPrice else d.purifiedUnitPrice).toDouble()
+                } else null
+                customerById[cid] = CustomerRecord(
+                    id = cid,
+                    userId = d.userId,
+                    name = d.customerName,
+                    lastUnitPrice = fallbackPrice,
+                    updatedAtEpochMs = d.updatedAtEpochMs,
+                )
+            }
+        }
+        val mergedCustomers = customerById.values.sortedByDescending { it.updatedAtEpochMs }
+
         val pendingCount = bundle.deliveries.count { it.pendingSync } +
             bundle.payments.count { it.pendingSync } +
             bundle.expenses.count { it.pendingSync } +
-            bundle.ledgers.count { it.pendingSync }
+            bundle.ledgers.count { it.pendingSync } +
+            bundle.customers.count { it.pendingSync }
 
         MinigeUiState(
             selectedDate = date,
@@ -166,6 +201,7 @@ class MinigeViewModel(
             dailySummary = dailySummary,
             weeklySummary = weeklySummary,
             bossPickupMessage = BossPickupFormatter.format(date, pickupsForDay),
+            customers = mergedCustomers,
             pendingSyncCount = pendingCount,
             isSyncing = syncing,
             isCalendarSyncing = calSyncing,
@@ -199,6 +235,7 @@ class MinigeViewModel(
         alkalineGallons: Int,
         paymentType: PaymentType,
         notes: String,
+        customUnitPrice: Double? = null,
     ) {
         val dateKey = MinigeDateUtils.toKey(_selectedDate.value)
         viewModelScope.launch {
@@ -210,11 +247,41 @@ class MinigeViewModel(
                 alkalineGallons = alkalineGallons,
                 paymentType = paymentType,
                 notes = notes,
+                customUnitPrice = customUnitPrice,
             )
             val msg = if (result.isSuccess) {
                 "Saved ${customerName.trim()} (${paymentType.label})"
             } else {
                 "Saved locally — will sync to cloud when online."
+            }
+            _events.tryEmit(MinigeEvent.ShowMessage(msg))
+        }
+    }
+
+    fun updateDelivery(
+        deliveryId: String,
+        customerName: String,
+        purifiedGallons: Int,
+        alkalineGallons: Int,
+        paymentType: PaymentType,
+        notes: String,
+        customUnitPrice: Double? = null,
+    ) {
+        viewModelScope.launch {
+            val result = repository.updateDelivery(
+                userId = currentUserId,
+                deliveryId = deliveryId,
+                customerName = customerName,
+                purifiedGallons = purifiedGallons,
+                alkalineGallons = alkalineGallons,
+                paymentType = paymentType,
+                notes = notes,
+                customUnitPrice = customUnitPrice,
+            )
+            val msg = if (result.isSuccess) {
+                "Updated ${customerName.trim()} (${paymentType.label})"
+            } else {
+                "Updated locally — will sync to cloud when online."
             }
             _events.tryEmit(MinigeEvent.ShowMessage(msg))
         }
@@ -385,6 +452,7 @@ class MinigeViewModel(
         val expenses: List<ExpenseRecord>,
         val ledgers: List<com.melvin.minige.domain.DailyLedgerRecord>,
         val settings: MinigeSettings,
+        val customers: List<CustomerRecord>,
     )
 
     companion object {

@@ -48,6 +48,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Surface
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -71,7 +73,9 @@ fun TodayDashboardScreen(
     onShiftDate: (Long) -> Unit,
     onJumpToday: () -> Unit,
     onEditSukliClick: () -> Unit,
+    onEditDelivery: (DeliveryRecord) -> Unit,
     onDeleteDelivery: (String) -> Unit,
+    onAddExpenseClick: () -> Unit,
     onDeleteExpense: (String) -> Unit,
     onSyncCalendarClick: () -> Unit,
     onBossSendTriggered: (String) -> Unit,
@@ -142,18 +146,43 @@ fun TodayDashboardScreen(
                 items(uiState.deliveriesForDay, key = { it.id }) { delivery ->
                     DeliveryRowCard(
                         delivery = delivery,
+                        onEdit = { onEditDelivery(delivery) },
                         onDelete = { onDeleteDelivery(delivery.id) },
                     )
                 }
             }
 
             item {
-                Text(
-                    text = "Route Expenses (${uiState.expensesForDay.size})",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.padding(top = 6.dp),
-                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "Route Expenses (${uiState.expensesForDay.size})",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 8.dp),
+                    )
+                    FilledTonalButton(
+                        onClick = onAddExpenseClick,
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                        modifier = Modifier
+                            .defaultMinSize(minHeight = 48.dp)
+                            .testTag("add_expense_header_button"),
+                    ) {
+                        Text(
+                            text = "+ Expense",
+                            style = MaterialTheme.typography.labelLarge,
+                            maxLines = 1,
+                            softWrap = false,
+                        )
+                    }
+                }
             }
 
             if (uiState.expensesForDay.isEmpty()) {
@@ -429,10 +458,16 @@ private fun RemittanceBreakdownCard(
                 Text(
                     text = "Remittance & Cash on Hand",
                     style = MaterialTheme.typography.titleMedium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 8.dp),
                 )
                 FilledTonalButton(
                     onClick = onSyncCalendarClick,
                     enabled = !uiState.isCalendarSyncing,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                     modifier = Modifier.testTag("sync_calendar_button"),
                 ) {
                     Icon(
@@ -441,7 +476,11 @@ private fun RemittanceBreakdownCard(
                         modifier = Modifier.size(16.dp),
                     )
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text(if (uiState.isCalendarSyncing) "Syncing..." else "Calendar Sync")
+                    Text(
+                        text = if (uiState.isCalendarSyncing) "Syncing..." else "Calendar Sync",
+                        maxLines = 1,
+                        softWrap = false,
+                    )
                 }
             }
 
@@ -537,11 +576,15 @@ private fun MetricLine(
 @Composable
 private fun DeliveryRowCard(
     delivery: DeliveryRecord,
+    onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
     OutlinedCard(
         shape = RoundedCornerShape(16.dp),
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onEdit)
+            .testTag("delivery_card_${delivery.id}"),
     ) {
         Row(
             modifier = Modifier
@@ -606,6 +649,18 @@ private fun DeliveryRowCard(
                     text = subStatus,
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.primary,
+                )
+            }
+
+            IconButton(
+                onClick = onEdit,
+                modifier = Modifier
+                    .size(48.dp)
+                    .testTag("edit_delivery_${delivery.id}"),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Edit,
+                    contentDescription = "Edit ${delivery.customerName}",
                 )
             }
 

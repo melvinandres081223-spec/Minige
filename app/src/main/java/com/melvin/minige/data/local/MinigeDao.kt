@@ -92,4 +92,22 @@ interface MinigeDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertSettings(entity: AppSettingsEntity)
+
+    @Query("SELECT * FROM customers WHERE userId = :userId ORDER BY updatedAtEpochMs DESC")
+    fun observeCustomers(userId: String): Flow<List<CustomerEntity>>
+
+    @Query("SELECT * FROM customers WHERE userId = :userId AND pendingSync = 1")
+    suspend fun getPendingCustomers(userId: String): List<CustomerEntity>
+
+    @Query("SELECT * FROM customers WHERE id = :id LIMIT 1")
+    suspend fun getCustomerById(id: String): CustomerEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertCustomer(entity: CustomerEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertCustomers(entities: List<CustomerEntity>)
+
+    @Query("UPDATE customers SET pendingSync = 0 WHERE id = :id")
+    suspend fun markCustomerSynced(id: String)
 }

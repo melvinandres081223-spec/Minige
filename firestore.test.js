@@ -249,4 +249,41 @@ test("Cross-user access is strictly denied across all Minige subcollections", as
     })
   );
   await assertFails(aliceDb.collection(`users/${BOB_UID}/deliveries`).doc("bob_del").delete());
+  await assertFails(aliceDb.collection(`users/${BOB_UID}/customers`).get());
+});
+
+test("Owner can create, update, and list customers with optional lastUnitPrice", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const past = new Date(Date.now() - 4000);
+
+  await assertSucceeds(
+    aliceDb.collection(`users/${ALICE_UID}/customers`).doc("nene").set({
+      userId: ALICE_UID,
+      name: "Nene",
+      lastUnitPrice: 25.0,
+      createdAt: past,
+      updatedAt: past,
+    })
+  );
+
+  await assertSucceeds(aliceDb.collection(`users/${ALICE_UID}/customers`).get());
+
+  await assertSucceeds(
+    aliceDb.collection(`users/${ALICE_UID}/customers`).doc("nene").update({
+      name: "Nene",
+      lastUnitPrice: 27.5,
+      updatedAt: new Date(Date.now() - 1000),
+    })
+  );
+
+  // Reject negative price
+  await assertFails(
+    aliceDb.collection(`users/${ALICE_UID}/customers`).doc("bad_cust").set({
+      userId: ALICE_UID,
+      name: "Bad",
+      lastUnitPrice: -5,
+      createdAt: past,
+      updatedAt: past,
+    })
+  );
 });

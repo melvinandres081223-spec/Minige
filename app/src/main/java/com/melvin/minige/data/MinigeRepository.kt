@@ -1,16 +1,19 @@
 package com.melvin.minige.data
 
 import com.melvin.minige.data.local.AppSettingsEntity
+import com.melvin.minige.data.local.CustomerEntity
 import com.melvin.minige.data.local.DailyLedgerEntity
 import com.melvin.minige.data.local.DeliveryEntity
 import com.melvin.minige.data.local.ExpenseEntity
 import com.melvin.minige.data.local.MinigeDao
 import com.melvin.minige.data.local.UtangPaymentEntity
 import com.melvin.minige.data.remote.MinigeFirestoreDataSource
+import com.melvin.minige.domain.CustomerRecord
 import com.melvin.minige.domain.DailyLedgerRecord
 import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.ExpenseCategory
 import com.melvin.minige.domain.ExpenseRecord
+import com.melvin.minige.domain.MinigeCustomerUtils
 import com.melvin.minige.domain.MinigeSettings
 import com.melvin.minige.domain.PaymentType
 import com.melvin.minige.domain.UtangMethod
@@ -23,6 +26,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import java.util.UUID
+import kotlin.math.roundToInt
 
 class MinigeRepository(
     private val dao: MinigeDao,
@@ -42,6 +46,9 @@ class MinigeRepository(
 
     fun observeSettings(): Flow<MinigeSettings> =
         dao.observeSettings().map { it?.toDomain() ?: MinigeSettings() }
+
+    fun observeCustomers(userId: String): Flow<List<CustomerRecord>> =
+        dao.observeCustomers(userId).map { list -> list.map { it.toDomain() } }
 
     /**
      * Streams Firestore collections into local Room cache while preserving any un-synced local edits.
@@ -121,6 +128,20 @@ class MinigeRepository(
                     }
                 }
         }
+        launch {
+            remote.observeCustomers(userId)
+                .catch { e ->
+                    if (e is CancellationException) throw e
+                    onError(e)
+                }
+                .collectLatest { remoteCustomers ->
+                    val pendingIds = dao.getPendingCustomers(userId).map { it.id }.toSet()
+                    val filtered = remoteCustomers.filterNot { it.id in pendingIds }
+                    if (filtered.isNotEmpty()) {
+                        dao.upsertCustomers(filtered)
+                    }
+                }
+        }
     }
 
     suspend fun syncPendingToCloud(userId: String): Result<Int> {
@@ -184,6 +205,16 @@ class MinigeRepository(
             }
         }
 
+        dao.getPendingCustomers(userId).forEach { customer ->
+            val result = remote.upsertCustomer(userId, customer)
+            if (result.isSuccess) {
+                dao.markCustomerSynced(customer.id)
+                syncedCount++
+            } else {
+                lastError = result.exceptionOrNull()
+            }
+        }
+
         return if (lastError != null && syncedCount == 0) {
             Result.failure(lastError)
         } else {
@@ -199,6 +230,7 @@ class MinigeRepository(
         alkalineGallons: Int,
         paymentType: PaymentType,
         notes: String,
+        customUnitPrice: Double? = null,
     ): Result<Unit> {
         val cleanName = customerName.trim().take(80)
         val totalGals = purifiedGallons + alkalineGallons
@@ -209,10 +241,22 @@ class MinigeRepository(
         val now = System.currentTimeMillis()
         val id = UUID.randomUUID().toString()
 
-        val totalBill = if (paymentType == PaymentType.PICK_UP) {
-            0
+        val validCustomPrice = customUnitPrice?.takeIf { it >= 0.0 }
+        val usedPurifiedPrice = if (validCustomPrice != null && purifiedGallons > 0) {
+            validCustomPrice.roundToInt()
         } else {
-            (purifiedGallons * settings.purifiedPrice) + (alkalineGallons * settings.alkalinePrice)
+            settings.purifiedPrice
+        }
+        val usedAlkalinePrice = if (validCustomPrice != null && alkalineGallons > 0) {
+            validCustomPrice.roundToInt()
+        } else {
+            settings.alkalinePrice
+        }
+
+        val totalBill = when {
+            paymentType == PaymentType.PICK_UP -> 0
+            validCustomPrice != null -> (totalGals * validCustomPrice).roundToInt()
+            else -> (purifiedGallons * usedPurifiedPrice) + (alkalineGallons * usedAlkalinePrice)
         }
 
         val amountPaid = when (paymentType) {
@@ -237,8 +281,8 @@ class MinigeRepository(
             customerName = cleanName,
             purifiedGallons = purifiedGallons,
             alkalineGallons = alkalineGallons,
-            purifiedUnitPrice = settings.purifiedPrice,
-            alkalineUnitPrice = settings.alkalinePrice,
+            purifiedUnitPrice = usedPurifiedPrice,
+            alkalineUnitPrice = usedAlkalinePrice,
             totalAmount = totalBill,
             amountPaid = amountPaid,
             paymentType = paymentType.name,
@@ -258,7 +302,143 @@ class MinigeRepository(
         if (syncResult.isSuccess) {
             dao.markDeliverySynced(id)
         }
+
+        rememberCustomerPrice(
+            userId = userId,
+            customerName = cleanName,
+            unitPriceToSave = if (paymentType != PaymentType.PICK_UP) {
+                validCustomPrice
+                    ?: if (alkalineGallons > 0 && purifiedGallons == 0) settings.alkalinePrice.toDouble()
+                    else settings.purifiedPrice.toDouble()
+            } else {
+                null
+            },
+            now = now,
+        )
+
         return syncResult
+    }
+
+    suspend fun updateDelivery(
+        userId: String,
+        deliveryId: String,
+        customerName: String,
+        purifiedGallons: Int,
+        alkalineGallons: Int,
+        paymentType: PaymentType,
+        notes: String,
+        customUnitPrice: Double? = null,
+    ): Result<Unit> {
+        val existing = dao.getDeliveryById(deliveryId)
+            ?: return Result.failure(IllegalArgumentException("Delivery not found."))
+        val cleanName = customerName.trim().take(80)
+        val totalGals = purifiedGallons + alkalineGallons
+        require(cleanName.isNotEmpty()) { "Customer name is required." }
+        require(totalGals >= 1) { "Enter at least 1 gallon." }
+
+        val settings = dao.getSettingsOnce()?.toDomain() ?: MinigeSettings()
+        val now = System.currentTimeMillis()
+
+        val validCustomPrice = customUnitPrice?.takeIf { it >= 0.0 }
+        val usedPurifiedPrice = if (validCustomPrice != null && purifiedGallons > 0) {
+            validCustomPrice.roundToInt()
+        } else {
+            settings.purifiedPrice
+        }
+        val usedAlkalinePrice = if (validCustomPrice != null && alkalineGallons > 0) {
+            validCustomPrice.roundToInt()
+        } else {
+            settings.alkalinePrice
+        }
+
+        val totalBill = when {
+            paymentType == PaymentType.PICK_UP -> 0
+            validCustomPrice != null -> (totalGals * validCustomPrice).roundToInt()
+            else -> (purifiedGallons * usedPurifiedPrice) + (alkalineGallons * usedAlkalinePrice)
+        }
+
+        val amountPaid = when (paymentType) {
+            PaymentType.CASH, PaymentType.BANK_DEPOSIT -> totalBill
+            PaymentType.PAUTANG -> existing.amountPaid.coerceIn(0, totalBill)
+            PaymentType.PICK_UP -> 0
+        }
+
+        val isSettled = paymentType == PaymentType.CASH ||
+            paymentType == PaymentType.BANK_DEPOSIT ||
+            (paymentType == PaymentType.PAUTANG && (totalBill - amountPaid) <= 0)
+
+        val commissionEarned = when (paymentType) {
+            PaymentType.CASH, PaymentType.BANK_DEPOSIT -> totalGals * existing.commissionRate
+            PaymentType.PAUTANG -> if (isSettled) totalGals * existing.commissionRate else 0
+            PaymentType.PICK_UP -> 0
+        }
+
+        val settledDateKey = when (paymentType) {
+            PaymentType.CASH, PaymentType.BANK_DEPOSIT -> existing.dateKey
+            PaymentType.PAUTANG -> if (isSettled) (existing.settledDateKey ?: existing.dateKey) else null
+            PaymentType.PICK_UP -> null
+        }
+
+        val updated = existing.copy(
+            customerName = cleanName,
+            purifiedGallons = purifiedGallons,
+            alkalineGallons = alkalineGallons,
+            purifiedUnitPrice = usedPurifiedPrice,
+            alkalineUnitPrice = usedAlkalinePrice,
+            totalAmount = totalBill,
+            amountPaid = amountPaid,
+            paymentType = paymentType.name,
+            commissionEarned = commissionEarned,
+            settledDateKey = settledDateKey,
+            notes = notes.trim().take(300),
+            pendingSync = true,
+            updatedAtEpochMs = now,
+        )
+
+        dao.upsertDelivery(updated)
+        val syncResult = remote.upsertDelivery(userId, updated)
+        if (syncResult.isSuccess) {
+            dao.markDeliverySynced(deliveryId)
+        }
+
+        rememberCustomerPrice(
+            userId = userId,
+            customerName = cleanName,
+            unitPriceToSave = if (paymentType != PaymentType.PICK_UP) {
+                validCustomPrice
+                    ?: if (alkalineGallons > 0 && purifiedGallons == 0) settings.alkalinePrice.toDouble()
+                    else settings.purifiedPrice.toDouble()
+            } else {
+                null
+            },
+            now = now,
+        )
+
+        return syncResult
+    }
+
+    private suspend fun rememberCustomerPrice(
+        userId: String,
+        customerName: String,
+        unitPriceToSave: Double?,
+        now: Long,
+    ) {
+        val customerId = MinigeCustomerUtils.normalizeCustomerId(customerName)
+        val existingCustomer = dao.getCustomerById(customerId)
+        val resolvedPrice = unitPriceToSave ?: existingCustomer?.lastUnitPrice
+        val customerEntity = CustomerEntity(
+            id = customerId,
+            userId = userId,
+            name = customerName,
+            lastUnitPrice = resolvedPrice,
+            pendingSync = true,
+            updatedAtEpochMs = now,
+        )
+        dao.upsertCustomer(customerEntity)
+        val custSync = remote.upsertCustomer(userId, customerEntity)
+        if (custSync.isSuccess) {
+            dao.markCustomerSynced(customerId)
+        }
     }
 
     /**
