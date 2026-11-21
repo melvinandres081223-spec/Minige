@@ -1,5 +1,7 @@
 package com.melvin.minige
 
+import com.melvin.minige.data.remote.FirestoreOfflineQueuedException
+import com.melvin.minige.data.remote.FirestoreSyncHelper
 import com.melvin.minige.domain.BossPickupFormatter
 import com.melvin.minige.domain.CustomerRecord
 import com.melvin.minige.domain.DeliveryRecord
@@ -739,5 +741,30 @@ class ExampleUnitTest {
         assertTrue(msg.contains("https://github.com/melvinandres081223-spec/Minige/releases/latest"))
         assertEquals(5, DeveloperSignatureConfig.EASTER_EGG_TAPS)
         assertTrue(DeveloperSignatureConfig.EASTER_EGG_MESSAGE.contains("Melvin"))
+    }
+
+    @Test
+    fun `firestore sync helper classifies offline errors gracefully and formats concise status messages`() {
+        val offlineMessageEx = RuntimeException("Failed to get document because the client is offline.")
+        val queuedEx = FirestoreOfflineQueuedException()
+        val unknownHostEx = java.net.UnknownHostException("firestore.googleapis.com")
+        val unrelatedEx = IllegalArgumentException("Validation error")
+
+        assertTrue(FirestoreSyncHelper.isOfflineFirestoreError(offlineMessageEx))
+        assertTrue(FirestoreSyncHelper.isOfflineFirestoreError(queuedEx))
+        assertTrue(FirestoreSyncHelper.isOfflineFirestoreError(unknownHostEx))
+        assertFalse(FirestoreSyncHelper.isOfflineFirestoreError(unrelatedEx))
+
+        assertEquals(
+            "Saved offline — will auto-sync when online",
+            FirestoreSyncHelper.formatSyncErrorMessage(offlineMessageEx),
+        )
+        assertEquals(
+            "Saved offline — will auto-sync when online",
+            FirestoreSyncHelper.formatSyncErrorMessage(queuedEx),
+        )
+        assertFalse(FirestoreSyncHelper.formatSyncErrorMessage(offlineMessageEx).contains("Failed to get document"))
+        assertEquals("Synced to Cloud ✓", FirestoreSyncHelper.formatSyncSuccessMessage(0))
+        assertEquals("Synced 3 item(s) — Synced to Cloud ✓", FirestoreSyncHelper.formatSyncSuccessMessage(3))
     }
 }

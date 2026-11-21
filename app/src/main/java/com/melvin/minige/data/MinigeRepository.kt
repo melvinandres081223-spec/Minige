@@ -52,12 +52,37 @@ class MinigeRepository(
     fun observeCustomers(userId: String): Flow<List<CustomerRecord>> =
         pricingRepository.observeCustomers(userId)
 
+    fun observePendingSyncCount(userId: String): Flow<Int> =
+        dao.observeTotalPendingSyncCount(userId)
+
     /**
      * Streams Firestore collections into local Room cache while preserving any un-synced local edits.
      */
-    suspend fun startCloudSync(userId: String, onError: (Throwable) -> Unit) = coroutineScope {
+    suspend fun startCloudSync(
+        userId: String,
+        onError: (Throwable) -> Unit,
+        onAutoSynced: (() -> Unit)? = null,
+    ) = coroutineScope {
+        remote.ensureNetworkEnabled()
         launch {
-            syncPendingToCloud(userId)
+            val res = syncPendingToCloud(userId)
+            if (res.isSuccess) {
+                onAutoSynced?.invoke()
+            }
+        }
+        launch {
+            remote.observeServerOnlineTrigger(userId)
+                .collectLatest {
+                    val hasPending = hasPendingItems(userId)
+                    if (hasPending) {
+                        val res = syncPendingToCloud(userId)
+                        if (res.isSuccess) {
+                            onAutoSynced?.invoke()
+                        }
+                    } else {
+                        onAutoSynced?.invoke()
+                    }
+                }
         }
         launch {
             remote.observeDeliveries(userId)
@@ -142,7 +167,19 @@ class MinigeRepository(
         }
     }
 
+    private suspend fun hasPendingItems(userId: String): Boolean {
+        val settings = dao.getSettingsOnce()
+        val settingsPending = settings != null && settings.pendingSync && settings.userId == userId
+        return settingsPending ||
+            dao.getPendingDeliveries(userId).isNotEmpty() ||
+            dao.getPendingUtangPayments(userId).isNotEmpty() ||
+            dao.getPendingExpenses(userId).isNotEmpty() ||
+            dao.getPendingDailyLedgers(userId).isNotEmpty() ||
+            dao.getPendingCustomers(userId).isNotEmpty()
+    }
+
     suspend fun syncPendingToCloud(userId: String): Result<Int> {
+        remote.ensureNetworkEnabled()
         var syncedCount = 0
         var lastError: Throwable? = null
 
@@ -210,7 +247,14 @@ class MinigeRepository(
         syncedCount += custSynced
         if (custError != null) lastError = custError
 
-        return if (lastError != null && syncedCount == 0) {
+        if (lastError == null) {
+            val flushRes = remote.flushPendingWrites()
+            if (flushRes.isFailure) {
+                lastError = flushRes.exceptionOrNull()
+            }
+        }
+
+        return if (lastError != null) {
             Result.failure(lastError)
         } else {
             Result.success(syncedCount)

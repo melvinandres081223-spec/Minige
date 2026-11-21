@@ -11,6 +11,7 @@ import com.melvin.minige.R
 import com.melvin.minige.data.MinigeRepository
 import com.melvin.minige.data.PricingRepository
 import com.melvin.minige.data.local.MinigeDatabase
+import com.melvin.minige.data.remote.FirestoreSyncHelper
 import com.melvin.minige.data.remote.MinigeFirestoreDataSource
 import com.melvin.minige.domain.BossPickupFormatter
 import com.melvin.minige.domain.CustomerRecord
@@ -148,10 +149,16 @@ class MinigeViewModel(
     init {
         viewModelScope.launch {
             try {
-                repository.startCloudSync(currentUserId) { error ->
-                    Log.w(TAG, "Cloud sync stream error", error)
-                    _statusMessage.value = "Offline mode: changes saved locally and queued for sync."
-                }
+                repository.startCloudSync(
+                    userId = currentUserId,
+                    onError = { error ->
+                        Log.w(TAG, "Cloud sync stream error", error)
+                        _statusMessage.value = FirestoreSyncHelper.formatSyncErrorMessage(error)
+                    },
+                    onAutoSynced = {
+                        _statusMessage.value = null
+                    },
+                )
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -167,6 +174,7 @@ class MinigeViewModel(
         repository.observeDailyLedgers(currentUserId),
         repository.observeSettings(),
         repository.observeCustomers(currentUserId),
+        repository.observePendingSyncCount(currentUserId),
     ) { values ->
         @Suppress("UNCHECKED_CAST")
         val deliveries = values[0] as List<DeliveryRecord>
@@ -179,7 +187,8 @@ class MinigeViewModel(
         val settings = values[4] as MinigeSettings
         @Suppress("UNCHECKED_CAST")
         val customers = values[5] as List<CustomerRecord>
-        LocalBundle(deliveries, payments, expenses, ledgers, settings, customers)
+        val pendingCount = values[6] as Int
+        LocalBundle(deliveries, payments, expenses, ledgers, settings, customers, pendingCount)
     }
 
     private data class ViewPrefsSnapshot(
@@ -273,11 +282,7 @@ class MinigeViewModel(
             utangPayments = bundle.payments,
         )
 
-        val pendingCount = bundle.deliveries.count { it.pendingSync } +
-            bundle.payments.count { it.pendingSync } +
-            bundle.expenses.count { it.pendingSync } +
-            bundle.ledgers.count { it.pendingSync } +
-            bundle.customers.count { it.pendingSync }
+        val pendingCount = bundle.pendingCount
 
         MinigeUiState(
             selectedDate = date,
@@ -663,14 +668,16 @@ class MinigeViewModel(
             val res = repository.syncPendingToCloud(currentUserId)
             _isSyncing.value = false
             res.onSuccess { count ->
+                _statusMessage.value = null
                 _events.tryEmit(
-                    MinigeEvent.ShowMessage(
-                        if (count > 0) "Synced $count pending item(s) to Firestore"
-                        else "Everything is up to date"
-                    )
+                    MinigeEvent.ShowMessage(FirestoreSyncHelper.formatSyncSuccessMessage(count))
                 )
             }.onFailure { err ->
-                _events.tryEmit(MinigeEvent.ShowMessage("Sync failed: ${err.localizedMessage ?: "Offline"}"))
+                val friendlyMsg = FirestoreSyncHelper.formatSyncErrorMessage(err)
+                if (FirestoreSyncHelper.isOfflineFirestoreError(err)) {
+                    _statusMessage.value = friendlyMsg
+                }
+                _events.tryEmit(MinigeEvent.ShowMessage(friendlyMsg))
             }
         }
     }
@@ -762,6 +769,7 @@ class MinigeViewModel(
         val ledgers: List<com.melvin.minige.domain.DailyLedgerRecord>,
         val settings: MinigeSettings,
         val customers: List<CustomerRecord>,
+        val pendingCount: Int,
     )
 
     companion object {
@@ -771,7 +779,9 @@ class MinigeViewModel(
             initializer {
                 val app = checkNotNull(this[ViewModelProvider.AndroidViewModelFactory.APPLICATION_KEY])
                 val databaseId = app.getString(R.string.firestore_database_id)
-                val firestore = FirebaseFirestore.getInstance(databaseId)
+                val firestore = FirebaseFirestore.getInstance(databaseId).also {
+                    FirestoreSyncHelper.configurePersistentCache(it)
+                }
                 val roomDb = MinigeDatabase.getInstance(app)
                 val dao = roomDb.minigeDao()
                 val remote = MinigeFirestoreDataSource(firestore)

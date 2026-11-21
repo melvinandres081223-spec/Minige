@@ -4,9 +4,12 @@ import android.content.Context
 import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.auth
+import com.google.firebase.firestore.DocumentReference
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreException
+import com.google.firebase.firestore.MetadataChanges
+import com.google.firebase.firestore.Source
 import com.google.firebase.firestore.snapshots
 import com.melvin.minige.R
 import com.melvin.minige.data.local.AppSettingsEntity
@@ -19,9 +22,11 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withTimeoutOrNull
 
 class MinigeFirestoreDataSource(
     private val db: FirebaseFirestore,
@@ -33,11 +38,68 @@ class MinigeFirestoreDataSource(
         )
     )
 
+    init {
+        FirestoreSyncHelper.configurePersistentCache(db)
+    }
+
     private fun requireUserId(expectedUid: String): String {
         val uid = auth.currentUser?.uid
             ?: throw IllegalStateException("User must be signed in with Google before accessing Firestore.")
         check(uid == expectedUid) { "Signed-in user changed; refusing cross-user Firestore operation." }
         return uid
+    }
+
+    suspend fun ensureNetworkEnabled() {
+        try {
+            withTimeoutOrNull(NETWORK_ENABLE_TIMEOUT_MS) {
+                db.enableNetwork().await()
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // Non-fatal: Firestore local persistent cache remains active.
+        }
+    }
+
+    suspend fun flushPendingWrites(): Result<Unit> {
+        return try {
+            ensureNetworkEnabled()
+            val flushed = withTimeoutOrNull(WRITE_ACK_TIMEOUT_MS) {
+                db.waitForPendingWrites().await()
+                true
+            }
+            if (flushed == true) {
+                Result.success(Unit)
+            } else {
+                Result.failure(FirestoreOfflineQueuedException(FirestoreSyncHelper.MSG_SAVED_OFFLINE))
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (FirestoreSyncHelper.isOfflineFirestoreError(e)) {
+                Result.failure(FirestoreOfflineQueuedException(FirestoreSyncHelper.MSG_SAVED_OFFLINE, e))
+            } else {
+                Result.failure(e)
+            }
+        }
+    }
+
+    /**
+     * Emits whenever Firestore receives a confirmed, non-cached snapshot with zero pending writes,
+     * allowing Room's pending queue to drain automatically once mobile data or Wi-Fi reconnects.
+     */
+    fun observeServerOnlineTrigger(userId: String): Flow<Unit> = flow {
+        val uid = requireUserId(userId)
+        emitAll(
+            db.collection("users").document(uid).collection("deliveries")
+                .limit(1)
+                .snapshots(MetadataChanges.INCLUDE)
+                .filter { snap -> !snap.metadata.isFromCache && !snap.metadata.hasPendingWrites() }
+                .map { Unit }
+                .catch { error ->
+                    if (error is CancellationException) throw error
+                }
+        )
     }
 
     fun observeDeliveries(userId: String): Flow<List<DeliveryEntity>> = flow {
@@ -141,13 +203,12 @@ class MinigeFirestoreDataSource(
         return try {
             val uid = requireUserId(userId)
             val docRef = db.collection("users").document(uid).collection("deliveries").document(entity.id)
-            val existingSnap = docRef.get().await()
-            if (existingSnap.exists()) {
-                docRef.update(entity.toFirestoreUpdateMap()).await()
-            } else {
-                docRef.set(entity.toFirestoreCreateMap(uid)).await()
-            }
-            Result.success(Unit)
+            upsertDocumentResilient(
+                docRef = docRef,
+                path = path,
+                createMap = entity.toFirestoreCreateMap(uid),
+                updateMap = entity.toFirestoreUpdateMap(),
+            )
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -158,17 +219,11 @@ class MinigeFirestoreDataSource(
 
     suspend fun deleteDelivery(userId: String, deliveryId: String): Result<Unit> {
         val path = "users/$userId/deliveries/$deliveryId"
-        return try {
-            val uid = requireUserId(userId)
+        return deleteDocumentResilient(
+            userId = userId,
+            path = path,
+        ) { uid ->
             db.collection("users").document(uid).collection("deliveries").document(deliveryId)
-                .delete()
-                .await()
-            Result.success(Unit)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.DELETE, path)
-            Result.failure(e)
         }
     }
 
@@ -177,8 +232,12 @@ class MinigeFirestoreDataSource(
         return try {
             val uid = requireUserId(userId)
             val docRef = db.collection("users").document(uid).collection("utangPayments").document(entity.id)
-            docRef.set(entity.toFirestoreCreateMap(uid)).await()
-            Result.success(Unit)
+            upsertDocumentResilient(
+                docRef = docRef,
+                path = path,
+                createMap = entity.toFirestoreCreateMap(uid),
+                updateMap = entity.toFirestoreUpdateMap(),
+            )
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -189,17 +248,11 @@ class MinigeFirestoreDataSource(
 
     suspend fun deleteUtangPayment(userId: String, paymentId: String): Result<Unit> {
         val path = "users/$userId/utangPayments/$paymentId"
-        return try {
-            val uid = requireUserId(userId)
+        return deleteDocumentResilient(
+            userId = userId,
+            path = path,
+        ) { uid ->
             db.collection("users").document(uid).collection("utangPayments").document(paymentId)
-                .delete()
-                .await()
-            Result.success(Unit)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.DELETE, path)
-            Result.failure(e)
         }
     }
 
@@ -208,8 +261,12 @@ class MinigeFirestoreDataSource(
         return try {
             val uid = requireUserId(userId)
             val docRef = db.collection("users").document(uid).collection("expenses").document(entity.id)
-            docRef.set(entity.toFirestoreCreateMap(uid)).await()
-            Result.success(Unit)
+            upsertDocumentResilient(
+                docRef = docRef,
+                path = path,
+                createMap = entity.toFirestoreCreateMap(uid),
+                updateMap = entity.toFirestoreUpdateMap(),
+            )
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -220,17 +277,11 @@ class MinigeFirestoreDataSource(
 
     suspend fun deleteExpense(userId: String, expenseId: String): Result<Unit> {
         val path = "users/$userId/expenses/$expenseId"
-        return try {
-            val uid = requireUserId(userId)
+        return deleteDocumentResilient(
+            userId = userId,
+            path = path,
+        ) { uid ->
             db.collection("users").document(uid).collection("expenses").document(expenseId)
-                .delete()
-                .await()
-            Result.success(Unit)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.DELETE, path)
-            Result.failure(e)
         }
     }
 
@@ -239,13 +290,12 @@ class MinigeFirestoreDataSource(
         return try {
             val uid = requireUserId(userId)
             val docRef = db.collection("users").document(uid).collection("dailyLedgers").document(entity.dateKey)
-            val snap = docRef.get().await()
-            if (snap.exists()) {
-                docRef.update(entity.toFirestoreUpdateMap()).await()
-            } else {
-                docRef.set(entity.toFirestoreCreateMap(uid)).await()
-            }
-            Result.success(Unit)
+            upsertDocumentResilient(
+                docRef = docRef,
+                path = path,
+                createMap = entity.toFirestoreCreateMap(uid),
+                updateMap = entity.toFirestoreUpdateMap(),
+            )
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -259,13 +309,12 @@ class MinigeFirestoreDataSource(
         return try {
             val uid = requireUserId(userId)
             val docRef = db.collection("users").document(uid).collection("settings").document("config")
-            val snap = docRef.get().await()
-            if (snap.exists()) {
-                docRef.update(entity.toFirestoreUpdateMap()).await()
-            } else {
-                docRef.set(entity.toFirestoreCreateMap(uid)).await()
-            }
-            Result.success(Unit)
+            upsertDocumentResilient(
+                docRef = docRef,
+                path = path,
+                createMap = entity.toFirestoreCreateMap(uid),
+                updateMap = entity.toFirestoreUpdateMap(),
+            )
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -298,18 +347,170 @@ class MinigeFirestoreDataSource(
         return try {
             val uid = requireUserId(userId)
             val docRef = db.collection("users").document(uid).collection("customers").document(entity.id)
-            val snap = docRef.get().await()
-            if (snap.exists()) {
-                docRef.update(entity.toFirestoreUpdateMap()).await()
-            } else {
-                docRef.set(entity.toFirestoreCreateMap(uid)).await()
-            }
-            Result.success(Unit)
+            upsertDocumentResilient(
+                docRef = docRef,
+                path = path,
+                createMap = entity.toFirestoreCreateMap(uid),
+                updateMap = entity.toFirestoreUpdateMap(),
+            )
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.WRITE, path)
             Result.failure(e)
+        }
+    }
+
+    /**
+     * Reads with [Source.DEFAULT] (never SERVER-only) after enabling Firestore network.
+     * If Firestore transiently reports client offline or uncached read failure, falls back to
+     * [Source.CACHE] and proceeds cleanly with local persistent write queueing.
+     */
+    private suspend fun getDocumentWithOfflineFallback(docRef: DocumentReference): DocumentSnapshot? {
+        ensureNetworkEnabled()
+        return try {
+            val snap = withTimeoutOrNull(DOC_GET_TIMEOUT_MS) {
+                docRef.get(Source.DEFAULT).await()
+            }
+            if (snap != null) {
+                snap
+            } else {
+                // Timed out waiting for remote response; inspect local cache only.
+                try {
+                    docRef.get(Source.CACHE).await()
+                } catch (_: Exception) {
+                    null
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (!FirestoreSyncHelper.isOfflineFirestoreError(e)) {
+                throw e
+            }
+            // Retry once after explicitly waking network; if still offline, inspect local cache cleanly.
+            ensureNetworkEnabled()
+            try {
+                withTimeoutOrNull(DOC_RETRY_TIMEOUT_MS) {
+                    docRef.get(Source.DEFAULT).await()
+                } ?: try {
+                    docRef.get(Source.CACHE).await()
+                } catch (_: Exception) {
+                    null
+                }
+            } catch (retryErr: CancellationException) {
+                throw retryErr
+            } catch (retryErr: Exception) {
+                if (!FirestoreSyncHelper.isOfflineFirestoreError(retryErr)) {
+                    throw retryErr
+                }
+                try {
+                    docRef.get(Source.CACHE).await()
+                } catch (_: Exception) {
+                    null
+                }
+            }
+        }
+    }
+
+    private suspend fun upsertDocumentResilient(
+        docRef: DocumentReference,
+        path: String,
+        createMap: Map<String, Any>,
+        updateMap: Map<String, Any>,
+    ): Result<Unit> {
+        val existingSnap = getDocumentWithOfflineFallback(docRef)
+        val isExistingDoc = existingSnap?.exists() == true
+        val writeTask = if (isExistingDoc) {
+            docRef.update(updateMap)
+        } else {
+            docRef.set(createMap)
+        }
+
+        return try {
+            val confirmed = withTimeoutOrNull(WRITE_ACK_TIMEOUT_MS) {
+                writeTask.await()
+                true
+            }
+            if (confirmed == true) {
+                Result.success(Unit)
+            } else {
+                // Write is already queued in Firestore's persistent offline cache.
+                Result.failure(FirestoreOfflineQueuedException(FirestoreSyncHelper.MSG_SAVED_OFFLINE))
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Edge case: uncached offline fallback chose set(createMap), but document actually exists on server
+            // with an immutable createdAt timestamp. Retry as update(updateMap) if server says it exists.
+            if (!isExistingDoc && FirestoreSyncHelper.isPermissionDeniedError(e)) {
+                val refreshed = try {
+                    withTimeoutOrNull(DOC_GET_TIMEOUT_MS) {
+                        docRef.get(Source.DEFAULT).await()
+                    }
+                } catch (_: Exception) {
+                    null
+                }
+                if (refreshed?.exists() == true) {
+                    return try {
+                        val updateAck = withTimeoutOrNull(WRITE_ACK_TIMEOUT_MS) {
+                            docRef.update(updateMap).await()
+                            true
+                        }
+                        if (updateAck == true) {
+                            Result.success(Unit)
+                        } else {
+                            Result.failure(FirestoreOfflineQueuedException(FirestoreSyncHelper.MSG_SAVED_OFFLINE))
+                        }
+                    } catch (uErr: CancellationException) {
+                        throw uErr
+                    } catch (uErr: Exception) {
+                        if (FirestoreSyncHelper.isOfflineFirestoreError(uErr)) {
+                            Result.failure(FirestoreOfflineQueuedException(FirestoreSyncHelper.MSG_SAVED_OFFLINE, uErr))
+                        } else {
+                            handleFirestoreError(uErr, OperationType.WRITE, path)
+                            Result.failure(uErr)
+                        }
+                    }
+                }
+            }
+
+            if (FirestoreSyncHelper.isOfflineFirestoreError(e)) {
+                Result.failure(FirestoreOfflineQueuedException(FirestoreSyncHelper.MSG_SAVED_OFFLINE, e))
+            } else {
+                handleFirestoreError(e, OperationType.WRITE, path)
+                Result.failure(e)
+            }
+        }
+    }
+
+    private suspend fun deleteDocumentResilient(
+        userId: String,
+        path: String,
+        refProvider: (String) -> DocumentReference,
+    ): Result<Unit> {
+        return try {
+            val uid = requireUserId(userId)
+            ensureNetworkEnabled()
+            val deleteTask = refProvider(uid).delete()
+            val confirmed = withTimeoutOrNull(WRITE_ACK_TIMEOUT_MS) {
+                deleteTask.await()
+                true
+            }
+            if (confirmed == true) {
+                Result.success(Unit)
+            } else {
+                Result.failure(FirestoreOfflineQueuedException(FirestoreSyncHelper.MSG_SAVED_OFFLINE))
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (FirestoreSyncHelper.isOfflineFirestoreError(e)) {
+                Result.failure(FirestoreOfflineQueuedException(FirestoreSyncHelper.MSG_SAVED_OFFLINE, e))
+            } else {
+                handleFirestoreError(e, OperationType.DELETE, path)
+                Result.failure(e)
+            }
         }
     }
 
@@ -322,5 +523,12 @@ class MinigeFirestoreDataSource(
         if (exceptionToLog != null && auth.currentUser?.uid == uid) {
             handleFirestoreError(exceptionToLog, OperationType.LIST, path)
         }
+    }
+
+    companion object {
+        private const val NETWORK_ENABLE_TIMEOUT_MS = 4_000L
+        private const val DOC_GET_TIMEOUT_MS = 5_000L
+        private const val DOC_RETRY_TIMEOUT_MS = 3_000L
+        private const val WRITE_ACK_TIMEOUT_MS = 8_000L
     }
 }

@@ -119,4 +119,17 @@ interface MinigeDao {
 
     @Query("UPDATE customers SET pendingSync = 0 WHERE id = :id")
     suspend fun markCustomerSynced(id: String)
+
+    @Query(
+        """
+        SELECT
+            (SELECT COUNT(*) FROM deliveries WHERE userId = :userId AND pendingSync = 1) +
+            (SELECT COUNT(*) FROM utang_payments WHERE userId = :userId AND pendingSync = 1) +
+            (SELECT COUNT(*) FROM expenses WHERE userId = :userId AND pendingSync = 1) +
+            (SELECT COUNT(*) FROM daily_ledgers WHERE userId = :userId AND pendingSync = 1) +
+            (SELECT COUNT(*) FROM customers WHERE userId = :userId AND pendingSync = 1) +
+            (SELECT COUNT(*) FROM app_settings WHERE id = 'default' AND userId = :userId AND pendingSync = 1)
+        """
+    )
+    fun observeTotalPendingSyncCount(userId: String): Flow<Int>
 }

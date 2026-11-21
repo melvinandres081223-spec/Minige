@@ -206,6 +206,14 @@ internal fun UtangPaymentEntity.toFirestoreCreateMap(uid: String): Map<String, A
     "updatedAt" to FieldValue.serverTimestamp(),
 )
 
+internal fun UtangPaymentEntity.toFirestoreUpdateMap(): Map<String, Any> = mapOf(
+    "dateKey" to dateKey,
+    "amount" to amount.toLong(),
+    "method" to method,
+    "notes" to notes.take(300),
+    "updatedAt" to FieldValue.serverTimestamp(),
+)
+
 internal fun ExpenseEntity.toFirestoreCreateMap(uid: String): Map<String, Any> = mapOf(
     "userId" to uid,
     "dateKey" to dateKey,
@@ -213,6 +221,14 @@ internal fun ExpenseEntity.toFirestoreCreateMap(uid: String): Map<String, Any> =
     "amount" to amount.toLong(),
     "notes" to notes.take(300),
     "createdAt" to FieldValue.serverTimestamp(),
+    "updatedAt" to FieldValue.serverTimestamp(),
+)
+
+internal fun ExpenseEntity.toFirestoreUpdateMap(): Map<String, Any> = mapOf(
+    "dateKey" to dateKey,
+    "category" to category,
+    "amount" to amount.toLong(),
+    "notes" to notes.take(300),
     "updatedAt" to FieldValue.serverTimestamp(),
 )
 

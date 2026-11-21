@@ -4,13 +4,17 @@ import android.content.Context
 import androidx.room.Room
 import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.test.core.app.ApplicationProvider
+import com.google.firebase.firestore.FirebaseFirestoreException
 import com.melvin.minige.data.local.CustomerEntity
 import com.melvin.minige.data.local.MinigeDatabase
+import com.melvin.minige.data.remote.FirestoreSyncHelper
 import com.melvin.minige.sync.GitHubAppUpdater
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -137,6 +141,11 @@ class ExampleRobolectricTest {
 
             val saved = dao.getCustomerById("aling_nena")
             assertEquals(25.0, saved?.lastUnitPrice ?: 0.0, 0.001)
+            assertEquals(1, dao.observeTotalPendingSyncCount("u1").first())
+
+            // Mark synced and verify pending count clears cleanly
+            dao.markCustomerSynced("aling_nena")
+            assertEquals(0, dao.observeTotalPendingSyncCount("u1").first())
 
             // Update price on subsequent delivery
             dao.upsertCustomer(
@@ -185,5 +194,22 @@ class ExampleRobolectricTest {
             cursor.close()
             helper.close()
         }
+    }
+
+    @Test
+    fun `firestore sync helper detects UNAVAILABLE vs PERMISSION_DENIED FirebaseFirestoreException`() {
+        val unavailable = FirebaseFirestoreException(
+            "Failed to get document because the client is offline.",
+            FirebaseFirestoreException.Code.UNAVAILABLE,
+        )
+        val denied = FirebaseFirestoreException(
+            "Missing or insufficient permissions.",
+            FirebaseFirestoreException.Code.PERMISSION_DENIED,
+        )
+
+        assertTrue(FirestoreSyncHelper.isOfflineFirestoreError(unavailable))
+        assertEquals("Saved offline — will auto-sync when online", FirestoreSyncHelper.formatSyncErrorMessage(unavailable))
+        assertFalse(FirestoreSyncHelper.isOfflineFirestoreError(denied))
+        assertTrue(FirestoreSyncHelper.isPermissionDeniedError(denied))
     }
 }
