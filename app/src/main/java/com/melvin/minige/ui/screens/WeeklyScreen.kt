@@ -18,6 +18,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material3.Button
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -31,6 +32,9 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.melvin.minige.domain.MinigeDateUtils
 import com.melvin.minige.ui.MinigeUiState
+import com.melvin.minige.ui.components.SundayMakeupHelper
+import com.melvin.minige.ui.components.SundayMakeupToggle
+import java.time.DayOfWeek
 import java.time.LocalDate
 
 @Composable
@@ -38,9 +42,15 @@ fun WeeklyScreen(
     uiState: MinigeUiState,
     onSelectDate: (LocalDate) -> Unit,
     onSyncCalendarClick: () -> Unit,
+    onToggleSundayMakeup: (Boolean) -> Unit,
+    onSyncSundayMakeupClick: (LocalDate) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val weekly = uiState.weeklySummary
+    val weekly = SundayMakeupHelper.applySundayMakeup(
+        baseWeekly = uiState.weeklySummary,
+        sundaySummary = uiState.sundayMakeupDaySummary,
+        enabled = uiState.sundayMakeupEnabled,
+    )
 
     Box(
         modifier = modifier.fillMaxSize(),
@@ -64,7 +74,11 @@ fun WeeklyScreen(
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
                         Text(
-                            text = "Monday–Saturday Summary",
+                            text = if (uiState.sundayMakeupEnabled) {
+                                "Mon–Sun (Brownout Makeup) Summary"
+                            } else {
+                                "Monday–Saturday Summary"
+                            },
                             style = MaterialTheme.typography.titleMedium,
                             color = MaterialTheme.colorScheme.onPrimaryContainer,
                         )
@@ -89,26 +103,59 @@ fun WeeklyScreen(
             }
 
             item {
-                Button(
-                    onClick = onSyncCalendarClick,
-                    enabled = !uiState.isCalendarSyncing,
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .defaultMinSize(minHeight = 52.dp)
-                        .testTag("weekly_calendar_sync_button"),
-                ) {
-                    Icon(Icons.Rounded.CalendarMonth, contentDescription = null)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        if (uiState.isCalendarSyncing) "Syncing ${uiState.selectedDateKey}..."
-                        else "Sync Selected Day (${uiState.selectedDateKey}) to Google Calendar"
-                    )
+                SundayMakeupToggle(
+                    enabled = uiState.sundayMakeupEnabled,
+                    sundaySummary = uiState.sundayMakeupDaySummary,
+                    onToggle = onToggleSundayMakeup,
+                )
+            }
+
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = onSyncCalendarClick,
+                        enabled = !uiState.isCalendarSyncing,
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minHeight = 52.dp)
+                            .testTag("weekly_calendar_sync_button"),
+                    ) {
+                        Icon(Icons.Rounded.CalendarMonth, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            if (uiState.isCalendarSyncing) "Syncing ${uiState.selectedDateKey}..."
+                            else "Sync Selected Day (${uiState.selectedDateKey}) to Google Calendar"
+                        )
+                    }
+
+                    if (uiState.sundayMakeupEnabled) {
+                        FilledTonalButton(
+                            onClick = { onSyncSundayMakeupClick(uiState.sundayMakeupDaySummary.date) },
+                            enabled = !uiState.isCalendarSyncing,
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .defaultMinSize(minHeight = 48.dp)
+                                .testTag("sunday_makeup_sync_button"),
+                        ) {
+                            Icon(Icons.Rounded.CalendarMonth, contentDescription = null)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Sync Sunday Makeup (${uiState.sundayMakeupDaySummary.dateKey}) to Calendar",
+                            )
+                        }
+                    }
                 }
             }
 
             items(weekly.days, key = { it.dateKey }) { day ->
                 val isSelected = day.dateKey == uiState.selectedDateKey
+                val isSundayMakeup = day.date.dayOfWeek == DayOfWeek.SUNDAY
+                val suffix = buildString {
+                    if (isSundayMakeup) append(" (Makeup)")
+                    if (isSelected) append(" (Selected)")
+                }
                 OutlinedCard(
                     onClick = { onSelectDate(day.date) },
                     shape = RoundedCornerShape(16.dp),
@@ -123,7 +170,7 @@ fun WeeklyScreen(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = MinigeDateUtils.formatShort(day.date) + if (isSelected) " (Selected)" else "",
+                                text = MinigeDateUtils.formatShort(day.date) + suffix,
                                 style = MaterialTheme.typography.titleMedium,
                                 color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
                             )

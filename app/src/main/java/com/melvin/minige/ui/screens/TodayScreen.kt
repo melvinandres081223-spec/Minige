@@ -9,6 +9,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -28,14 +30,11 @@ import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.rounded.ReceiptLong
 import androidx.compose.material.icons.automirrored.rounded.Send
-import androidx.compose.material.icons.rounded.AccountBalance
-import androidx.compose.material.icons.rounded.CalendarToday
 import androidx.compose.material.icons.rounded.CloudDone
 import androidx.compose.material.icons.rounded.CloudUpload
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.LocalShipping
-import androidx.compose.material.icons.rounded.Payments
 import androidx.compose.material.icons.rounded.WaterDrop
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -59,13 +58,15 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.ExpenseRecord
 import com.melvin.minige.domain.MinigeDateUtils
 import com.melvin.minige.domain.PaymentType
 import com.melvin.minige.ui.MinigeUiState
+import com.melvin.minige.ui.components.RemittanceSummaryCard
+import com.melvin.minige.util.DeliveryVoiceParser
+import com.melvin.minige.util.PaymentBreakdownHelper
 
 @Composable
 fun TodayScreen(
@@ -119,8 +120,11 @@ fun TodayScreen(
             }
 
             item {
-                RemittanceBreakdownCard(
-                    uiState = uiState,
+                RemittanceSummaryCard(
+                    summary = uiState.dailySummary,
+                    breakdown = uiState.todayPaymentBreakdown,
+                    defaultStartingSukli = uiState.settings.defaultSukli,
+                    isCalendarSyncing = uiState.isCalendarSyncing,
                     onEditSukliClick = onEditSukliClick,
                     onSyncCalendarClick = onSyncCalendarClick,
                 )
@@ -327,6 +331,13 @@ private fun CommissionHeroCard(uiState: MinigeUiState) {
                 color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f),
             )
 
+            val breakdown = uiState.todayPaymentBreakdown
+            Text(
+                text = "Cash Comm: ₱${breakdown.commissionFromCash} (${breakdown.cashPaidGallons}g) • Bank Comm: ₱${breakdown.commissionFromBank} (${breakdown.bankTransferGallons + breakdown.bankDepositGallons}g)",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f),
+            )
+
             HorizontalDivider(color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.15f))
 
             Row(
@@ -434,150 +445,16 @@ private fun BossPickupUpdateCard(
     }
 }
 
-@Composable
-private fun RemittanceBreakdownCard(
-    uiState: MinigeUiState,
-    onEditSukliClick: () -> Unit,
-    onSyncCalendarClick: () -> Unit,
-) {
-    val s = uiState.dailySummary
-    OutlinedCard(
-        shape = RoundedCornerShape(20.dp),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = "Remittance & Cash on Hand",
-                    style = MaterialTheme.typography.titleMedium,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(end = 8.dp),
-                )
-                FilledTonalButton(
-                    onClick = onSyncCalendarClick,
-                    enabled = !uiState.isCalendarSyncing,
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                    modifier = Modifier.testTag("sync_calendar_button"),
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.CalendarToday,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp),
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = if (uiState.isCalendarSyncing) "Syncing..." else "Calendar Sync",
-                        maxLines = 1,
-                        softWrap = false,
-                    )
-                }
-            }
-
-            MetricLine(
-                icon = Icons.Rounded.Payments,
-                label = "Cash Collected (Remit)",
-                value = "₱${s.cashCollected}",
-            )
-            MetricLine(
-                icon = Icons.Rounded.AccountBalance,
-                label = "Bank Deposit (Boss Account)",
-                value = "₱${s.bankDepositTotal}",
-            )
-            MetricLine(
-                icon = Icons.AutoMirrored.Rounded.ReceiptLong,
-                label = "Route Expenses",
-                value = "-₱${s.expensesTotal}",
-            )
-
-            HorizontalDivider()
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("Net Cash Remit", style = MaterialTheme.typography.titleMedium)
-                Text(
-                    text = "₱${s.netCashRemit}",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = "Starting Sukli: ₱${s.startingSukli}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    IconButton(
-                        onClick = onEditSukliClick,
-                        modifier = Modifier.size(48.dp).testTag("edit_sukli_button"),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Edit,
-                            contentDescription = "Edit starting sukli",
-                            modifier = Modifier.size(18.dp),
-                        )
-                    }
-                }
-                Text(
-                    text = "Cash on Hand: ₱${s.cashOnHand}",
-                    style = MaterialTheme.typography.labelLarge,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun MetricLine(
-    icon: ImageVector,
-    label: String,
-    value: String,
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.secondary,
-                modifier = Modifier.size(18.dp),
-            )
-            Text(label, style = MaterialTheme.typography.bodyMedium)
-        }
-        Text(value, style = MaterialTheme.typography.labelLarge)
-    }
-}
-
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun DeliveryRowCard(
     delivery: DeliveryRecord,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
+    val methodLabel = PaymentBreakdownHelper.displayMethodLabel(delivery)
+    val classification = DeliveryVoiceParser.extractClassification(delivery.notes)
+
     OutlinedCard(
         shape = RoundedCornerShape(16.dp),
         modifier = Modifier
@@ -595,30 +472,48 @@ private fun DeliveryRowCard(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     Text(
                         text = delivery.customerName,
                         style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.align(Alignment.CenterVertically),
                     )
                     Surface(
                         shape = CircleShape,
                         color = MaterialTheme.colorScheme.secondaryContainer,
+                        modifier = Modifier.align(Alignment.CenterVertically),
                     ) {
                         Text(
-                            text = delivery.paymentType.label,
+                            text = methodLabel,
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSecondaryContainer,
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
                         )
                     }
+                    if (classification != null) {
+                        Surface(
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.tertiaryContainer,
+                            modifier = Modifier.align(Alignment.CenterVertically),
+                        ) {
+                            Text(
+                                text = classification.label,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                            )
+                        }
+                    }
                     Icon(
                         imageVector = if (delivery.pendingSync) Icons.Rounded.CloudUpload else Icons.Rounded.CloudDone,
                         contentDescription = if (delivery.pendingSync) "Pending cloud sync" else "Synced",
                         tint = if (delivery.pendingSync) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(16.dp),
+                        modifier = Modifier
+                            .size(16.dp)
+                            .align(Alignment.CenterVertically),
                     )
                 }
 

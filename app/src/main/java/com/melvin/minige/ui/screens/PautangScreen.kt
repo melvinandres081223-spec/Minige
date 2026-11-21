@@ -48,7 +48,9 @@ import com.melvin.minige.domain.UtangMethod
 import com.melvin.minige.ui.MinigeUiState
 import com.melvin.minige.ui.components.OverduePautangBadge
 import com.melvin.minige.ui.components.OverduePautangBanner
+import com.melvin.minige.util.PaidChannel
 import com.melvin.minige.util.PautangOverdueHelper
+import com.melvin.minige.util.PaymentBreakdownHelper
 
 @Composable
 fun PautangScreen(
@@ -299,7 +301,7 @@ private fun CollectUtangDialog(
 ) {
     val remaining = delivery.remainingBalance
     var amountText by remember(delivery.id) { mutableStateOf(remaining.toString()) }
-    var method by remember { mutableStateOf(UtangMethod.CASH) }
+    var selectedChannel by remember(delivery.id) { mutableStateOf(PaidChannel.CASH) }
     var notes by remember { mutableStateOf("") }
 
     val parsedAmount = (amountText.toIntOrNull() ?: 0).coerceIn(0, remaining)
@@ -316,11 +318,12 @@ private fun CollectUtangDialog(
                 )
 
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    UtangMethod.entries.forEach { m ->
+                    PaidChannel.entries.forEach { channel ->
                         FilterChip(
-                            selected = method == m,
-                            onClick = { method = m },
-                            label = { Text(m.label) },
+                            selected = selectedChannel == channel,
+                            onClick = { selectedChannel = channel },
+                            label = { Text(channel.label) },
+                            modifier = Modifier.testTag("utang_channel_${channel.name}"),
                         )
                     }
                     FilterChip(
@@ -360,8 +363,12 @@ private fun CollectUtangDialog(
         },
         confirmButton = {
             Button(
-                onClick = { onConfirm(parsedAmount, method, notes) },
+                onClick = {
+                    val taggedNotes = PaymentBreakdownHelper.applyChannelTag(notes, selectedChannel)
+                    onConfirm(parsedAmount, selectedChannel.storedUtangMethod, taggedNotes)
+                },
                 enabled = parsedAmount > 0,
+                modifier = Modifier.testTag("confirm_utang_payment_button"),
             ) {
                 Text("Record Payment")
             }

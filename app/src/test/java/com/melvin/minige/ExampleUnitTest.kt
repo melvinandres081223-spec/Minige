@@ -1,6 +1,7 @@
 package com.melvin.minige
 
 import com.melvin.minige.domain.BossPickupFormatter
+import com.melvin.minige.domain.CustomerRecord
 import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.ExpenseCategory
 import com.melvin.minige.domain.ExpenseRecord
@@ -9,9 +10,15 @@ import com.melvin.minige.domain.MinigeCustomerUtils
 import com.melvin.minige.domain.PaymentType
 import com.melvin.minige.domain.UtangMethod
 import com.melvin.minige.domain.UtangPaymentRecord
+import com.melvin.minige.ui.components.SundayMakeupHelper
+import com.melvin.minige.util.CustomerClassification
+import com.melvin.minige.util.DeliveryVoiceParser
+import com.melvin.minige.util.PaidChannel
 import com.melvin.minige.util.PautangOverdueHelper
+import com.melvin.minige.util.PaymentBreakdownHelper
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.LocalDate
@@ -189,5 +196,129 @@ class ExampleUnitTest {
         )
         assertEquals(0, clearedSummary.overdueCount)
         assertEquals(0, clearedSummary.totalOverdueAmount)
+    }
+
+    @Test
+    fun `payment breakdown helper separates cash to remit from bank transfer and deposit while keeping commission`() {
+        val today = "2026-11-21"
+        val cashDelivery = delivery("c1", today, "Cash Store", 10, 0, PaymentType.CASH, 300, 8, 80, today)
+        val bankTransferDelivery = delivery(
+            "b1", today, "Ate Maria", 5, 0, PaymentType.BANK_DEPOSIT, 150, 8, 40, today
+        ).copy(notes = PaymentBreakdownHelper.applyChannelTag("", PaidChannel.BANK_TRANSFER))
+        val bankDepositDelivery = delivery(
+            "b2", today, "Kuya Jun", 4, 0, PaymentType.BANK_DEPOSIT, 120, 8, 32, today
+        ).copy(notes = PaymentBreakdownHelper.applyChannelTag("", PaidChannel.BANK_DEPOSIT))
+        val settledUtangTransfer = delivery(
+            "u1", "2026-11-18", "Settled Transfer", 2, 0, PaymentType.PAUTANG, 60, 8, 16, today
+        )
+
+        val payments = listOf(
+            UtangPaymentRecord(
+                id = "p1",
+                deliveryId = "u1",
+                userId = "u1",
+                dateKey = today,
+                amount = 60,
+                method = UtangMethod.BANK_DEPOSIT,
+                notes = PaymentBreakdownHelper.applyChannelTag("GCash transfer", PaidChannel.BANK_TRANSFER),
+                pendingSync = false,
+                createdAtEpochMs = 0L,
+            )
+        )
+        val expenses = listOf(
+            ExpenseRecord("e1", "u1", today, ExpenseCategory.GAS, 100, "", false, 0L, 0L)
+        )
+
+        val breakdown = PaymentBreakdownHelper.calculateBreakdown(
+            dateKey = today,
+            deliveries = listOf(cashDelivery, bankTransferDelivery, bankDepositDelivery, settledUtangTransfer),
+            utangPayments = payments,
+            expenses = expenses,
+        )
+
+        assertEquals(10, breakdown.cashPaidGallons)
+        assertEquals(7, breakdown.bankTransferGallons) // 5 direct + 2 settled utang
+        assertEquals(4, breakdown.bankDepositGallons)
+        assertEquals(300, breakdown.cashCollected)
+        assertEquals(100, breakdown.cashExpenses)
+        assertEquals(200, breakdown.cashToRemit) // 300 - 100
+        assertEquals(210, breakdown.bankTransferAmount) // 150 + 60
+        assertEquals(120, breakdown.bankDepositAmount)
+        assertEquals(330, breakdown.bankPaidTotal)
+        assertEquals(80, breakdown.commissionFromCash)
+        assertEquals(88, breakdown.commissionFromBank) // 40 + 32 + 16
+        assertEquals(168, breakdown.totalPaidCommission)
+        assertEquals("Bank Transfer", PaymentBreakdownHelper.displayMethodLabel(bankTransferDelivery))
+        assertEquals("Bank Deposit", PaymentBreakdownHelper.displayMethodLabel(bankDepositDelivery))
+    }
+
+    @Test
+    fun `delivery voice parser extracts gallons classification payment mode and saved price`() {
+        val customers = listOf(
+            CustomerRecord(id = "ate_maria", userId = "u1", name = "Ate Maria", lastUnitPrice = 25.0),
+            CustomerRecord(id = "kuya_jun", userId = "u1", name = "Kuya Jun", lastUnitPrice = 28.0),
+        )
+
+        val pickupParsed = DeliveryVoiceParser.parse("5 outlet pick up Ate Maria", customers)
+        assertEquals(5, pickupParsed.gallons)
+        assertEquals(CustomerClassification.OUTLET, pickupParsed.classification)
+        assertEquals(PaymentType.PICK_UP, pickupParsed.paymentType)
+        assertEquals("Ate Maria", pickupParsed.customerName)
+        assertEquals(25.0, pickupParsed.rememberedUnitPrice ?: 0.0, 0.001)
+
+        val utangParsed = DeliveryVoiceParser.parse("3 residential pautang Kuya Jun", customers)
+        assertEquals(3, utangParsed.gallons)
+        assertEquals(CustomerClassification.RESIDENTIAL, utangParsed.classification)
+        assertEquals(PaymentType.PAUTANG, utangParsed.paymentType)
+        assertEquals("Kuya Jun", utangParsed.customerName)
+        assertEquals(28.0, utangParsed.rememberedUnitPrice ?: 0.0, 0.001)
+
+        val transferParsed = DeliveryVoiceParser.parse("10 alkaline bank transfer Aling Nena", customers)
+        assertEquals(10, transferParsed.gallons)
+        assertTrue(transferParsed.isAlkaline)
+        assertNull(transferParsed.classification)
+        assertEquals(PaymentType.BANK_DEPOSIT, transferParsed.paymentType)
+        assertEquals(PaidChannel.BANK_TRANSFER, transferParsed.paidChannel)
+        assertEquals("Aling Nena", transferParsed.customerName)
+        assertNull(transferParsed.rememberedUnitPrice)
+    }
+
+    @Test
+    fun `sunday brownout makeup helper keeps Mon-Sat standard and appends Sunday only when enabled`() {
+        val monday = LocalDate.of(2026, 11, 16)
+        val friday = "2026-11-20"
+        val sunday = "2026-11-22"
+
+        val deliveries = listOf(
+            delivery("d_fri", friday, "Friday Customer", 10, 0, PaymentType.CASH, 300, 8, 80, friday),
+            delivery("d_sun", sunday, "Sunday Makeup", 8, 0, PaymentType.CASH, 240, 8, 64, sunday),
+        )
+
+        val baseWeekly = MinigeCalculator.calculateWeeklySummary(
+            anchorDate = monday,
+            deliveries = deliveries,
+            utangPayments = emptyList(),
+            expenses = emptyList(),
+        )
+        val sundayDay = SundayMakeupHelper.calculateSundayDaySummary(
+            monday = baseWeekly.monday,
+            deliveries = deliveries,
+            utangPayments = emptyList(),
+            expenses = emptyList(),
+        )
+
+        // Standard Mon-Sat mode excludes Sunday
+        val standardResult = SundayMakeupHelper.applySundayMakeup(baseWeekly, sundayDay, enabled = false)
+        assertEquals(6, standardResult.days.size)
+        assertEquals(10, standardResult.totalPaidGallons)
+        assertEquals(80, standardResult.totalCommission)
+
+        // Sunday Makeup mode includes Sunday totals and day row
+        val makeupResult = SundayMakeupHelper.applySundayMakeup(baseWeekly, sundayDay, enabled = true)
+        assertEquals(7, makeupResult.days.size)
+        assertEquals(18, makeupResult.totalPaidGallons)
+        assertEquals(144, makeupResult.totalCommission)
+        assertEquals(540, makeupResult.totalCashCollected)
+        assertEquals(LocalDate.of(2026, 11, 22), makeupResult.days.last().date)
     }
 }

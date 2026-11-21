@@ -67,6 +67,10 @@ import com.melvin.minige.domain.ExpenseCategory
 import com.melvin.minige.domain.MinigeCustomerUtils
 import com.melvin.minige.domain.MinigeSettings
 import com.melvin.minige.domain.PaymentType
+import com.melvin.minige.util.CustomerClassification
+import com.melvin.minige.util.DeliveryVoiceParser
+import com.melvin.minige.util.PaidChannel
+import com.melvin.minige.util.PaymentBreakdownHelper
 import kotlinx.coroutines.delay
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -119,7 +123,21 @@ fun AddDeliverySheet(
     var paymentType by remember(initialDelivery?.id) {
         mutableStateOf(initialDelivery?.paymentType ?: PaymentType.CASH)
     }
-    var notes by remember(initialDelivery?.id) { mutableStateOf(initialDelivery?.notes ?: "") }
+    var selectedPaidChannel by remember(initialDelivery?.id) {
+        mutableStateOf(
+            if (initialDelivery != null) PaymentBreakdownHelper.resolveDeliveryChannel(initialDelivery)
+            else PaidChannel.CASH
+        )
+    }
+    var classification by remember(initialDelivery?.id) {
+        mutableStateOf(initialDelivery?.let { DeliveryVoiceParser.extractClassification(it.notes) })
+    }
+    val initialCleanNotes = remember(initialDelivery?.id) {
+        initialDelivery?.notes
+            ?.let { PaymentBreakdownHelper.stripChannelTags(DeliveryVoiceParser.stripClassificationTag(it)) }
+            ?: ""
+    }
+    var notes by remember(initialDelivery?.id) { mutableStateOf(initialCleanNotes) }
     var unitPriceText by remember(initialDelivery?.id) { mutableStateOf(initialPriceText) }
     var hasManualPriceOverride by remember(initialDelivery?.id) { mutableStateOf(initialDelivery != null) }
     var showSuggestions by remember { mutableStateOf(false) }
@@ -180,9 +198,32 @@ fun AddDeliverySheet(
                 ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
                 ?.firstOrNull()
             if (!spoken.isNullOrBlank()) {
-                customerName = spoken.trim().take(80)
+                val parsed = DeliveryVoiceParser.parse(spoken, customers)
+                if (parsed.customerName.isNotBlank()) {
+                    customerName = parsed.customerName
+                    showSuggestions = parsed.matchedCustomer == null
+                }
+                if (parsed.gallons != null) {
+                    if (parsed.isAlkaline) {
+                        alkalineText = parsed.gallons.toString()
+                        if (initialDelivery == null) purifiedText = "0"
+                    } else {
+                        purifiedText = parsed.gallons.toString()
+                        if (initialDelivery == null) alkalineText = "0"
+                    }
+                }
+                if (parsed.classification != null) {
+                    classification = parsed.classification
+                }
+                if (parsed.paymentType != null) {
+                    paymentType = parsed.paymentType
+                    selectedPaidChannel = parsed.paidChannel
+                }
                 hasManualPriceOverride = false
-                showSuggestions = true
+                if (parsed.rememberedUnitPrice != null && parsed.rememberedUnitPrice >= 0.0) {
+                    unitPriceText = MinigeCustomerUtils.formatPrice(parsed.rememberedUnitPrice)
+                }
+                formError = null
             }
         }
     }
@@ -197,7 +238,7 @@ fun AddDeliverySheet(
                     RecognizerIntent.LANGUAGE_MODEL_FREE_FORM,
                 )
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
-                putExtra(RecognizerIntent.EXTRA_PROMPT, "Say customer name")
+                putExtra(RecognizerIntent.EXTRA_PROMPT, "Say e.g. '5 outlet pick up Ate Maria'")
             }
             runCatching { voiceLauncher.launch(intent) }
         }
@@ -261,7 +302,7 @@ fun AddDeliverySheet(
                                             RecognizerIntent.EXTRA_LANGUAGE_MODEL,
                                             RecognizerIntent.LANGUAGE_MODEL_FREE_FORM,
                                         )
-                                        putExtra(RecognizerIntent.EXTRA_PROMPT, "Say customer name")
+                                        putExtra(RecognizerIntent.EXTRA_PROMPT, "Say e.g. '5 outlet pick up Ate Maria'")
                                     }
                                     runCatching { voiceLauncher.launch(intent) }
                                 } else {
@@ -272,7 +313,7 @@ fun AddDeliverySheet(
                         ) {
                             Icon(
                                 imageVector = Icons.Rounded.Mic,
-                                contentDescription = "Voice input customer name",
+                                contentDescription = "Voice input delivery details",
                             )
                         }
                     },
@@ -410,6 +451,28 @@ fun AddDeliverySheet(
 
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
+                    text = "Customer Type (Optional)",
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    CustomerClassification.entries.forEach { cls ->
+                        FilterChip(
+                            selected = classification == cls,
+                            onClick = {
+                                classification = if (classification == cls) null else cls
+                            },
+                            label = { Text(cls.label) },
+                            modifier = Modifier.testTag("classification_${cls.name}"),
+                        )
+                    }
+                }
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
                     text = "Payment / Entry Type",
                     style = MaterialTheme.typography.titleMedium,
                 )
@@ -417,14 +480,37 @@ fun AddDeliverySheet(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    PaymentType.entries.forEach { type ->
+                    PaidChannel.entries.forEach { channel ->
+                        val isSelected = paymentType == channel.storedPaymentType &&
+                            (channel == PaidChannel.CASH || selectedPaidChannel == channel)
                         FilterChip(
-                            selected = paymentType == type,
-                            onClick = { paymentType = type },
-                            label = { Text(type.label) },
-                            modifier = Modifier.testTag("payment_type_${type.name}"),
+                            selected = isSelected,
+                            onClick = {
+                                paymentType = channel.storedPaymentType
+                                selectedPaidChannel = channel
+                            },
+                            label = { Text(channel.label) },
+                            modifier = Modifier.testTag("payment_channel_${channel.name}"),
                         )
                     }
+                    FilterChip(
+                        selected = paymentType == PaymentType.PAUTANG,
+                        onClick = {
+                            paymentType = PaymentType.PAUTANG
+                            selectedPaidChannel = null
+                        },
+                        label = { Text(PaymentType.PAUTANG.label) },
+                        modifier = Modifier.testTag("payment_type_PAUTANG"),
+                    )
+                    FilterChip(
+                        selected = paymentType == PaymentType.PICK_UP,
+                        onClick = {
+                            paymentType = PaymentType.PICK_UP
+                            selectedPaidChannel = null
+                        },
+                        label = { Text(PaymentType.PICK_UP.label) },
+                        modifier = Modifier.testTag("payment_type_PICK_UP"),
+                    )
                 }
             }
 
@@ -501,12 +587,24 @@ fun AddDeliverySheet(
                         paymentType != PaymentType.PICK_UP && !isMixedDefaultPrice && priceToSave == null ->
                             formError = "Please enter a valid unit price."
                         else -> {
+                            val withChannel = if (paymentType == PaymentType.CASH || paymentType == PaymentType.BANK_DEPOSIT) {
+                                PaymentBreakdownHelper.applyChannelTag(
+                                    notes = notes,
+                                    channel = selectedPaidChannel ?: PaidChannel.CASH,
+                                )
+                            } else {
+                                PaymentBreakdownHelper.stripChannelTags(notes)
+                            }
+                            val finalNotes = DeliveryVoiceParser.applyClassificationTag(
+                                notes = withChannel,
+                                classification = classification,
+                            )
                             onSave(
                                 customerName.trim(),
                                 purifiedQty,
                                 alkalineQty,
                                 paymentType,
-                                notes,
+                                finalNotes,
                                 priceToSave,
                             )
                             onDismiss()

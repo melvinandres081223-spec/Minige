@@ -24,9 +24,13 @@ import com.melvin.minige.domain.MinigeSettings
 import com.melvin.minige.domain.PaymentType
 import com.melvin.minige.domain.UtangMethod
 import com.melvin.minige.domain.UtangPaymentRecord
+import com.melvin.minige.domain.WeeklyDaySummary
 import com.melvin.minige.domain.WeeklySummary
 import com.melvin.minige.sync.CalendarAuthResult
 import com.melvin.minige.sync.CalendarSyncManager
+import com.melvin.minige.ui.components.SundayMakeupHelper
+import com.melvin.minige.util.PaymentBreakdownHelper
+import com.melvin.minige.util.PaymentChannelBreakdown
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -64,6 +68,19 @@ data class MinigeUiState(
         utangPayments = emptyList(),
         expenses = emptyList(),
     ),
+    val todayPaymentBreakdown: PaymentChannelBreakdown = PaymentBreakdownHelper.calculateBreakdown(
+        dateKey = MinigeDateUtils.toKey(LocalDate.now()),
+        deliveries = emptyList(),
+        utangPayments = emptyList(),
+        expenses = emptyList(),
+    ),
+    val sundayMakeupEnabled: Boolean = false,
+    val sundayMakeupDaySummary: WeeklyDaySummary = SundayMakeupHelper.calculateSundayDaySummary(
+        monday = MinigeDateUtils.weekMonToSat(LocalDate.now()).first(),
+        deliveries = emptyList(),
+        utangPayments = emptyList(),
+        expenses = emptyList(),
+    ),
     val bossPickupMessage: String = "",
     val customers: List<CustomerRecord> = emptyList(),
     val pendingSyncCount: Int = 0,
@@ -84,9 +101,12 @@ class MinigeViewModel(
 ) : ViewModel() {
 
     private val _selectedDate = MutableStateFlow(LocalDate.now())
+    private val _sundayMakeupEnabled = MutableStateFlow(false)
     private val _isSyncing = MutableStateFlow(false)
     private val _isCalendarSyncing = MutableStateFlow(false)
     private val _statusMessage = MutableStateFlow<String?>(null)
+    private var latestBundle: LocalBundle? = null
+    private var pendingCalendarSyncDate: LocalDate? = null
 
     private val _events = MutableSharedFlow<MinigeEvent>(extraBufferCapacity = 8)
     val events: SharedFlow<MinigeEvent> = _events.asSharedFlow()
@@ -129,12 +149,13 @@ class MinigeViewModel(
     }
 
     val uiState: StateFlow<MinigeUiState> = combine(
-        _selectedDate,
+        combine(_selectedDate, _sundayMakeupEnabled) { date, sundayEnabled -> date to sundayEnabled },
         localDataFlow,
         _isSyncing,
         _isCalendarSyncing,
         _statusMessage,
-    ) { date, bundle, syncing, calSyncing, status ->
+    ) { (date, sundayEnabled), bundle, syncing, calSyncing, status ->
+        latestBundle = bundle
         val dateKey = MinigeDateUtils.toKey(date)
         val deliveriesForDay = bundle.deliveries.filter { it.dateKey == dateKey }
         val pickupsForDay = deliveriesForDay.filter { it.paymentType == PaymentType.PICK_UP }
@@ -155,6 +176,20 @@ class MinigeViewModel(
 
         val weeklySummary = MinigeCalculator.calculateWeeklySummary(
             anchorDate = date,
+            deliveries = bundle.deliveries,
+            utangPayments = bundle.payments,
+            expenses = bundle.expenses,
+        )
+
+        val todayPaymentBreakdown = PaymentBreakdownHelper.calculateBreakdown(
+            dateKey = dateKey,
+            deliveries = bundle.deliveries,
+            utangPayments = bundle.payments,
+            expenses = bundle.expenses,
+        )
+
+        val sundayMakeupDaySummary = SundayMakeupHelper.calculateSundayDaySummary(
+            monday = weeklySummary.monday,
             deliveries = bundle.deliveries,
             utangPayments = bundle.payments,
             expenses = bundle.expenses,
@@ -187,6 +222,9 @@ class MinigeViewModel(
             utangPayments = bundle.payments,
             dailySummary = dailySummary,
             weeklySummary = weeklySummary,
+            todayPaymentBreakdown = todayPaymentBreakdown,
+            sundayMakeupEnabled = sundayEnabled,
+            sundayMakeupDaySummary = sundayMakeupDaySummary,
             bossPickupMessage = BossPickupFormatter.format(date, pickupsForDay),
             customers = mergedCustomers,
             pendingSyncCount = pendingCount,
@@ -210,6 +248,10 @@ class MinigeViewModel(
 
     fun jumpToToday() {
         _selectedDate.value = LocalDate.now()
+    }
+
+    fun setSundayMakeupMode(enabled: Boolean) {
+        _sundayMakeupEnabled.value = enabled
     }
 
     fun clearStatusMessage() {
@@ -386,18 +428,23 @@ class MinigeViewModel(
         }
     }
 
-    fun triggerCalendarSync(context: android.content.Context) {
+    fun triggerCalendarSync(
+        context: android.content.Context,
+        targetDate: LocalDate? = null,
+    ) {
+        pendingCalendarSyncDate = targetDate
         viewModelScope.launch {
             _isCalendarSyncing.value = true
             when (val auth = CalendarSyncManager.requestCalendarAuthorization(context)) {
                 is CalendarAuthResult.Authorized -> {
-                    syncDayWithCalendarToken(auth.accessToken)
+                    syncDayWithCalendarToken(auth.accessToken, targetDate)
                 }
                 is CalendarAuthResult.NeedsConsent -> {
                     _isCalendarSyncing.value = false
                     _events.tryEmit(MinigeEvent.LaunchCalendarConsent(auth.intentSender))
                 }
                 is CalendarAuthResult.Failure -> {
+                    pendingCalendarSyncDate = null
                     _isCalendarSyncing.value = false
                     _events.tryEmit(MinigeEvent.ShowMessage(auth.message))
                 }
@@ -405,24 +452,52 @@ class MinigeViewModel(
         }
     }
 
-    fun syncDayWithCalendarToken(accessToken: String) {
+    fun syncDayWithCalendarToken(
+        accessToken: String,
+        overrideDate: LocalDate? = null,
+    ) {
         val snapshot = uiState.value
+        val effectiveDate = overrideDate ?: pendingCalendarSyncDate ?: snapshot.selectedDate
+        pendingCalendarSyncDate = null
+        val targetDateKey = MinigeDateUtils.toKey(effectiveDate)
+        val bundle = latestBundle
+        val targetDeliveries: List<DeliveryRecord>
+        val targetSummary: DailySummary
+
+        if (bundle != null && targetDateKey != snapshot.selectedDateKey) {
+            targetDeliveries = bundle.deliveries.filter { it.dateKey == targetDateKey }
+            val targetSukli = bundle.ledgers
+                .firstOrNull { it.dateKey == targetDateKey }
+                ?.startingSukli
+                ?: bundle.settings.defaultSukli
+            targetSummary = MinigeCalculator.calculateDailySummary(
+                dateKey = targetDateKey,
+                deliveries = bundle.deliveries,
+                utangPayments = bundle.payments,
+                expenses = bundle.expenses,
+                startingSukli = targetSukli,
+            )
+        } else {
+            targetDeliveries = snapshot.deliveriesForDay
+            targetSummary = snapshot.dailySummary
+        }
+
         viewModelScope.launch {
             _isCalendarSyncing.value = true
             val res = CalendarSyncManager.syncDailyDeliveriesToCalendar(
                 accessToken = accessToken,
-                dateKey = snapshot.selectedDateKey,
-                deliveries = snapshot.deliveriesForDay,
-                summary = snapshot.dailySummary,
+                dateKey = targetDateKey,
+                deliveries = targetDeliveries,
+                summary = targetSummary,
             )
             res.onSuccess { eventId ->
                 repository.linkCalendarEventToDeliveries(
                     userId = currentUserId,
-                    deliveryIds = snapshot.deliveriesForDay.map { it.id },
+                    deliveryIds = targetDeliveries.map { it.id },
                     calendarEventId = eventId,
                 )
                 _events.tryEmit(
-                    MinigeEvent.ShowMessage("Synced ${snapshot.selectedDateKey} to Google Calendar")
+                    MinigeEvent.ShowMessage("Synced $targetDateKey to Google Calendar")
                 )
             }.onFailure { err ->
                 _events.tryEmit(

@@ -265,6 +265,10 @@ fun MinigeMainShell(
                         selectedTab = MinigeTab.TODAY
                     },
                     onSyncCalendarClick = { viewModel.triggerCalendarSync(context) },
+                    onToggleSundayMakeup = viewModel::setSundayMakeupMode,
+                    onSyncSundayMakeupClick = { sundayDate ->
+                        viewModel.triggerCalendarSync(context, targetDate = sundayDate)
+                    },
                 )
                 MinigeTab.SETTINGS -> SettingsScreen(
                     uiState = uiState,
