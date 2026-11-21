@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "466130893778",
+    "project_id": "minige-f6338",
+    "storage_bucket": "minige-f6338.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:466130893778:android:c5d0d190ec29d4fb2be60b",
+        "android_client_info": {
+          "package_name": "com.melvin.minige"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "466130893778-pb1peldlqqdlmek7pijn9niq1d8jpl2p.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.melvin.minige",
+            "certificate_hash": "3c30c9d4f34a2716baa4d679152fd3f83a15e3a7"
+          }
+        },
+        {
+          "client_id": "466130893778-d8qht07hldp4d0vjvqmuo1uupi7i411o.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD8eXVr4IY6pe_LMouMPwCy2idIkHAHQy8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "466130893778-d8qht07hldp4d0vjvqmuo1uupi7i411o.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
