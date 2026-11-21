@@ -124,23 +124,48 @@ object PaymentBreakdownHelper {
         var utangCashComm = 0
         var utangBankComm = 0
 
+        paymentsForDate.forEach { payment ->
+            val chunkGals = PartialPaymentHelper.extractPaidGallons(payment)
+            if (chunkGals > 0) {
+                val chunkComm = PartialPaymentHelper.extractCommissionEarned(payment)
+                when (resolveUtangPaymentChannel(payment)) {
+                    PaidChannel.CASH -> {
+                        utangCashGals += chunkGals
+                        utangCashComm += chunkComm
+                    }
+                    PaidChannel.BANK_TRANSFER -> {
+                        utangTransferGals += chunkGals
+                        utangBankComm += chunkComm
+                    }
+                    PaidChannel.BANK_DEPOSIT -> {
+                        utangDepositGals += chunkGals
+                        utangBankComm += chunkComm
+                    }
+                }
+            }
+        }
+
         settledUtangToday.forEach { utang ->
-            val lastChannel = settledByDeliveryId[utang.id]
-                ?.lastOrNull()
-                ?.let { resolveUtangPaymentChannel(it) }
-                ?: PaidChannel.CASH
-            when (lastChannel) {
-                PaidChannel.CASH -> {
-                    utangCashGals += utang.totalGallons
-                    utangCashComm += utang.commissionEarned
-                }
-                PaidChannel.BANK_TRANSFER -> {
-                    utangTransferGals += utang.totalGallons
-                    utangBankComm += utang.commissionEarned
-                }
-                PaidChannel.BANK_DEPOSIT -> {
-                    utangDepositGals += utang.totalGallons
-                    utangBankComm += utang.commissionEarned
+            val remGals = PartialPaymentHelper.untaggedSettledRemainderGallons(utang, utangPayments)
+            val remComm = PartialPaymentHelper.untaggedSettledRemainderCommission(utang, utangPayments)
+            if (remGals > 0 || remComm > 0) {
+                val lastChannel = settledByDeliveryId[utang.id]
+                    ?.lastOrNull()
+                    ?.let { resolveUtangPaymentChannel(it) }
+                    ?: PaidChannel.CASH
+                when (lastChannel) {
+                    PaidChannel.CASH -> {
+                        utangCashGals += remGals
+                        utangCashComm += remComm
+                    }
+                    PaidChannel.BANK_TRANSFER -> {
+                        utangTransferGals += remGals
+                        utangBankComm += remComm
+                    }
+                    PaidChannel.BANK_DEPOSIT -> {
+                        utangDepositGals += remGals
+                        utangBankComm += remComm
+                    }
                 }
             }
         }

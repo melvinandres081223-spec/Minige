@@ -67,10 +67,14 @@ import com.melvin.minige.domain.ExpenseCategory
 import com.melvin.minige.domain.MinigeCustomerUtils
 import com.melvin.minige.domain.MinigeSettings
 import com.melvin.minige.domain.PaymentType
+import com.melvin.minige.ui.components.CustomerSuggestionBar
+import com.melvin.minige.util.CommissionRateHistory
 import com.melvin.minige.util.CustomerClassification
+import com.melvin.minige.util.CustomerDirectoryHelper
 import com.melvin.minige.util.DeliveryVoiceParser
 import com.melvin.minige.util.PaidChannel
 import com.melvin.minige.util.PaymentBreakdownHelper
+import com.melvin.minige.util.SukiCustomerProfile
 import kotlinx.coroutines.delay
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -80,6 +84,8 @@ import kotlin.math.roundToInt
 fun AddDeliverySheet(
     settings: MinigeSettings,
     customers: List<CustomerRecord>,
+    sukiDirectory: List<SukiCustomerProfile> = emptyList(),
+    activeCommissionRate: Double = settings.commissionRate.toDouble(),
     initialDelivery: DeliveryRecord? = null,
     onDismiss: () -> Unit,
     onSave: (
@@ -132,15 +138,19 @@ fun AddDeliverySheet(
     var classification by remember(initialDelivery?.id) {
         mutableStateOf(initialDelivery?.let { DeliveryVoiceParser.extractClassification(it.notes) })
     }
+    var routeArea by remember(initialDelivery?.id) {
+        mutableStateOf(initialDelivery?.let { CustomerDirectoryHelper.extractRouteArea(it.notes) } ?: "")
+    }
     val initialCleanNotes = remember(initialDelivery?.id) {
-        initialDelivery?.notes
-            ?.let { PaymentBreakdownHelper.stripChannelTags(DeliveryVoiceParser.stripClassificationTag(it)) }
-            ?: ""
+        initialDelivery?.notes?.let {
+            CustomerDirectoryHelper.stripRouteAreaTag(
+                PaymentBreakdownHelper.stripChannelTags(DeliveryVoiceParser.stripClassificationTag(it))
+            )
+        } ?: ""
     }
     var notes by remember(initialDelivery?.id) { mutableStateOf(initialCleanNotes) }
     var unitPriceText by remember(initialDelivery?.id) { mutableStateOf(initialPriceText) }
     var hasManualPriceOverride by remember(initialDelivery?.id) { mutableStateOf(initialDelivery != null) }
-    var showSuggestions by remember { mutableStateOf(false) }
     var formError by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(initialDelivery?.id) {
@@ -163,16 +173,8 @@ fun AddDeliverySheet(
         else customers.firstOrNull { it.id == normalizedTypedId }
     }
 
-    val filteredSuggestions = remember(customerName, customers) {
-        val q = customerName.trim()
-        if (q.isEmpty()) {
-            emptyList()
-        } else {
-            customers.filter {
-                it.name.contains(q, ignoreCase = true) &&
-                    !it.name.equals(q, ignoreCase = true)
-            }.take(5)
-        }
+    val sukiSuggestions = remember(customerName, sukiDirectory) {
+        CustomerDirectoryHelper.filterSuggestions(sukiDirectory, customerName, limit = 10)
     }
 
     val defaultUnitPriceForSelection = remember(purifiedQty, alkalineQty, settings) {
@@ -201,7 +203,6 @@ fun AddDeliverySheet(
                 val parsed = DeliveryVoiceParser.parse(spoken, customers)
                 if (parsed.customerName.isNotBlank()) {
                     customerName = parsed.customerName
-                    showSuggestions = parsed.matchedCustomer == null
                 }
                 if (parsed.gallons != null) {
                     if (parsed.isAlkaline) {
@@ -218,6 +219,17 @@ fun AddDeliverySheet(
                 if (parsed.paymentType != null) {
                     paymentType = parsed.paymentType
                     selectedPaidChannel = parsed.paidChannel
+                }
+                val sukiMatch = sukiDirectory.firstOrNull {
+                    it.id == MinigeCustomerUtils.normalizeCustomerId(parsed.customerName)
+                }
+                if (sukiMatch != null) {
+                    if (parsed.classification == null && sukiMatch.classification != null) {
+                        classification = sukiMatch.classification
+                    }
+                    if (!sukiMatch.routeArea.isNullOrBlank()) {
+                        routeArea = sukiMatch.routeArea
+                    }
                 }
                 hasManualPriceOverride = false
                 if (parsed.rememberedUnitPrice != null && parsed.rememberedUnitPrice >= 0.0) {
@@ -257,7 +269,8 @@ fun AddDeliverySheet(
         else -> (totalGallons * parsedUnitPrice).roundToInt()
     }
     val previewCommission = when (paymentType) {
-        PaymentType.CASH, PaymentType.BANK_DEPOSIT -> totalGallons * settings.commissionRate
+        PaymentType.CASH, PaymentType.BANK_DEPOSIT ->
+            CommissionRateHistory.calculateCommissionAmount(totalGallons, activeCommissionRate)
         PaymentType.PAUTANG, PaymentType.PICK_UP -> 0
     }
 
@@ -278,13 +291,12 @@ fun AddDeliverySheet(
                 style = MaterialTheme.typography.titleLarge,
             )
 
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(
                     value = customerName,
                     onValueChange = {
                         customerName = it.take(80)
                         hasManualPriceOverride = false
-                        showSuggestions = true
                         formError = null
                     },
                     label = { Text("Customer Name") },
@@ -323,72 +335,24 @@ fun AddDeliverySheet(
                         .testTag("delivery_customer_input"),
                 )
 
-                if (showSuggestions && filteredSuggestions.isNotEmpty()) {
-                    ElevatedCard(
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("customer_autocomplete_list"),
-                    ) {
-                        Column(modifier = Modifier.fillMaxWidth()) {
-                            filteredSuggestions.forEachIndexed { index, suggestion ->
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .defaultMinSize(minHeight = 48.dp)
-                                        .clickable {
-                                            customerName = suggestion.name
-                                            showSuggestions = false
-                                            hasManualPriceOverride = false
-                                            unitPriceText = suggestion.lastUnitPrice
-                                                ?.takeIf { it >= 0.0 }
-                                                ?.let { MinigeCustomerUtils.formatPrice(it) }
-                                                ?: defaultUnitPriceForSelection.toString()
-                                            formError = null
-                                        }
-                                        .padding(horizontal = 14.dp, vertical = 10.dp)
-                                        .testTag("customer_suggestion_${suggestion.id}"),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                        modifier = Modifier.weight(1f),
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.PersonSearch,
-                                            contentDescription = null,
-                                            tint = MaterialTheme.colorScheme.primary,
-                                            modifier = Modifier.size(18.dp),
-                                        )
-                                        Text(
-                                            text = suggestion.name,
-                                            style = MaterialTheme.typography.bodyLarge,
-                                            color = MaterialTheme.colorScheme.onSurface,
-                                        )
-                                    }
-                                    if (suggestion.lastUnitPrice != null) {
-                                        Surface(
-                                            shape = CircleShape,
-                                            color = MaterialTheme.colorScheme.primaryContainer,
-                                        ) {
-                                            Text(
-                                                text = "₱${MinigeCustomerUtils.formatPrice(suggestion.lastUnitPrice)}/gal",
-                                                style = MaterialTheme.typography.labelMedium,
-                                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                                            )
-                                        }
-                                    }
-                                }
-                                if (index < filteredSuggestions.lastIndex) {
-                                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                                }
-                            }
+                CustomerSuggestionBar(
+                    suggestions = sukiSuggestions,
+                    onSelectCustomer = { profile ->
+                        customerName = profile.name
+                        if (profile.classification != null) {
+                            classification = profile.classification
                         }
-                    }
-                }
+                        if (!profile.routeArea.isNullOrBlank()) {
+                            routeArea = profile.routeArea
+                        }
+                        hasManualPriceOverride = false
+                        unitPriceText = profile.savedUnitPrice
+                            ?.takeIf { it >= 0.0 }
+                            ?.let { MinigeCustomerUtils.formatPrice(it) }
+                            ?: defaultUnitPriceForSelection.toString()
+                        formError = null
+                    },
+                )
             }
 
             GallonStepperRow(
@@ -515,8 +479,19 @@ fun AddDeliverySheet(
             }
 
             OutlinedTextField(
+                value = routeArea,
+                onValueChange = { routeArea = it.take(40) },
+                label = { Text("Route / Area Tag (optional)") },
+                placeholder = { Text("e.g. Poblacion, Market") },
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("delivery_route_area_input"),
+            )
+
+            OutlinedTextField(
                 value = notes,
-                onValueChange = { notes = it.take(300) },
+                onValueChange = { notes = it.take(240) },
                 label = { Text("Notes (optional)") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
@@ -555,9 +530,9 @@ fun AddDeliverySheet(
                         Text("Commission Earned Today", style = MaterialTheme.typography.bodyMedium)
                         Text(
                             text = when (paymentType) {
-                                PaymentType.PAUTANG -> "₱0 (Awarded at ₱0 balance)"
+                                PaymentType.PAUTANG -> "₱0 (Awarded on paid gallons)"
                                 PaymentType.PICK_UP -> "₱0 (Pick-up)"
-                                else -> "₱$previewCommission ($totalGallons × ₱${settings.commissionRate})"
+                                else -> "₱$previewCommission ($totalGallons × ₱${CommissionRateHistory.formatRate(activeCommissionRate)})"
                             },
                             style = MaterialTheme.typography.labelLarge,
                             color = MaterialTheme.colorScheme.primary,
@@ -595,9 +570,13 @@ fun AddDeliverySheet(
                             } else {
                                 PaymentBreakdownHelper.stripChannelTags(notes)
                             }
-                            val finalNotes = DeliveryVoiceParser.applyClassificationTag(
+                            val withClassification = DeliveryVoiceParser.applyClassificationTag(
                                 notes = withChannel,
                                 classification = classification,
+                            )
+                            val finalNotes = CustomerDirectoryHelper.applyRouteAreaTag(
+                                notes = withClassification,
+                                routeArea = routeArea,
                             )
                             onSave(
                                 customerName.trim(),

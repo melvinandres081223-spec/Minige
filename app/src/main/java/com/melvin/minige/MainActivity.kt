@@ -257,6 +257,7 @@ fun MinigeMainShell(
                 MinigeTab.PAUTANG -> PautangScreen(
                     uiState = uiState,
                     onRecordPayment = viewModel::recordUtangPayment,
+                    onRecordPartialGallonPayment = viewModel::recordPartialGallonPayment,
                 )
                 MinigeTab.WEEKLY -> WeeklyScreen(
                     uiState = uiState,
@@ -274,6 +275,7 @@ fun MinigeMainShell(
                     uiState = uiState,
                     userEmail = userEmail,
                     onSaveSettings = viewModel::updateSettings,
+                    onScheduleCommissionRate = viewModel::scheduleCommissionRate,
                     onSyncNow = viewModel::syncNow,
                     onSignOut = {
                         GoogleAuthManager.signOut(
@@ -290,6 +292,8 @@ fun MinigeMainShell(
         AddDeliverySheet(
             settings = uiState.settings,
             customers = uiState.customers,
+            sukiDirectory = uiState.sukiDirectory,
+            activeCommissionRate = uiState.activeCommissionRate,
             initialDelivery = editingDelivery,
             onDismiss = {
                 showAddDeliverySheet = false

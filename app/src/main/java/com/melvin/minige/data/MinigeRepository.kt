@@ -16,6 +16,9 @@ import com.melvin.minige.domain.MinigeSettings
 import com.melvin.minige.domain.PaymentType
 import com.melvin.minige.domain.UtangMethod
 import com.melvin.minige.domain.UtangPaymentRecord
+import com.melvin.minige.util.CommissionRateHistory
+import com.melvin.minige.util.PaidChannel
+import com.melvin.minige.util.PartialPaymentHelper
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
@@ -220,6 +223,7 @@ class MinigeRepository(
         paymentType: PaymentType,
         notes: String,
         customUnitPrice: Double? = null,
+        overrideCommissionRate: Double? = null,
     ): Result<Unit> {
         val cleanName = customerName.trim().take(80)
         val totalGals = purifiedGallons + alkalineGallons
@@ -253,8 +257,11 @@ class MinigeRepository(
             PaymentType.PAUTANG, PaymentType.PICK_UP -> 0
         }
 
+        val effectiveRate = overrideCommissionRate ?: settings.commissionRate.toDouble()
+        val storedRateInt = effectiveRate.roundToInt().coerceAtLeast(0)
         val commissionEarned = when (paymentType) {
-            PaymentType.CASH, PaymentType.BANK_DEPOSIT -> totalGals * settings.commissionRate
+            PaymentType.CASH, PaymentType.BANK_DEPOSIT ->
+                CommissionRateHistory.calculateCommissionAmount(totalGals, effectiveRate)
             PaymentType.PAUTANG, PaymentType.PICK_UP -> 0
         }
 
@@ -275,7 +282,7 @@ class MinigeRepository(
             totalAmount = totalBill,
             amountPaid = amountPaid,
             paymentType = paymentType.name,
-            commissionRate = settings.commissionRate,
+            commissionRate = storedRateInt,
             commissionEarned = commissionEarned,
             settledDateKey = settledDateKey,
             notes = notes.trim().take(300),
@@ -408,8 +415,9 @@ class MinigeRepository(
 
     /**
      * Records a partial or full payment toward an unpaid Pautang delivery.
-     * Partial payments earn ₱0 commission; reaching ₱0 remaining balance awards full commission
-     * (totalGallons * activeCommissionRate) on paymentDateKey.
+     * Peso-only partial payments earn ₱0 commission until settled; gallon-based partial payments
+     * (via [recordPartialGallonPayment]) tag paid gallons & immediate commission in the payment notes
+     * so they count immediately on [paymentDateKey] without double-counting upon full settlement.
      */
     suspend fun recordUtangPayment(
         userId: String,
@@ -418,6 +426,7 @@ class MinigeRepository(
         method: UtangMethod,
         paymentDateKey: String,
         notes: String,
+        overrideCommissionRate: Double? = null,
     ): Result<Boolean> {
         val existing = dao.getDeliveryById(deliveryId)
             ?: return Result.failure(IllegalArgumentException("Utang delivery not found."))
@@ -430,6 +439,7 @@ class MinigeRepository(
         val isNowFullyPaid = (existing.totalAmount - newAmountPaid) <= 0
 
         val settings = dao.getSettingsOnce()?.toDomain() ?: MinigeSettings()
+        val effectiveRate = overrideCommissionRate ?: settings.commissionRate.toDouble()
         val now = System.currentTimeMillis()
         val paymentId = UUID.randomUUID().toString()
 
@@ -446,9 +456,20 @@ class MinigeRepository(
             createdAtEpochMs = now,
         )
 
+        dao.upsertUtangPayment(paymentEntity)
+
         val totalGals = existing.purifiedGallons + existing.alkalineGallons
-        val newCommissionRate = if (isNowFullyPaid) settings.commissionRate else existing.commissionRate
-        val newCommissionEarned = if (isNowFullyPaid) totalGals * settings.commissionRate else 0
+        val allPaymentsForDelivery = dao.getUtangPaymentsForDelivery(deliveryId).map { it.toDomain() }
+        val taggedGallons = allPaymentsForDelivery.sumOf { PartialPaymentHelper.extractPaidGallons(it) }
+        val taggedCommission = allPaymentsForDelivery.sumOf { PartialPaymentHelper.extractCommissionEarned(it) }
+        val untaggedRemainderGallons = (totalGals - taggedGallons).coerceAtLeast(0)
+
+        val newCommissionRate = if (isNowFullyPaid) effectiveRate.roundToInt().coerceAtLeast(0) else existing.commissionRate
+        val newCommissionEarned = if (isNowFullyPaid) {
+            taggedCommission + CommissionRateHistory.calculateCommissionAmount(untaggedRemainderGallons, effectiveRate)
+        } else {
+            0
+        }
         val newSettledDate = if (isNowFullyPaid) paymentDateKey else null
 
         val updatedDelivery = existing.copy(
@@ -460,7 +481,6 @@ class MinigeRepository(
             updatedAtEpochMs = now,
         )
 
-        dao.upsertUtangPayment(paymentEntity)
         dao.upsertDelivery(updatedDelivery)
 
         val pRes = remote.upsertUtangPayment(userId, paymentEntity)
@@ -472,6 +492,36 @@ class MinigeRepository(
         return if (pRes.isFailure) Result.failure(pRes.exceptionOrNull()!!)
         else if (dRes.isFailure) Result.failure(dRes.exceptionOrNull()!!)
         else Result.success(isNowFullyPaid)
+    }
+
+    suspend fun recordPartialGallonPayment(
+        userId: String,
+        deliveryId: String,
+        paidGallons: Int,
+        amount: Int,
+        channel: PaidChannel,
+        paymentDateKey: String,
+        notes: String,
+        overrideCommissionRate: Double? = null,
+    ): Result<Boolean> {
+        val settings = dao.getSettingsOnce()?.toDomain() ?: MinigeSettings()
+        val effectiveRate = overrideCommissionRate ?: settings.commissionRate.toDouble()
+        val chunkCommission = CommissionRateHistory.calculateCommissionAmount(paidGallons, effectiveRate)
+        val taggedNotes = PartialPaymentHelper.applyPartialGallonTag(
+            notes = notes,
+            paidGallons = paidGallons,
+            commissionEarned = chunkCommission,
+            channel = channel,
+        )
+        return recordUtangPayment(
+            userId = userId,
+            deliveryId = deliveryId,
+            amount = amount,
+            method = channel.storedUtangMethod,
+            paymentDateKey = paymentDateKey,
+            notes = taggedNotes,
+            overrideCommissionRate = effectiveRate,
+        )
     }
 
     suspend fun deleteDelivery(userId: String, deliveryId: String): Result<Unit> {

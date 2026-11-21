@@ -28,6 +28,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -45,10 +46,16 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.UtangMethod
+import com.melvin.minige.domain.UtangPaymentRecord
 import com.melvin.minige.ui.MinigeUiState
+import com.melvin.minige.ui.components.DeliveryFilterBar
+import com.melvin.minige.ui.components.DeliveryFilterChip
+import com.melvin.minige.ui.components.DeliveryFilterHelper
 import com.melvin.minige.ui.components.OverduePautangBadge
 import com.melvin.minige.ui.components.OverduePautangBanner
+import com.melvin.minige.ui.components.PartialPaymentDialog
 import com.melvin.minige.util.PaidChannel
+import com.melvin.minige.util.PartialPaymentHelper
 import com.melvin.minige.util.PautangOverdueHelper
 import com.melvin.minige.util.PaymentBreakdownHelper
 
@@ -56,13 +63,23 @@ import com.melvin.minige.util.PaymentBreakdownHelper
 fun PautangScreen(
     uiState: MinigeUiState,
     onRecordPayment: (deliveryId: String, amount: Int, method: UtangMethod, notes: String) -> Unit,
+    onRecordPartialGallonPayment: (deliveryId: String, paidGallons: Int, amount: Int, channel: PaidChannel, notes: String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var selectedUtang by remember { mutableStateOf<DeliveryRecord?>(null) }
+    var partialPayTarget by remember { mutableStateOf<DeliveryRecord?>(null) }
+    var searchQuery by remember { mutableStateOf("") }
+    var selectedFilter by remember { mutableStateOf(DeliveryFilterChip.ALL) }
 
     val totalOutstanding = uiState.activeUtangList.sumOf { it.remainingBalance }
     val overdueSummary = remember(uiState.activeUtangList) {
         PautangOverdueHelper.summarizeOverdue(uiState.activeUtangList)
+    }
+    val filteredActiveUtang = remember(uiState.activeUtangList, searchQuery, selectedFilter) {
+        DeliveryFilterHelper.filterDeliveries(uiState.activeUtangList, searchQuery, selectedFilter)
+    }
+    val filteredSettledUtang = remember(uiState.settledUtangList, searchQuery, selectedFilter) {
+        DeliveryFilterHelper.filterDeliveries(uiState.settledUtangList, searchQuery, selectedFilter)
     }
 
     Box(
@@ -111,15 +128,25 @@ fun PautangScreen(
                 }
             }
 
+            item(key = "pautang_filter_bar") {
+                DeliveryFilterBar(
+                    searchQuery = searchQuery,
+                    onSearchQueryChange = { searchQuery = it },
+                    selectedChip = selectedFilter,
+                    onSelectChip = { selectedFilter = it },
+                    testTagPrefix = "pautang_filter",
+                )
+            }
+
             item {
                 Text(
-                    text = "Unpaid / Partial Utang (${uiState.activeUtangList.size})",
+                    text = "Unpaid / Partial Utang (${filteredActiveUtang.size})",
                     style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.padding(top = 4.dp),
                 )
             }
 
-            if (uiState.activeUtangList.isEmpty()) {
+            if (filteredActiveUtang.isEmpty()) {
                 item {
                     Surface(
                         shape = RoundedCornerShape(16.dp),
@@ -133,34 +160,40 @@ fun PautangScreen(
                         ) {
                             Icon(Icons.Rounded.CreditScore, contentDescription = null)
                             Text(
-                                text = "All Pautang accounts are settled!",
+                                text = if (uiState.activeUtangList.isEmpty()) {
+                                    "All Pautang accounts are settled!"
+                                } else {
+                                    "No unpaid pautang accounts match the active filter."
+                                },
                                 style = MaterialTheme.typography.bodyMedium,
                             )
                         }
                     }
                 }
             } else {
-                items(uiState.activeUtangList, key = { it.id }) { item ->
+                items(filteredActiveUtang, key = { it.id }) { item ->
                     val overdueDays = overdueSummary.daysElapsedByDeliveryId[item.id]
                         ?.takeIf { it >= PautangOverdueHelper.OVERDUE_THRESHOLD_DAYS }
                     ActiveUtangCard(
                         item = item,
+                        allUtangPayments = uiState.utangPayments,
                         commissionRate = uiState.settings.commissionRate,
                         overdueDays = overdueDays,
+                        onPartialPayClick = { partialPayTarget = item },
                         onCollectClick = { selectedUtang = item },
                     )
                 }
             }
 
-            if (uiState.settledUtangList.isNotEmpty()) {
+            if (filteredSettledUtang.isNotEmpty()) {
                 item {
                     Text(
-                        text = "Fully Paid Utang (${uiState.settledUtangList.size})",
+                        text = "Fully Paid Utang (${filteredSettledUtang.size})",
                         style = MaterialTheme.typography.titleMedium,
                         modifier = Modifier.padding(top = 8.dp),
                     )
                 }
-                items(uiState.settledUtangList, key = { it.id }) { settled ->
+                items(filteredSettledUtang, key = { it.id }) { settled ->
                     SettledUtangCard(item = settled)
                 }
             }
@@ -179,18 +212,37 @@ fun PautangScreen(
             },
         )
     }
+
+    partialPayTarget?.let { target ->
+        PartialPaymentDialog(
+            delivery = target,
+            allUtangPayments = uiState.utangPayments,
+            paymentDateKey = uiState.selectedDateKey,
+            activeCommissionRate = uiState.activeCommissionRate,
+            onDismiss = { partialPayTarget = null },
+            onConfirm = { paidGallons, amount, channel, notes ->
+                onRecordPartialGallonPayment(target.id, paidGallons, amount, channel, notes)
+                partialPayTarget = null
+            },
+        )
+    }
 }
 
 @Composable
 private fun ActiveUtangCard(
     item: DeliveryRecord,
+    allUtangPayments: List<UtangPaymentRecord>,
     commissionRate: Int,
     overdueDays: Long?,
+    onPartialPayClick: () -> Unit,
     onCollectClick: () -> Unit,
 ) {
     val progress = if (item.totalAmount > 0) {
         (item.amountPaid.toFloat() / item.totalAmount.toFloat()).coerceIn(0f, 1f)
     } else 0f
+    val partialStatus = remember(item, allUtangPayments) {
+        PartialPaymentHelper.getStatus(item, allUtangPayments)
+    }
 
     ElevatedCard(
         shape = RoundedCornerShape(18.dp),
@@ -208,7 +260,7 @@ private fun ActiveUtangCard(
                 Column(modifier = Modifier.weight(1f)) {
                     Text(item.customerName, style = MaterialTheme.typography.titleMedium)
                     Text(
-                        text = "Delivered ${item.dateKey} • ${item.totalGallons} gal(s)",
+                        text = "Delivered ${item.dateKey} • Unpaid: ${partialStatus.remainingUnpaidGallons}/${item.totalGallons} gal(s)",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -233,17 +285,25 @@ private fun ActiveUtangCard(
                 modifier = Modifier.fillMaxWidth(),
             )
 
+            Text(
+                text = "Paid ₱${item.amountPaid} / ₱${item.totalAmount} • Potential Comm: ₱${partialStatus.remainingUnpaidGallons * commissionRate}",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    text = "Paid ₱${item.amountPaid} / ₱${item.totalAmount} • Potential Comm: ₱${item.totalGallons * commissionRate}",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.weight(1f),
-                )
+                OutlinedButton(
+                    onClick = onPartialPayClick,
+                    modifier = Modifier
+                        .defaultMinSize(minHeight = 48.dp)
+                        .testTag("partial_pay_utang_${item.id}"),
+                ) {
+                    Text("Partial Pay")
+                }
                 Button(
                     onClick = onCollectClick,
                     modifier = Modifier

@@ -50,6 +50,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -64,7 +68,12 @@ import com.melvin.minige.domain.ExpenseRecord
 import com.melvin.minige.domain.MinigeDateUtils
 import com.melvin.minige.domain.PaymentType
 import com.melvin.minige.ui.MinigeUiState
+import com.melvin.minige.ui.components.DeliveryFilterBar
+import com.melvin.minige.ui.components.DeliveryFilterChip
+import com.melvin.minige.ui.components.DeliveryFilterHelper
 import com.melvin.minige.ui.components.RemittanceSummaryCard
+import com.melvin.minige.util.CommissionRateHistory
+import com.melvin.minige.util.CustomerDirectoryHelper
 import com.melvin.minige.util.DeliveryVoiceParser
 import com.melvin.minige.util.PaymentBreakdownHelper
 
@@ -83,6 +92,16 @@ fun TodayScreen(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
+    var searchQuery by remember { mutableStateOf("") }
+    var selectedFilter by remember { mutableStateOf(DeliveryFilterChip.ALL) }
+
+    val filteredDeliveries = remember(uiState.deliveriesForDay, searchQuery, selectedFilter) {
+        DeliveryFilterHelper.filterDeliveries(
+            deliveries = uiState.deliveriesForDay,
+            searchQuery = searchQuery,
+            selectedChip = selectedFilter,
+        )
+    }
 
     Box(
         modifier = modifier.fillMaxSize(),
@@ -132,10 +151,20 @@ fun TodayScreen(
 
             item {
                 Text(
-                    text = "Deliveries & Pick-ups (${uiState.deliveriesForDay.size})",
+                    text = "Deliveries & Pick-ups (${filteredDeliveries.size}/${uiState.deliveriesForDay.size})",
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+
+            item(key = "today_delivery_filter_bar") {
+                DeliveryFilterBar(
+                    searchQuery = searchQuery,
+                    onSearchQueryChange = { searchQuery = it },
+                    selectedChip = selectedFilter,
+                    onSelectChip = { selectedFilter = it },
+                    testTagPrefix = "today_filter",
                 )
             }
 
@@ -146,8 +175,15 @@ fun TodayScreen(
                         message = "No deliveries or pick-ups logged for this date. Tap + to add one.",
                     )
                 }
+            } else if (filteredDeliveries.isEmpty()) {
+                item {
+                    EmptySectionCard(
+                        icon = Icons.Rounded.WaterDrop,
+                        message = "No deliveries match \"${searchQuery.ifBlank { selectedFilter.label }}\".",
+                    )
+                }
             } else {
-                items(uiState.deliveriesForDay, key = { it.id }) { delivery ->
+                items(filteredDeliveries, key = { it.id }) { delivery ->
                     DeliveryRowCard(
                         delivery = delivery,
                         onEdit = { onEditDelivery(delivery) },
@@ -305,7 +341,7 @@ private fun CommissionHeroCard(uiState: MinigeUiState) {
                     color = MaterialTheme.colorScheme.surface.copy(alpha = 0.8f),
                 ) {
                     Text(
-                        text = "Rate: ₱${uiState.settings.commissionRate}/gal",
+                        text = "Rate: ₱${CommissionRateHistory.formatRate(uiState.activeCommissionRate)}/gal",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
@@ -454,6 +490,7 @@ private fun DeliveryRowCard(
 ) {
     val methodLabel = PaymentBreakdownHelper.displayMethodLabel(delivery)
     val classification = DeliveryVoiceParser.extractClassification(delivery.notes)
+    val routeArea = CustomerDirectoryHelper.extractRouteArea(delivery.notes)
 
     OutlinedCard(
         shape = RoundedCornerShape(16.dp),
@@ -503,6 +540,20 @@ private fun DeliveryRowCard(
                                 text = classification.label,
                                 style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                            )
+                        }
+                    }
+                    if (!routeArea.isNullOrBlank()) {
+                        Surface(
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            modifier = Modifier.align(Alignment.CenterVertically),
+                        ) {
+                            Text(
+                                text = routeArea,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
                             )
                         }

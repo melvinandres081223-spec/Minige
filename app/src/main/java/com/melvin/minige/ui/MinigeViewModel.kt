@@ -29,8 +29,13 @@ import com.melvin.minige.domain.WeeklySummary
 import com.melvin.minige.sync.CalendarAuthResult
 import com.melvin.minige.sync.CalendarSyncManager
 import com.melvin.minige.ui.components.SundayMakeupHelper
+import com.melvin.minige.util.CommissionRateEntry
+import com.melvin.minige.util.CommissionRateHistory
+import com.melvin.minige.util.CustomerDirectoryHelper
+import com.melvin.minige.util.PaidChannel
 import com.melvin.minige.util.PaymentBreakdownHelper
 import com.melvin.minige.util.PaymentChannelBreakdown
+import com.melvin.minige.util.SukiCustomerProfile
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -83,6 +88,9 @@ data class MinigeUiState(
     ),
     val bossPickupMessage: String = "",
     val customers: List<CustomerRecord> = emptyList(),
+    val sukiDirectory: List<SukiCustomerProfile> = emptyList(),
+    val commissionRateHistory: List<CommissionRateEntry> = emptyList(),
+    val activeCommissionRate: Double = CommissionRateHistory.DEFAULT_RATE,
     val pendingSyncCount: Int = 0,
     val isSyncing: Boolean = false,
     val isCalendarSyncing: Boolean = false,
@@ -98,10 +106,14 @@ class MinigeViewModel(
     private val repository: MinigeRepository,
     private val pricingRepository: PricingRepository,
     private val currentUserId: String,
+    private val appContext: android.content.Context? = null,
 ) : ViewModel() {
 
     private val _selectedDate = MutableStateFlow(LocalDate.now())
     private val _sundayMakeupEnabled = MutableStateFlow(false)
+    private val _commissionRateHistory = MutableStateFlow(
+        appContext?.let { CommissionRateHistory.loadHistory(it, currentUserId) } ?: emptyList()
+    )
     private val _isSyncing = MutableStateFlow(false)
     private val _isCalendarSyncing = MutableStateFlow(false)
     private val _statusMessage = MutableStateFlow<String?>(null)
@@ -149,12 +161,14 @@ class MinigeViewModel(
     }
 
     val uiState: StateFlow<MinigeUiState> = combine(
-        combine(_selectedDate, _sundayMakeupEnabled) { date, sundayEnabled -> date to sundayEnabled },
+        combine(_selectedDate, _sundayMakeupEnabled, _commissionRateHistory) { date, sundayEnabled, rateHist ->
+            Triple(date, sundayEnabled, rateHist)
+        },
         localDataFlow,
         _isSyncing,
         _isCalendarSyncing,
         _statusMessage,
-    ) { (date, sundayEnabled), bundle, syncing, calSyncing, status ->
+    ) { (date, sundayEnabled, rateHist), bundle, syncing, calSyncing, status ->
         latestBundle = bundle
         val dateKey = MinigeDateUtils.toKey(date)
         val deliveriesForDay = bundle.deliveries.filter { it.dateKey == dateKey }
@@ -203,6 +217,16 @@ class MinigeViewModel(
             savedCustomers = bundle.customers,
             deliveries = bundle.deliveries,
         )
+        val sukiDirectory = CustomerDirectoryHelper.buildDirectory(
+            pricingCustomers = mergedCustomers,
+            deliveries = bundle.deliveries,
+            utangPayments = bundle.payments,
+        )
+        val activeRate = CommissionRateHistory.effectiveRateForDate(
+            history = rateHist,
+            targetDate = date,
+            fallbackRate = bundle.settings.commissionRate.toDouble(),
+        )
 
         val pendingCount = bundle.deliveries.count { it.pendingSync } +
             bundle.payments.count { it.pendingSync } +
@@ -227,6 +251,9 @@ class MinigeViewModel(
             sundayMakeupDaySummary = sundayMakeupDaySummary,
             bossPickupMessage = BossPickupFormatter.format(date, pickupsForDay),
             customers = mergedCustomers,
+            sukiDirectory = sukiDirectory,
+            commissionRateHistory = rateHist,
+            activeCommissionRate = activeRate,
             pendingSyncCount = pendingCount,
             isSyncing = syncing,
             isCalendarSyncing = calSyncing,
@@ -267,6 +294,7 @@ class MinigeViewModel(
         customUnitPrice: Double? = null,
     ) {
         val dateKey = MinigeDateUtils.toKey(_selectedDate.value)
+        val activeRate = uiState.value.activeCommissionRate
         viewModelScope.launch {
             val result = repository.addDelivery(
                 userId = currentUserId,
@@ -277,6 +305,7 @@ class MinigeViewModel(
                 paymentType = paymentType,
                 notes = notes,
                 customUnitPrice = customUnitPrice,
+                overrideCommissionRate = activeRate,
             )
             val msg = if (result.isSuccess) {
                 "Saved ${customerName.trim()} (${paymentType.label})"
@@ -331,6 +360,7 @@ class MinigeViewModel(
         notes: String,
     ) {
         val paymentDateKey = MinigeDateUtils.toKey(_selectedDate.value)
+        val activeRate = uiState.value.activeCommissionRate
         viewModelScope.launch {
             val result = repository.recordUtangPayment(
                 userId = currentUserId,
@@ -339,6 +369,7 @@ class MinigeViewModel(
                 method = method,
                 paymentDateKey = paymentDateKey,
                 notes = notes,
+                overrideCommissionRate = activeRate,
             )
             result.onSuccess { fullyPaid ->
                 val msg = if (fullyPaid) {
@@ -349,6 +380,40 @@ class MinigeViewModel(
                 _events.tryEmit(MinigeEvent.ShowMessage(msg))
             }.onFailure { err ->
                 _events.tryEmit(MinigeEvent.ShowMessage(err.localizedMessage ?: "Payment saved locally."))
+            }
+        }
+    }
+
+    fun recordPartialGallonPayment(
+        deliveryId: String,
+        paidGallons: Int,
+        amount: Int,
+        channel: PaidChannel,
+        notes: String,
+    ) {
+        val paymentDateKey = MinigeDateUtils.toKey(_selectedDate.value)
+        val activeRate = uiState.value.activeCommissionRate
+        val immediateComm = CommissionRateHistory.calculateCommissionAmount(paidGallons, activeRate)
+        viewModelScope.launch {
+            val result = repository.recordPartialGallonPayment(
+                userId = currentUserId,
+                deliveryId = deliveryId,
+                paidGallons = paidGallons,
+                amount = amount,
+                channel = channel,
+                paymentDateKey = paymentDateKey,
+                notes = notes,
+                overrideCommissionRate = activeRate,
+            )
+            result.onSuccess { fullyPaid ->
+                val msg = if (fullyPaid) {
+                    "Settled $paidGallons gal(s)! +₱$immediateComm commission awarded for $paymentDateKey."
+                } else {
+                    "Partial pay: $paidGallons gal(s) (₱$amount ${channel.label}) → +₱$immediateComm commission today!"
+                }
+                _events.tryEmit(MinigeEvent.ShowMessage(msg))
+            }.onFailure { err ->
+                _events.tryEmit(MinigeEvent.ShowMessage(err.localizedMessage ?: "Partial payment saved locally."))
             }
         }
     }
@@ -407,6 +472,37 @@ class MinigeViewModel(
                 "Settings saved locally (pending sync)"
             }
             _events.tryEmit(MinigeEvent.ShowMessage(msg))
+        }
+    }
+
+    fun scheduleCommissionRate(ratePerGallon: Double, effectiveDate: LocalDate) {
+        val updatedHistory = CommissionRateHistory.addOrUpdateEntry(
+            history = _commissionRateHistory.value,
+            effectiveDate = effectiveDate,
+            ratePerGallon = ratePerGallon,
+        )
+        _commissionRateHistory.value = updatedHistory
+        appContext?.let { ctx ->
+            CommissionRateHistory.saveHistory(ctx, currentUserId, updatedHistory)
+        }
+        val dateKey = MinigeDateUtils.toKey(effectiveDate)
+        val formattedRate = CommissionRateHistory.formatRate(ratePerGallon)
+        viewModelScope.launch {
+            if (!effectiveDate.isAfter(LocalDate.now())) {
+                val currentSettings = uiState.value.settings
+                repository.updateSettings(
+                    userId = currentUserId,
+                    purifiedPrice = currentSettings.purifiedPrice,
+                    alkalinePrice = currentSettings.alkalinePrice,
+                    commissionRate = kotlin.math.round(ratePerGallon).toInt().coerceAtLeast(0),
+                    defaultSukli = currentSettings.defaultSukli,
+                )
+            }
+            _events.tryEmit(
+                MinigeEvent.ShowMessage(
+                    "Commission rate ₱$formattedRate/gal effective $dateKey (past commissions preserved)"
+                )
+            )
         }
     }
 
@@ -538,6 +634,7 @@ class MinigeViewModel(
                     repository = repo,
                     pricingRepository = pricingRepo,
                     currentUserId = currentUserId,
+                    appContext = app.applicationContext,
                 )
             }
         }

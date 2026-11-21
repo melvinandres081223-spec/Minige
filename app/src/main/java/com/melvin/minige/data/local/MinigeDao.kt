@@ -36,6 +36,9 @@ interface MinigeDao {
     @Query("SELECT * FROM utang_payments WHERE userId = :userId AND isDeleted = 0 ORDER BY createdAtEpochMs DESC")
     fun observeUtangPayments(userId: String): Flow<List<UtangPaymentEntity>>
 
+    @Query("SELECT * FROM utang_payments WHERE deliveryId = :deliveryId AND isDeleted = 0 ORDER BY createdAtEpochMs ASC")
+    suspend fun getUtangPaymentsForDelivery(deliveryId: String): List<UtangPaymentEntity>
+
     @Query("SELECT * FROM utang_payments WHERE userId = :userId AND pendingSync = 1")
     suspend fun getPendingUtangPayments(userId: String): List<UtangPaymentEntity>
 

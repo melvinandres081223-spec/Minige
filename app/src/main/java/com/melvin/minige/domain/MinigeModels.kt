@@ -1,5 +1,6 @@
 package com.melvin.minige.domain
 
+import com.melvin.minige.util.PartialPaymentHelper
 import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
@@ -223,14 +224,25 @@ object MinigeCalculator {
         val directPaidGallons = directPaidDeliveries.sumOf { it.totalGallons }
         val directCommission = directPaidDeliveries.sumOf { it.commissionEarned }
 
-        // Utang commission is ONLY awarded on the exact date remaining balance reached 0
+        // Partial-gallon payments count immediately on payment date; remainder on full settlement date
+        val partialUtangGallonsToday = PartialPaymentHelper.taggedPaidGallonsForDate(dateKey, utangPayments)
+        val partialUtangCommissionToday = PartialPaymentHelper.taggedCommissionForDate(dateKey, utangPayments)
+
+        // Utang commission is ONLY awarded on the exact date remaining balance reached 0 (for untagged portion)
         val settledUtangToday = deliveries.filter {
             it.paymentType == PaymentType.PAUTANG &&
                 it.isUtangFullyPaid &&
                 it.settledDateKey == dateKey
         }
-        val settledUtangGallons = settledUtangToday.sumOf { it.totalGallons }
-        val settledUtangCommission = settledUtangToday.sumOf { it.commissionEarned }
+        val settledRemainderGallons = settledUtangToday.sumOf {
+            PartialPaymentHelper.untaggedSettledRemainderGallons(it, utangPayments)
+        }
+        val settledRemainderCommission = settledUtangToday.sumOf {
+            PartialPaymentHelper.untaggedSettledRemainderCommission(it, utangPayments)
+        }
+
+        val settledUtangGallons = partialUtangGallonsToday + settledRemainderGallons
+        val settledUtangCommission = partialUtangCommissionToday + settledRemainderCommission
 
         val totalPaidGallons = directPaidGallons + settledUtangGallons
         val dailyCommission = directCommission + settledUtangCommission

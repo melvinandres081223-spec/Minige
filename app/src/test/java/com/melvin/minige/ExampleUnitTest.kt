@@ -10,10 +10,15 @@ import com.melvin.minige.domain.MinigeCustomerUtils
 import com.melvin.minige.domain.PaymentType
 import com.melvin.minige.domain.UtangMethod
 import com.melvin.minige.domain.UtangPaymentRecord
+import com.melvin.minige.ui.components.DeliveryFilterChip
+import com.melvin.minige.ui.components.DeliveryFilterHelper
 import com.melvin.minige.ui.components.SundayMakeupHelper
+import com.melvin.minige.util.CommissionRateHistory
 import com.melvin.minige.util.CustomerClassification
+import com.melvin.minige.util.CustomerDirectoryHelper
 import com.melvin.minige.util.DeliveryVoiceParser
 import com.melvin.minige.util.PaidChannel
+import com.melvin.minige.util.PartialPaymentHelper
 import com.melvin.minige.util.PautangOverdueHelper
 import com.melvin.minige.util.PaymentBreakdownHelper
 import org.junit.Assert.assertEquals
@@ -320,5 +325,157 @@ class ExampleUnitTest {
         assertEquals(144, makeupResult.totalCommission)
         assertEquals(540, makeupResult.totalCashCollected)
         assertEquals(LocalDate.of(2026, 11, 22), makeupResult.days.last().date)
+    }
+
+    @Test
+    fun `customer directory helper indexes suki history area classification and unpaid gallons`() {
+        val customers = listOf(
+            CustomerRecord(id = "ate_maria", userId = "u1", name = "Ate Maria", lastUnitPrice = 25.0, updatedAtEpochMs = 200L),
+        )
+        val utangNotes = CustomerDirectoryHelper.applyRouteAreaTag(
+            DeliveryVoiceParser.applyClassificationTag("", CustomerClassification.OUTLET),
+            "Poblacion",
+        )
+        val deliveries = listOf(
+            delivery("d1", "2026-11-20", "Ate Maria", 5, 0, PaymentType.PAUTANG, 60, 8, 0, null)
+                .copy(notes = utangNotes, updatedAtEpochMs = 200L),
+            delivery("d2", "2026-11-19", "Kuya Jun", 3, 0, PaymentType.CASH, 90, 8, 24, "2026-11-19")
+                .copy(notes = "[Residential] [Area:Market]", updatedAtEpochMs = 150L),
+        )
+        val payments = listOf(
+            UtangPaymentRecord(
+                id = "p1",
+                deliveryId = "d1",
+                userId = "u1",
+                dateKey = "2026-11-21",
+                amount = 60,
+                method = UtangMethod.CASH,
+                notes = PartialPaymentHelper.applyPartialGallonTag("", paidGallons = 2, commissionEarned = 16, channel = PaidChannel.CASH),
+                pendingSync = false,
+                createdAtEpochMs = 210L,
+            )
+        )
+
+        val directory = CustomerDirectoryHelper.buildDirectory(customers, deliveries, payments)
+        val maria = directory.first { it.id == "ate_maria" }
+        assertEquals(CustomerClassification.OUTLET, maria.classification)
+        assertEquals("Poblacion", maria.routeArea)
+        assertEquals(25.0, maria.savedUnitPrice ?: 0.0, 0.001)
+        assertEquals(5, maria.lastOrderGallons)
+        assertEquals(3, maria.unpaidUtangGallons) // 5 total - 2 paid = 3 unpaid
+        assertEquals(90, maria.unpaidUtangAmount) // 150 - 60 = 90
+
+        val filtered = CustomerDirectoryHelper.filterSuggestions(directory, "Poblacion")
+        assertEquals(1, filtered.size)
+        assertEquals("Ate Maria", filtered.first().name)
+    }
+
+    @Test
+    fun `partial payment helper deducts paid gallons and awards immediate commission without double counting`() {
+        val day1 = "2026-11-21"
+        val day2 = "2026-11-22"
+
+        // Day 0: 5 gallons on pautang (₱150 total). Day 1: Partial Pay 2 gallons in Cash (₱60, +₱16 comm).
+        val pautangDelivery = delivery("d1", "2026-11-20", "Suki Store", 5, 0, PaymentType.PAUTANG, 60, 8, 0, null)
+        val day1Payment = UtangPaymentRecord(
+            id = "p1",
+            deliveryId = "d1",
+            userId = "u1",
+            dateKey = day1,
+            amount = 60,
+            method = UtangMethod.CASH,
+            notes = PartialPaymentHelper.applyPartialGallonTag("", paidGallons = 2, commissionEarned = 16, channel = PaidChannel.CASH),
+            pendingSync = false,
+            createdAtEpochMs = 1L,
+        )
+
+        val statusBeforeDay2 = PartialPaymentHelper.getStatus(pautangDelivery, listOf(day1Payment))
+        assertEquals(2, statusBeforeDay2.paidGallonsSoFar)
+        assertEquals(3, statusBeforeDay2.remainingUnpaidGallons)
+        assertEquals(90, PartialPaymentHelper.calculateAmountForGallons(statusBeforeDay2, 3))
+        assertEquals(30, PartialPaymentHelper.calculateAmountForGallons(statusBeforeDay2, 1))
+
+        val day1Summary = MinigeCalculator.calculateDailySummary(
+            dateKey = day1,
+            deliveries = listOf(pautangDelivery),
+            utangPayments = listOf(day1Payment),
+            expenses = emptyList(),
+            startingSukli = 0,
+        )
+        assertEquals(2, day1Summary.settledUtangGallons)
+        assertEquals(16, day1Summary.dailyCommission)
+        assertEquals(60, day1Summary.cashCollected)
+
+        // Day 2: Remaining 3 gallons paid via Bank Transfer (₱90, +₱24 comm)
+        val day2Payment = UtangPaymentRecord(
+            id = "p2",
+            deliveryId = "d1",
+            userId = "u1",
+            dateKey = day2,
+            amount = 90,
+            method = UtangMethod.BANK_DEPOSIT,
+            notes = PartialPaymentHelper.applyPartialGallonTag("", paidGallons = 3, commissionEarned = 24, channel = PaidChannel.BANK_TRANSFER),
+            pendingSync = false,
+            createdAtEpochMs = 2L,
+        )
+        val settledDelivery = pautangDelivery.copy(amountPaid = 150, commissionEarned = 40, settledDateKey = day2)
+
+        val day2Summary = MinigeCalculator.calculateDailySummary(
+            dateKey = day2,
+            deliveries = listOf(settledDelivery),
+            utangPayments = listOf(day1Payment, day2Payment),
+            expenses = emptyList(),
+            startingSukli = 0,
+        )
+        // Must count ONLY the 3 remaining gallons (₱24) on day2, never double counting Day 1's 2 gallons!
+        assertEquals(3, day2Summary.settledUtangGallons)
+        assertEquals(24, day2Summary.dailyCommission)
+        assertEquals(90, day2Summary.bankDepositTotal)
+
+        val day2Breakdown = PaymentBreakdownHelper.calculateBreakdown(
+            dateKey = day2,
+            deliveries = listOf(settledDelivery),
+            utangPayments = listOf(day1Payment, day2Payment),
+            expenses = emptyList(),
+        )
+        assertEquals(3, day2Breakdown.bankTransferGallons)
+        assertEquals(24, day2Breakdown.commissionFromBank)
+    }
+
+    @Test
+    fun `commission rate history preserves historical dates and applies effective future rates chronologically`() {
+        val hist0 = emptyList<com.melvin.minige.util.CommissionRateEntry>()
+        val hist1 = CommissionRateHistory.addOrUpdateEntry(hist0, LocalDate.of(2026, 11, 25), 10.0)
+        val hist2 = CommissionRateHistory.addOrUpdateEntry(hist1, LocalDate.of(2026, 12, 1), 12.0)
+
+        assertEquals(8.0, CommissionRateHistory.effectiveRateForDate(hist2, LocalDate.of(2026, 11, 21)), 0.001)
+        assertEquals(8.0, CommissionRateHistory.effectiveRateForDate(hist2, LocalDate.of(2026, 11, 24)), 0.001)
+        assertEquals(10.0, CommissionRateHistory.effectiveRateForDate(hist2, LocalDate.of(2026, 11, 25)), 0.001)
+        assertEquals(10.0, CommissionRateHistory.effectiveRateForDate(hist2, LocalDate.of(2026, 11, 30)), 0.001)
+        assertEquals(12.0, CommissionRateHistory.effectiveRateForDate(hist2, LocalDate.of(2026, 12, 1)), 0.001)
+
+        val roundTrip = CommissionRateHistory.deserialize(CommissionRateHistory.serialize(hist2))
+        assertEquals(2, roundTrip.size)
+        assertEquals(10.0, roundTrip[0].ratePerGallon, 0.001)
+        assertEquals(12.0, roundTrip[1].ratePerGallon, 0.001)
+    }
+
+    @Test
+    fun `delivery filter helper filters by search text classification paid pautang and bank chips`() {
+        val outletCash = delivery("1", "2026-11-21", "Outlet A", 5, 0, PaymentType.CASH, 150)
+            .copy(notes = "[Outlet] [Area:North]")
+        val residentialBank = delivery("2", "2026-11-21", "Home B", 3, 0, PaymentType.BANK_DEPOSIT, 90)
+            .copy(notes = "[Residential] [Bank Transfer] [Area:South]")
+        val unpaidPautang = delivery("3", "2026-11-21", "Credit C", 4, 0, PaymentType.PAUTANG, 0)
+            .copy(notes = "[Outlet] [Area:Market]")
+
+        val all = listOf(outletCash, residentialBank, unpaidPautang)
+        assertEquals(3, DeliveryFilterHelper.filterDeliveries(all, "", DeliveryFilterChip.ALL).size)
+        assertEquals(listOf(outletCash, unpaidPautang), DeliveryFilterHelper.filterDeliveries(all, "", DeliveryFilterChip.OUTLET))
+        assertEquals(listOf(residentialBank), DeliveryFilterHelper.filterDeliveries(all, "", DeliveryFilterChip.RESIDENTIAL))
+        assertEquals(listOf(outletCash, residentialBank), DeliveryFilterHelper.filterDeliveries(all, "", DeliveryFilterChip.PAID))
+        assertEquals(listOf(unpaidPautang), DeliveryFilterHelper.filterDeliveries(all, "", DeliveryFilterChip.PAUTANG))
+        assertEquals(listOf(residentialBank), DeliveryFilterHelper.filterDeliveries(all, "", DeliveryFilterChip.BANK))
+        assertEquals(listOf(unpaidPautang), DeliveryFilterHelper.filterDeliveries(all, "Market", DeliveryFilterChip.ALL))
     }
 }

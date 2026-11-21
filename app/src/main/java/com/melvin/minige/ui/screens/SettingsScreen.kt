@@ -52,13 +52,16 @@ import androidx.core.content.ContextCompat
 import com.melvin.minige.sync.GitHubAppUpdater
 import com.melvin.minige.sync.UpdateCheckOutcome
 import com.melvin.minige.ui.MinigeUiState
+import com.melvin.minige.ui.components.CommissionRateCard
 import kotlinx.coroutines.launch
+import java.time.LocalDate
 
 @Composable
 fun SettingsScreen(
     uiState: MinigeUiState,
     userEmail: String?,
     onSaveSettings: (purified: Int, alkaline: Int, rate: Int, defaultSukli: Int) -> Unit,
+    onScheduleCommissionRate: (ratePerGallon: Double, effectiveDate: LocalDate) -> Unit,
     onSyncNow: () -> Unit,
     onSignOut: () -> Unit,
     modifier: Modifier = Modifier,
@@ -180,6 +183,14 @@ fun SettingsScreen(
                         }
                     }
                 }
+            }
+
+            item(key = "commission_rate_card") {
+                CommissionRateCard(
+                    currentRate = uiState.activeCommissionRate,
+                    history = uiState.commissionRateHistory,
+                    onScheduleRateChange = onScheduleCommissionRate,
+                )
             }
 
             item {
