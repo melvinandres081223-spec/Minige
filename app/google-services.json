@@ -14,6 +14,14 @@
       },
       "oauth_client": [
         {
+          "client_id": "466130893778-pb1peldlqqdlmek7pijn9niq1d8jpl2p.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.melvin.minige",
+            "certificate_hash": "3c30c9d4f34a2716baa4d679152fd3f83a15e3a7"
+          }
+        },
+        {
           "client_id": "466130893778-d8qht07hldp4d0vjvqmuo1uupi7i411o.apps.googleusercontent.com",
           "client_type": 3
         }
