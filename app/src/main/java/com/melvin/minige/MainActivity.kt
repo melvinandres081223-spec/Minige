@@ -339,7 +339,9 @@ fun MinigeMainShell(
                     onSyncNow = viewModel::syncNow,
                     onGrantDriveAccess = { viewModel.triggerDriveConsent(context) },
                     onBackupToDriveNow = { viewModel.manualBackupNow(context) },
-                    onRestoreFromDrive = { viewModel.restoreFromDrive(context) },
+                    onPreviewRestoreFromDrive = { viewModel.previewDriveRestore(context) },
+                    onConfirmRestoreFromDrive = { viewModel.restoreFromDrive(context) },
+                    onDismissRestorePreview = viewModel::dismissRestorePreview,
                     onSignOut = {
                         GoogleAuthManager.signOut(
                             credentialManager = credentialManager,

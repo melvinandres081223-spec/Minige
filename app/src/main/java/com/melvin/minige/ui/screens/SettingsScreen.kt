@@ -86,7 +86,9 @@ fun SettingsScreen(
     onSyncNow: () -> Unit,
     onGrantDriveAccess: () -> Unit = {},
     onBackupToDriveNow: () -> Unit = {},
-    onRestoreFromDrive: () -> Unit = {},
+    onPreviewRestoreFromDrive: () -> Unit = {},
+    onConfirmRestoreFromDrive: () -> Unit = {},
+    onDismissRestorePreview: () -> Unit = {},
     onSignOut: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -99,7 +101,6 @@ fun SettingsScreen(
     var isDownloadingUpdate by remember { mutableStateOf(false) }
     var downloadProgressPercent by remember { mutableIntStateOf(0) }
     var downloadProgressStatus by remember { mutableStateOf("Ready to download") }
-    var showRestoreConfirmDialog by remember { mutableStateOf(false) }
 
     var purifiedText by remember(uiState.settings.purifiedPrice) {
         mutableStateOf(uiState.settings.purifiedPrice.toString())
@@ -201,7 +202,7 @@ fun SettingsScreen(
                                     alkalineText.toIntOrNull() ?: 40,
                                     rateText.toIntOrNull() ?: 8,
                                     defaultSukliText.toIntOrNull() ?: 0,
-                                    )
+                                )
                             },
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -486,6 +487,20 @@ fun SettingsScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
 
+                        // Compact status line displaying version & record counts read from minige_auto_backup.json summary
+                        val summary = uiState.driveBackupSummary
+                        val recordSummaryText = if (summary != null) {
+                            "v${summary.appVersion} • ${summary.totalDeliveries} deliveries, ${summary.totalPayments} payments, ${summary.totalExpenses} expenses, ${summary.totalCustomers} customers"
+                        } else {
+                            "v${BuildConfig.VERSION_NAME} • No backup summary cached yet"
+                        }
+                        Text(
+                            text = recordSummaryText,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+
                         Text(
                             text = "Naka-save sa nakikitang folder na 'Minige Backup' sa iyong Google Drive (My Drive) bilang 'minige_auto_backup.json'. Ligtas, madaling basahin, at puwedeng i-export sa ibang app.",
                             style = MaterialTheme.typography.bodySmall,
@@ -530,7 +545,7 @@ fun SettingsScreen(
                         }
 
                         OutlinedButton(
-                            onClick = { showRestoreConfirmDialog = true },
+                            onClick = onPreviewRestoreFromDrive,
                             enabled = !uiState.isDriveBackingUp,
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -714,9 +729,11 @@ fun SettingsScreen(
         )
     }
 
-    if (showRestoreConfirmDialog) {
+    // Rich Restore Confirmation Dialog displaying timestamp, record counts, and preferences from minige_auto_backup.json
+    val preview = uiState.driveBackupPreview
+    if (uiState.showRestorePreviewDialog && preview != null) {
         AlertDialog(
-            onDismissRequest = { showRestoreConfirmDialog = false },
+            onDismissRequest = onDismissRestorePreview,
             icon = {
                 Icon(
                     imageVector = Icons.Rounded.CloudDownload,
@@ -725,26 +742,60 @@ fun SettingsScreen(
                 )
             },
             title = {
-                Text("Restore from Google Drive?")
+                Text("Verify Drive Backup")
             },
             text = {
-                Text(
-                    "I-re-restore nito ang lahat ng deliveries, pautang records, customer prices, preferences, at commission history mula sa 'Minige Backup/${DriveBackupManager.BACKUP_FILE_NAME}' sa iyong Google Drive. Nais mo bang magpatuloy?"
-                )
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        text = "I-re-restore ang data mula sa Google Drive 'Minige Backup' folder (${DriveBackupManager.BACKUP_FILE_NAME}):",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Text(
+                            text = "• Backup Time: ${DriveBackupManager.formatBackupTimestamp(preview.backupTimestamp)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        Text(
+                            text = "• App Version: v${preview.metadata.appVersion} (Code ${preview.metadata.versionCode})",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Text(
+                            text = "• Records: ${preview.deliveryCount} deliveries, ${preview.paymentCount} payments, ${preview.expenseCount} expenses, ${preview.customerCount} customers",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Text(
+                            text = "• Preferences: Quota ${preview.preferences.dailyQuotaTarget} gal, Commission ₱${preview.preferences.commissionRate}/gal, Sunday Makeup: ${if (preview.preferences.sundayMakeupEnabled) "Yes" else "No"}",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    Text(
+                        text = "I-overwrite/upsert nito ang kasalukuyang local records at preferences. Nais mo bang magpatuloy?",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             },
             confirmButton = {
                 Button(
-                    onClick = {
-                        showRestoreConfirmDialog = false
-                        onRestoreFromDrive()
-                    },
+                    onClick = onConfirmRestoreFromDrive,
                     modifier = Modifier.testTag("confirm_restore_drive_dialog"),
                 ) {
-                    Text("Restore")
+                    Text("Proceed Restore")
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showRestoreConfirmDialog = false }) {
+                TextButton(onClick = onDismissRestorePreview) {
                     Text("Cancel")
                 }
             },

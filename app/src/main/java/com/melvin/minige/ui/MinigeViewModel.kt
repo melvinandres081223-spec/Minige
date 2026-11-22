@@ -32,11 +32,12 @@ import com.melvin.minige.auth.GoogleAuthManager
 import com.melvin.minige.sync.CalendarAuthResult
 import com.melvin.minige.sync.CalendarSyncManager
 import com.melvin.minige.sync.DriveBackupManager
+import com.melvin.minige.sync.DriveBackupPreview
+import com.melvin.minige.sync.BackupMetadataSummary
 import com.melvin.minige.sync.DriveBackupStatus
 import com.melvin.minige.ui.components.DailyQuotaPrefs
 import com.melvin.minige.ui.components.SukiAnalyticsHelper
 import com.melvin.minige.ui.components.SundayMakeupHelper
-import com.melvin.minige.ui.components.SundayMakeupPrefs
 import com.melvin.minige.ui.components.WeeklySukiAnalytics
 import com.melvin.minige.util.CommissionRateEntry
 import com.melvin.minige.util.CommissionRateHistory
@@ -118,6 +119,9 @@ data class MinigeUiState(
     val driveBackupStatus: DriveBackupStatus = DriveBackupStatus.NEEDS_PERMISSION,
     val driveLastBackupTimestamp: Long = 0L,
     val isDriveBackingUp: Boolean = false,
+    val driveBackupSummary: com.melvin.minige.sync.BackupMetadataSummary? = null,
+    val driveBackupPreview: DriveBackupPreview? = null,
+    val showRestorePreviewDialog: Boolean = false,
 )
 
 sealed interface MinigeEvent {
@@ -135,7 +139,7 @@ class MinigeViewModel(
 
     private val _selectedDate = MutableStateFlow(LocalDate.now())
     private val _sundayMakeupEnabled = MutableStateFlow(
-        appContext?.let { SundayMakeupPrefs.isEnabled(it, currentUserId) } ?: false
+        appContext?.let { com.melvin.minige.ui.components.SundayMakeupPrefs.isEnabled(it, currentUserId) } ?: false
     )
     private val _commissionRateHistory = MutableStateFlow(
         appContext?.let { CommissionRateHistory.loadHistory(it, currentUserId) } ?: emptyList()
@@ -157,6 +161,9 @@ class MinigeViewModel(
         appContext?.let { DriveBackupManager.getLastBackupTimestamp(it, currentUserId) } ?: 0L
     )
     private val _isDriveBackingUp = MutableStateFlow(false)
+    private val _driveBackupPreview = MutableStateFlow<DriveBackupPreview?>(null)
+    private val _showRestorePreviewDialog = MutableStateFlow(false)
+
     private var autoBackupJob: Job? = null
     private var cachedDriveToken: String? = null
 
@@ -231,6 +238,8 @@ class MinigeViewModel(
         val status: DriveBackupStatus,
         val lastTimestamp: Long,
         val isBackingUp: Boolean,
+        val preview: DriveBackupPreview?,
+        val showPreview: Boolean,
     )
 
     val uiState: StateFlow<MinigeUiState> = combine(
@@ -238,8 +247,8 @@ class MinigeViewModel(
             ViewPrefsSnapshot(date, sundayEnabled, rateHist, quotaTarget)
         },
         localDataFlow,
-        combine(_driveBackupStatus, _driveLastBackupTimestamp, _isDriveBackingUp) { status, lastTs, backingUp ->
-            DriveBackupSnapshot(status, lastTs, backingUp)
+        combine(_driveBackupStatus, _driveLastBackupTimestamp, _isDriveBackingUp, _driveBackupPreview, _showRestorePreviewDialog) { status, lastTs, backingUp, preview, showPreview ->
+            DriveBackupSnapshot(status, lastTs, backingUp, preview, showPreview)
         },
         _isSyncing,
         combine(_isCalendarSyncing, _statusMessage) { calSyncing, status ->
@@ -324,6 +333,7 @@ class MinigeViewModel(
         )
 
         val pendingCount = bundle.pendingCount
+        val driveMetaSummary = appContext?.let { DriveBackupManager.getBackupMetadataSummary(it, currentUserId) }
 
         MinigeUiState(
             selectedDate = date,
@@ -354,6 +364,9 @@ class MinigeViewModel(
             driveBackupStatus = driveSnap.status,
             driveLastBackupTimestamp = driveSnap.lastTimestamp,
             isDriveBackingUp = driveSnap.isBackingUp,
+            driveBackupSummary = driveMetaSummary,
+            driveBackupPreview = driveSnap.preview,
+            showRestorePreviewDialog = driveSnap.showPreview,
         )
     }.flowOn(Dispatchers.Default).stateIn(
         scope = viewModelScope,
@@ -375,7 +388,8 @@ class MinigeViewModel(
 
     fun setSundayMakeupMode(enabled: Boolean) {
         _sundayMakeupEnabled.value = enabled
-        appContext?.let { SundayMakeupPrefs.setEnabled(it, currentUserId, enabled) }
+        appContext?.let { com.melvin.minige.ui.components.SundayMakeupPrefs.setEnabled(it, currentUserId, enabled) }
+        scheduleAutoBackup()
     }
 
     fun updateDailyQuotaTarget(targetGallons: Int) {
@@ -383,6 +397,7 @@ class MinigeViewModel(
             ?: targetGallons.coerceIn(DailyQuotaPrefs.MIN_QUOTA_GALLONS, DailyQuotaPrefs.MAX_QUOTA_GALLONS)
         _dailyQuotaTarget.value = saved
         _events.tryEmit(MinigeEvent.ShowMessage("Daily hakot quota set to $saved gal"))
+        scheduleAutoBackup()
     }
 
     fun clearStatusMessage() {
@@ -422,6 +437,7 @@ class MinigeViewModel(
                 "Undone locally (queued for sync)"
             }
             _events.tryEmit(MinigeEvent.ShowMessage(msg))
+            scheduleAutoBackup()
         }
     }
 
@@ -453,6 +469,7 @@ class MinigeViewModel(
                 "Saved locally — will sync to cloud when online."
             }
             _events.tryEmit(MinigeEvent.ShowMessage(msg))
+            scheduleAutoBackup()
         }
     }
 
@@ -497,6 +514,7 @@ class MinigeViewModel(
                 }
                 _events.tryEmit(MinigeEvent.ShowMessage(msg))
             }
+            scheduleAutoBackup()
         }
     }
 
@@ -515,6 +533,7 @@ class MinigeViewModel(
                 val msg = if (result.isSuccess) "Entry deleted" else "Deleted locally (pending cloud sync)"
                 _events.tryEmit(MinigeEvent.ShowMessage(msg))
             }
+            scheduleAutoBackup()
         }
     }
 
@@ -561,6 +580,7 @@ class MinigeViewModel(
                     }
                     _events.tryEmit(MinigeEvent.ShowMessage(msg))
                 }
+                scheduleAutoBackup()
             }.onFailure { err ->
                 _events.tryEmit(MinigeEvent.ShowMessage(err.localizedMessage ?: "Payment saved locally."))
             }
@@ -613,6 +633,7 @@ class MinigeViewModel(
                     }
                     _events.tryEmit(MinigeEvent.ShowMessage(msg))
                 }
+                scheduleAutoBackup()
             }.onFailure { err ->
                 _events.tryEmit(MinigeEvent.ShowMessage(err.localizedMessage ?: "Partial payment saved locally."))
             }
@@ -635,6 +656,7 @@ class MinigeViewModel(
                 "Expense saved locally (pending sync)"
             }
             _events.tryEmit(MinigeEvent.ShowMessage(msg))
+            scheduleAutoBackup()
         }
     }
 
@@ -642,6 +664,7 @@ class MinigeViewModel(
         viewModelScope.launch {
             repository.deleteExpense(currentUserId, expenseId)
             _events.tryEmit(MinigeEvent.ShowMessage("Expense removed"))
+            scheduleAutoBackup()
         }
     }
 
@@ -650,6 +673,7 @@ class MinigeViewModel(
         viewModelScope.launch {
             repository.updateStartingSukli(currentUserId, dateKey, sukli)
             _events.tryEmit(MinigeEvent.ShowMessage("Starting sukli updated to ₱$sukli"))
+            scheduleAutoBackup()
         }
     }
 
@@ -673,6 +697,7 @@ class MinigeViewModel(
                 "Settings saved locally (pending sync)"
             }
             _events.tryEmit(MinigeEvent.ShowMessage(msg))
+            scheduleAutoBackup()
         }
     }
 
@@ -811,7 +836,53 @@ class MinigeViewModel(
         performDriveBackup(isSilent = false)
     }
 
+    fun previewDriveRestore(context: android.content.Context) {
+        viewModelScope.launch(Dispatchers.IO) {
+            _isDriveBackingUp.value = true
+            try {
+                var token = cachedDriveToken ?: DriveBackupManager.getCachedToken(context, currentUserId)
+                if (token.isNullOrBlank()) {
+                    when (val auth = GoogleAuthManager.checkOrRequestDriveAuthorization(context)) {
+                        is DriveAuthResult.Authorized -> {
+                            token = auth.accessToken
+                            cachedDriveToken = auth.accessToken
+                            DriveBackupManager.saveCachedToken(context, currentUserId, auth.accessToken)
+                        }
+                        is DriveAuthResult.NeedsConsent -> {
+                            _isDriveBackingUp.value = false
+                            _events.tryEmit(MinigeEvent.LaunchDriveConsent(auth.intentSender))
+                            return@launch
+                        }
+                        is DriveAuthResult.Failure -> {
+                            _isDriveBackingUp.value = false
+                            _events.tryEmit(MinigeEvent.ShowMessage("Drive auth failed: ${auth.message}"))
+                            return@launch
+                        }
+                    }
+                }
+
+                val res = DriveBackupManager.fetchBackupPreview(token)
+                res.onSuccess { preview ->
+                    _driveBackupPreview.value = preview
+                    _showRestorePreviewDialog.value = true
+                }.onFailure { err ->
+                    _events.tryEmit(MinigeEvent.ShowMessage("Failed to preview backup: ${err.localizedMessage ?: "Unknown error"}"))
+                }
+            } catch (e: Exception) {
+                _events.tryEmit(MinigeEvent.ShowMessage("Preview error: ${e.localizedMessage ?: "Unknown error"}"))
+            } finally {
+                _isDriveBackingUp.value = false
+            }
+        }
+    }
+
+    fun dismissRestorePreview() {
+        _showRestorePreviewDialog.value = false
+        _driveBackupPreview.value = null
+    }
+
     fun restoreFromDrive(context: android.content.Context) {
+        dismissRestorePreview()
         viewModelScope.launch(Dispatchers.IO) {
             _isDriveBackingUp.value = true
             try {
@@ -848,6 +919,7 @@ class MinigeViewModel(
                             "Restored ${summary.deliveryCount} deliveries, ${summary.paymentCount} payments, preferences, at customer directory mula sa 'Minige Backup' folder ✓"
                         )
                     )
+                    scheduleAutoBackup()
                 }.onFailure { err ->
                     _events.tryEmit(MinigeEvent.ShowMessage("Restore failed: ${err.localizedMessage ?: "Unknown error"}"))
                 }

@@ -53,6 +53,26 @@ data class BackupMetadata(
     val totalPayments: Int = 0,
 )
 
+data class BackupMetadataSummary(
+    val appVersion: String,
+    val totalDeliveries: Int,
+    val totalPayments: Int,
+    val totalExpenses: Int,
+    val totalCustomers: Int,
+    val exportedAt: String,
+)
+
+data class DriveBackupPreview(
+    val backupTimestamp: Long,
+    val userId: String,
+    val metadata: BackupMetadata,
+    val preferences: BackupAppPreferences,
+    val deliveryCount: Int,
+    val paymentCount: Int,
+    val expenseCount: Int,
+    val customerCount: Int,
+)
+
 data class DriveRestoreSummary(
     val deliveryCount: Int,
     val paymentCount: Int,
@@ -86,6 +106,7 @@ object DriveBackupManager {
     private const val PREFS_NAME = "minige_drive_backup_prefs"
     private const val KEY_LAST_BACKUP = "last_drive_backup_"
     private const val KEY_CACHED_TOKEN = "cached_drive_token_"
+    private const val KEY_LAST_BACKUP_META = "last_backup_meta_summary_"
     private const val BOUNDARY = "MINIGE_DRIVE_BACKUP_BOUNDARY_7788"
 
     private const val DRIVE_FILES_ROOT_URL = "https://www.googleapis.com/drive/v3/files"
@@ -165,10 +186,40 @@ object DriveBackupManager {
 
             saveLastBackupTimestamp(context, userId, now)
             saveCachedToken(context, userId, accessToken)
+            saveBackupMetadataSummary(context, userId, backupMetadata)
             Log.i(TAG, "Successfully backed up Minige to Google Drive folder '$BACKUP_FOLDER_NAME' at $now")
             Result.success(now)
         } catch (e: Exception) {
             Log.w(TAG, "Google Drive backup failed: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun fetchBackupPreview(
+        accessToken: String,
+    ): Result<DriveBackupPreview> = withContext(Dispatchers.IO) {
+        try {
+            val folderId = findBackupFolder(accessToken)
+            val fileId = findExistingBackupFileId(accessToken, folderId)
+                ?: return@withContext Result.failure(
+                    NoSuchElementException("Walang nahanap na backup file ($BACKUP_FILE_NAME) sa '$BACKUP_FOLDER_NAME' sa Google Drive.")
+                )
+
+            val jsonPayload = downloadDriveFile(accessToken, fileId)
+            val backupData = deserializeBackupPayload(jsonPayload)
+            Result.success(
+                DriveBackupPreview(
+                    backupTimestamp = backupData.backupTimestamp,
+                    userId = backupData.userId,
+                    metadata = backupData.metadata,
+                    preferences = backupData.preferences,
+                    deliveryCount = backupData.deliveries.size,
+                    paymentCount = backupData.utangPayments.size,
+                    expenseCount = backupData.expenses.size,
+                    customerCount = backupData.customers.size,
+                )
+            )
+        } catch (e: Exception) {
             Result.failure(e)
         }
     }
@@ -249,6 +300,7 @@ object DriveBackupManager {
 
             saveLastBackupTimestamp(context, userId, backupData.backupTimestamp)
             saveCachedToken(context, userId, accessToken)
+            saveBackupMetadataSummary(context, userId, backupData.metadata)
 
             val summary = DriveRestoreSummary(
                 deliveryCount = restoredDeliveries.size,
@@ -364,7 +416,6 @@ object DriveBackupManager {
                 if (files != null && files.length() > 0) {
                     files.getJSONObject(0).optString("id").takeIf { it.isNotBlank() }
                 } else if (!folderId.isNullOrBlank()) {
-                    // Fallback to global search if not found in folder
                     findExistingBackupFileId(accessToken, folderId = null)
                 } else null
             } else {
@@ -810,6 +861,35 @@ object DriveBackupManager {
     fun saveLastBackupTimestamp(context: Context, userId: String, timestamp: Long) {
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().putLong("$KEY_LAST_BACKUP$userId", timestamp).apply()
+    }
+
+    fun saveBackupMetadataSummary(context: Context, userId: String, meta: BackupMetadata) {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val json = JSONObject().apply {
+            put("appVersion", meta.appVersion)
+            put("totalDeliveries", meta.totalDeliveries)
+            put("totalPayments", meta.totalPayments)
+            put("totalExpenses", meta.totalExpenses)
+            put("totalCustomers", meta.totalCustomers)
+            put("exportedAt", meta.exportedAt)
+        }.toString()
+        prefs.edit().putString("$KEY_LAST_BACKUP_META$userId", json).apply()
+    }
+
+    fun getBackupMetadataSummary(context: Context, userId: String): BackupMetadataSummary? {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val json = prefs.getString("$KEY_LAST_BACKUP_META$userId", null) ?: return null
+        return runCatching {
+            val obj = JSONObject(json)
+            BackupMetadataSummary(
+                appVersion = obj.optString("appVersion", "1.0.0"),
+                totalDeliveries = obj.optInt("totalDeliveries", 0),
+                totalPayments = obj.optInt("totalPayments", 0),
+                totalExpenses = obj.optInt("totalExpenses", 0),
+                totalCustomers = obj.optInt("totalCustomers", 0),
+                exportedAt = obj.optString("exportedAt", ""),
+            )
+        }.getOrNull()
     }
 
     fun getCachedToken(context: Context, userId: String): String? {
