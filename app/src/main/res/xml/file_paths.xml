@@ -6,4 +6,7 @@
     <external-files-path
         name="external_app_files"
         path="." />
+    <external-files-path
+        name="download"
+        path="Download" />
 </paths>

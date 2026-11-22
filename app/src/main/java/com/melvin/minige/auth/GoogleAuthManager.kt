@@ -43,8 +43,9 @@ sealed interface DriveAuthResult {
 object GoogleAuthManager {
 
     private const val TAG = "GoogleAuthManager"
-    const val DRIVE_APPDATA_SCOPE = "https://www.googleapis.com/auth/drive.appdata"
-    val DRIVE_SCOPE = Scope(DRIVE_APPDATA_SCOPE)
+    const val DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"
+    const val DRIVE_APPDATA_SCOPE = DRIVE_FILE_SCOPE
+    val DRIVE_SCOPE = Scope(DRIVE_FILE_SCOPE)
 
     fun createGoogleSignInOptions(clientId: String): GoogleSignInOptions {
         return GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)

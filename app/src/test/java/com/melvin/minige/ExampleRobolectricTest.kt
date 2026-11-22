@@ -13,6 +13,9 @@ import com.melvin.minige.data.local.ExpenseEntity
 import com.melvin.minige.data.local.MinigeDatabase
 import com.melvin.minige.data.local.UtangPaymentEntity
 import com.melvin.minige.data.remote.FirestoreSyncHelper
+import com.melvin.minige.auth.GoogleAuthManager
+import com.melvin.minige.sync.BackupAppPreferences
+import com.melvin.minige.sync.BackupMetadata
 import com.melvin.minige.sync.DriveBackupManager
 import com.melvin.minige.sync.GitHubAppUpdater
 import com.melvin.minige.sync.MinigeBackupData
@@ -403,4 +406,81 @@ class ExampleRobolectricTest {
             db.close()
         }
     }
+
+    @Test
+    fun `drive backup folder is visible Minige Backup and scope is drive file`() {
+        assertEquals("Minige Backup", DriveBackupManager.BACKUP_FOLDER_NAME)
+        assertEquals("https://www.googleapis.com/auth/drive.file", GoogleAuthManager.DRIVE_FILE_SCOPE)
+        assertEquals("https://www.googleapis.com/auth/drive.file", GoogleAuthManager.DRIVE_SCOPE.scopeUri)
+    }
+
+    @Test
+    fun `backup payload serializes and deserializes preferences and metadata accurately`() {
+        val original = MinigeBackupData(
+            version = 2,
+            backupTimestamp = 1732219999000L,
+            userId = "driver_1",
+            preferences = BackupAppPreferences(
+                purifiedPrice = 30,
+                alkalinePrice = 40,
+                commissionRate = 8,
+                defaultSukli = 500,
+                dailyQuotaTarget = 75,
+                sundayMakeupEnabled = true,
+            ),
+            metadata = BackupMetadata(
+                appVersion = "1.0.12",
+                versionCode = 12,
+                exportedAt = "Nov 22, 2026",
+                totalDeliveries = 5,
+                totalPickups = 1,
+                totalPautang = 2,
+                totalExpenses = 1,
+                totalCustomers = 3,
+                totalPayments = 2,
+            ),
+        )
+
+        val json = DriveBackupManager.serializeBackupPayload(original)
+        val restored = DriveBackupManager.deserializeBackupPayload(json)
+
+        assertEquals(2, restored.version)
+        assertEquals(75, restored.preferences.dailyQuotaTarget)
+        assertTrue(restored.preferences.sundayMakeupEnabled)
+        assertEquals(500, restored.preferences.defaultSukli)
+        assertEquals(8, restored.preferences.commissionRate)
+        assertEquals("1.0.12", restored.metadata.appVersion)
+        assertEquals(5, restored.metadata.totalDeliveries)
+        assertEquals(1, restored.metadata.totalPickups)
+        assertEquals(2, restored.metadata.totalPautang)
+    }
+
+    @Test
+    fun `github release parser parses release notes and formats bullet points`() {
+        val releaseJson = """
+            {
+              "tag_name": "v1.0.42",
+              "published_at": "2026-11-22T04:00:00Z",
+              "body": "## What's Changed\n* Added visible Minige Backup folder by @melvin in https://github.com/melvin/minige/pull/1\n* Direct in-app APK installer\n- Zero-lag 120Hz display refresh lock\n• 5-second undo banner",
+              "assets": [
+                {
+                  "name": "app-debug.apk",
+                  "browser_download_url": "https://github.com/releases/download/v1.0.42/app-debug.apk"
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val parsed = GitHubAppUpdater.parseLatestReleaseJson(releaseJson)
+        assertEquals("v1.0.42", parsed?.tagName)
+        assertTrue(parsed?.releaseNotes?.contains("Added visible Minige Backup folder") == true)
+
+        val bullets = GitHubAppUpdater.formatReleaseNotes(parsed?.releaseNotes)
+        assertEquals(4, bullets.size)
+        assertEquals("Added visible Minige Backup folder", bullets[0])
+        assertEquals("Direct in-app APK installer", bullets[1])
+        assertEquals("Zero-lag 120Hz display refresh lock", bullets[2])
+        assertEquals("5-second undo banner", bullets[3])
+    }
 }
+

@@ -6,12 +6,19 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.net.Uri
+import android.os.Build
 import android.os.Environment
+import android.provider.Settings
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import com.melvin.minige.BuildConfig
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
@@ -23,6 +30,7 @@ data class GitHubReleaseInfo(
     val publishedAt: String,
     val apkDownloadUrl: String,
     val apkFileName: String,
+    val releaseNotes: String = "",
 )
 
 sealed interface UpdateCheckOutcome {
@@ -45,6 +53,7 @@ object GitHubAppUpdater {
 
     private const val PREFS_NAME = "minige_updater_prefs"
     private const val KEY_LAST_PUBLISHED_AT = "last_installed_published_at"
+    private const val KEY_CACHED_RELEASE_NOTES = "cached_latest_release_notes"
     private const val APK_FILE_NAME = "Minige-update.apk"
 
     fun getLastInstalledPublishedAt(context: Context): String {
@@ -59,6 +68,79 @@ object GitHubAppUpdater {
             .apply()
     }
 
+    fun getCachedReleaseNotes(context: Context): String {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getString(KEY_CACHED_RELEASE_NOTES, "") ?: ""
+    }
+
+    fun saveCachedReleaseNotes(context: Context, notes: String) {
+        if (notes.isBlank()) return
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_CACHED_RELEASE_NOTES, notes)
+            .apply()
+    }
+
+    /**
+     * Splits and parses Markdown or plain text release notes into clean user-facing bullet points.
+     */
+    fun formatReleaseNotes(rawBody: String?): List<String> {
+        if (rawBody.isNullOrBlank()) return emptyList()
+        val lines = rawBody.lines()
+        val bullets = mutableListOf<String>()
+
+        for (line in lines) {
+            val trimmed = line.trim()
+            if (trimmed.isEmpty()) continue
+            // Skip markdown headers
+            if (trimmed.startsWith("#")) continue
+            // Skip automated bot lines or metadata
+            if (trimmed.startsWith("**Full Changelog**", ignoreCase = true)) continue
+            if (trimmed.startsWith("http://", ignoreCase = true) || trimmed.startsWith("https://", ignoreCase = true)) continue
+
+            val clean = when {
+                trimmed.startsWith("* ") -> trimmed.removePrefix("* ").trim()
+                trimmed.startsWith("- ") -> trimmed.removePrefix("- ").trim()
+                trimmed.startsWith("• ") -> trimmed.removePrefix("• ").trim()
+                trimmed.matches(Regex("^\\d+\\.\\s+.*")) -> trimmed.substringAfter(" ").trim()
+                else -> trimmed
+            }
+            if (clean.isNotBlank()) {
+                // Strip common github commit hashes or author trailers like "by @user in #12"
+                val cleanedBullet = clean
+                    .replace(Regex("\\s+in\\s+https://github\\.com/[^\\s]+"), "")
+                    .replace(Regex("\\s+by\\s+@[^\\s]+"), "")
+                bullets.add(cleanedBullet)
+            }
+        }
+
+        return if (bullets.isEmpty()) {
+            listOf(rawBody.trim().take(300))
+        } else {
+            bullets
+        }
+    }
+
+    /**
+     * Provides curated release notes for the active version, falling back to cached GitHub notes
+     * or curated flagship feature highlights.
+     */
+    fun getWhatsNewForCurrentVersion(context: Context): List<String> {
+        val cached = getCachedReleaseNotes(context)
+        val parsed = formatReleaseNotes(cached)
+        if (parsed.isNotEmpty()) {
+            return parsed
+        }
+        return listOf(
+            "Visible Google Drive Auto-Backup sa My Drive 'Minige Backup' folder (drive.file scope)",
+            "Automatic 'What's New' release notes & direct in-app APK installer",
+            "Zero-lag 120Hz display refresh rate lock para sa smooth scrolling",
+            "Taglish interactive screen guide (?) at 5-segundo Undo action banner",
+            "Variable commission rate history (₱8/gal) at 1-Tap Hakot Messenger export",
+            "Per-customer suki custom pricing at offline-first Room + Cloud sync",
+        )
+    }
+
     internal fun parseLatestReleaseJson(jsonBody: String): GitHubReleaseInfo? {
         val root = JSONObject(jsonBody)
         val publishedAt = root.optString("published_at")
@@ -66,6 +148,7 @@ object GitHubAppUpdater {
             .ifBlank { root.optString("created_at") }
             .trim()
         val tagName = root.optString("tag_name").trim().ifBlank { "latest" }
+        val releaseNotes = root.optString("body").trim()
         val assets = root.optJSONArray("assets")
 
         var apkUrl: String? = null
@@ -92,6 +175,7 @@ object GitHubAppUpdater {
             publishedAt = publishedAt,
             apkDownloadUrl = apkUrl,
             apkFileName = apkName,
+            releaseNotes = releaseNotes,
         )
     }
 
@@ -196,6 +280,7 @@ object GitHubAppUpdater {
                         publishedAt = versionToken,
                         apkDownloadUrl = DIRECT_APK_DOWNLOAD_URL,
                         apkFileName = "app-debug.apk",
+                        releaseNotes = "",
                     )
                 )
             } else {
@@ -224,6 +309,9 @@ object GitHubAppUpdater {
 
         releaseResult.fold(
             onSuccess = { release ->
+                if (release.releaseNotes.isNotBlank()) {
+                    saveCachedReleaseNotes(context, release.releaseNotes)
+                }
                 val isNewer = isRemoteReleaseNewer(
                     release = release,
                     installedVersionCode = BuildConfig.VERSION_CODE,
@@ -243,13 +331,55 @@ object GitHubAppUpdater {
     }
 
     /**
-     * Enqueues APK download via DownloadManager to external app downloads (accessible via FileProvider
-     * on Android 11+), registers a BroadcastReceiver for completion, and returns a handle to clean up.
+     * Checks if Minige has unknown package installation permission, launching the system setting
+     * if permission is missing, or launching the system package installer intent directly.
+     */
+    fun launchApkInstaller(context: Context, apkFile: File) {
+        val appContext = context.applicationContext
+
+        // Check canRequestPackageInstalls on Android 8.0 (API 26)+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (!appContext.packageManager.canRequestPackageInstalls()) {
+                val manageIntent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+                    data = Uri.parse("package:${appContext.packageName}")
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                appContext.startActivity(manageIntent)
+                Toast.makeText(
+                    appContext,
+                    "Paki-allow ang 'Install unknown apps' para sa Minige upang ma-install ang update.",
+                    Toast.LENGTH_LONG
+                ).show()
+                return
+            }
+        }
+
+        val apkUri = FileProvider.getUriForFile(
+            appContext,
+            "${appContext.packageName}.fileprovider",
+            apkFile,
+        )
+        val installIntent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(apkUri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+
+        val launchResult = runCatching { appContext.startActivity(installIntent) }
+        if (launchResult.isFailure) {
+            val msg = "Unable to launch installer: ${launchResult.exceptionOrNull()?.localizedMessage ?: "Unknown error"}"
+            Toast.makeText(appContext, msg, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    /**
+     * Enqueues APK download via DownloadManager to external app downloads (accessible via FileProvider),
+     * tracks live percentage progress, registers a BroadcastReceiver for completion, and prompts installation.
      */
     fun startDownloadAndInstall(
         context: Context,
         release: GitHubReleaseInfo,
         onStatus: (String) -> Unit,
+        onProgress: (percent: Int, status: String) -> Unit = { _, _ -> },
         onFinished: () -> Unit,
     ): BroadcastReceiver {
         val appContext = context.applicationContext
@@ -262,7 +392,7 @@ object GitHubAppUpdater {
         val downloadManager = appContext.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
         val request = DownloadManager.Request(Uri.parse(release.apkDownloadUrl)).apply {
             addRequestHeader("User-Agent", USER_AGENT)
-            setTitle("Minige Update")
+            setTitle("Minige Update ${release.tagName}")
             setDescription("Downloading ${release.apkFileName}...")
             setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
             setMimeType("application/vnd.android.package-archive")
@@ -271,12 +401,56 @@ object GitHubAppUpdater {
 
         val downloadId = downloadManager.enqueue(request)
         onStatus("Downloading update...")
+        onProgress(0, "Connecting...")
+
+        var isDownloading = true
+        val progressScope = CoroutineScope(Dispatchers.IO)
+        var progressJob: Job? = null
+
+        progressJob = progressScope.launch {
+            val query = DownloadManager.Query().setFilterById(downloadId)
+            while (isActive && isDownloading) {
+                delay(400)
+                try {
+                    val cursor = downloadManager.query(query)
+                    cursor?.use {
+                        if (it.moveToFirst()) {
+                            val bytesIdx = it.getColumnIndex(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR)
+                            val totalIdx = it.getColumnIndex(DownloadManager.COLUMN_TOTAL_SIZE_BYTES)
+                            val statusIdx = it.getColumnIndex(DownloadManager.COLUMN_STATUS)
+                            val status = if (statusIdx >= 0) it.getInt(statusIdx) else -1
+
+                            if (status == DownloadManager.STATUS_RUNNING && bytesIdx >= 0 && totalIdx >= 0) {
+                                val bytes = it.getLong(bytesIdx)
+                                val total = it.getLong(totalIdx)
+                                if (total > 0) {
+                                    val pct = ((bytes * 100) / total).toInt().coerceIn(0, 100)
+                                    val mbDownloaded = bytes / (1024 * 1024.0)
+                                    val mbTotal = total / (1024 * 1024.0)
+                                    val statusMsg = "Downloading: $pct% (%.1f / %.1f MB)".format(mbDownloaded, mbTotal)
+                                    withContext(Dispatchers.Main) {
+                                        onStatus(statusMsg)
+                                        onProgress(pct, statusMsg)
+                                    }
+                                }
+                            } else if (status == DownloadManager.STATUS_SUCCESSFUL || status == DownloadManager.STATUS_FAILED) {
+                                isDownloading = false
+                            }
+                        }
+                    }
+                } catch (_: Exception) {
+                    // Ignore transient cursor read errors
+                }
+            }
+        }
 
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context?, intent: Intent?) {
                 val completedId = intent?.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L) ?: -1L
                 if (completedId != downloadId) return
 
+                isDownloading = false
+                progressJob?.cancel()
                 runCatching { appContext.unregisterReceiver(this) }
 
                 val query = DownloadManager.Query().setFilterById(downloadId)
@@ -304,6 +478,7 @@ object GitHubAppUpdater {
                 if (!succeeded) {
                     val msg = "Download failed (code $failReason)."
                     onStatus(msg)
+                    onProgress(0, msg)
                     Toast.makeText(appContext, msg, Toast.LENGTH_LONG).show()
                     onFinished()
                     return
@@ -313,31 +488,17 @@ object GitHubAppUpdater {
                 if (!apkFile.exists()) {
                     val msg = "Downloaded APK file could not be found."
                     onStatus(msg)
+                    onProgress(0, msg)
                     Toast.makeText(appContext, msg, Toast.LENGTH_LONG).show()
                     onFinished()
                     return
                 }
 
                 saveInstalledPublishedAt(appContext, release.publishedAt)
+                onStatus("Update downloaded! Launching installer...")
+                onProgress(100, "Ready to install")
 
-                val apkUri = FileProvider.getUriForFile(
-                    appContext,
-                    "${appContext.packageName}.fileprovider",
-                    apkFile,
-                )
-                val installIntent = Intent(Intent.ACTION_VIEW).apply {
-                    setDataAndType(apkUri, "application/vnd.android.package-archive")
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-
-                val launchResult = runCatching { appContext.startActivity(installIntent) }
-                if (launchResult.isSuccess) {
-                    onStatus("Update downloaded. Launching installer...")
-                } else {
-                    val msg = "Unable to launch installer: ${launchResult.exceptionOrNull()?.localizedMessage ?: "Unknown error"}"
-                    onStatus(msg)
-                    Toast.makeText(appContext, msg, Toast.LENGTH_LONG).show()
-                }
+                launchApkInstaller(appContext, apkFile)
                 onFinished()
             }
         }

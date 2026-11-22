@@ -2,6 +2,7 @@ package com.melvin.minige.sync
 
 import android.content.Context
 import android.util.Log
+import com.melvin.minige.BuildConfig
 import com.melvin.minige.data.local.AppSettingsEntity
 import com.melvin.minige.data.local.CustomerEntity
 import com.melvin.minige.data.local.DailyLedgerEntity
@@ -9,15 +10,14 @@ import com.melvin.minige.data.local.DeliveryEntity
 import com.melvin.minige.data.local.ExpenseEntity
 import com.melvin.minige.data.local.MinigeDao
 import com.melvin.minige.data.local.UtangPaymentEntity
+import com.melvin.minige.ui.components.DailyQuotaPrefs
+import com.melvin.minige.ui.components.SundayMakeupPrefs
 import com.melvin.minige.util.CommissionRateEntry
 import com.melvin.minige.util.CommissionRateHistory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.BufferedReader
-import java.io.InputStreamReader
-import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.charset.StandardCharsets
@@ -32,16 +32,39 @@ enum class DriveBackupStatus(val label: String) {
     ERROR("Error"),
 }
 
+data class BackupAppPreferences(
+    val purifiedPrice: Int = 30,
+    val alkalinePrice: Int = 40,
+    val commissionRate: Int = 8,
+    val defaultSukli: Int = 0,
+    val dailyQuotaTarget: Int = 50,
+    val sundayMakeupEnabled: Boolean = false,
+)
+
+data class BackupMetadata(
+    val appVersion: String = BuildConfig.VERSION_NAME,
+    val versionCode: Int = BuildConfig.VERSION_CODE,
+    val exportedAt: String = "",
+    val totalDeliveries: Int = 0,
+    val totalPickups: Int = 0,
+    val totalPautang: Int = 0,
+    val totalExpenses: Int = 0,
+    val totalCustomers: Int = 0,
+    val totalPayments: Int = 0,
+)
+
 data class DriveRestoreSummary(
     val deliveryCount: Int,
     val paymentCount: Int,
     val expenseCount: Int,
     val customerCount: Int,
     val backupTimestamp: Long,
+    val restoredQuota: Int? = null,
+    val restoredSundayMakeup: Boolean? = null,
 )
 
 data class MinigeBackupData(
-    val version: Int = 1,
+    val version: Int = 2,
     val backupTimestamp: Long = System.currentTimeMillis(),
     val userId: String = "",
     val deliveries: List<DeliveryEntity> = emptyList(),
@@ -51,21 +74,22 @@ data class MinigeBackupData(
     val settings: AppSettingsEntity? = null,
     val customers: List<CustomerEntity> = emptyList(),
     val commissionRateHistory: List<CommissionRateEntry> = emptyList(),
+    val preferences: BackupAppPreferences = BackupAppPreferences(),
+    val metadata: BackupMetadata = BackupMetadata(),
 )
 
 object DriveBackupManager {
 
     private const val TAG = "DriveBackupManager"
+    const val BACKUP_FOLDER_NAME = "Minige Backup"
     const val BACKUP_FILE_NAME = "minige_auto_backup.json"
     private const val PREFS_NAME = "minige_drive_backup_prefs"
     private const val KEY_LAST_BACKUP = "last_drive_backup_"
     private const val KEY_CACHED_TOKEN = "cached_drive_token_"
     private const val BOUNDARY = "MINIGE_DRIVE_BACKUP_BOUNDARY_7788"
 
-    private const val DRIVE_FILES_URL =
-        "https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=name%3D'minige_auto_backup.json'+and+trashed%3Dfalse&fields=files(id,name,modifiedTime,size)"
-    private const val DRIVE_UPLOAD_URL =
-        "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart"
+    private const val DRIVE_FILES_ROOT_URL = "https://www.googleapis.com/drive/v3/files"
+    private const val DRIVE_UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart"
 
     suspend fun backupToDrive(
         accessToken: String,
@@ -83,8 +107,39 @@ object DriveBackupManager {
             val customers = dao.getAllCustomersOnce(userId)
             val rateHistory = CommissionRateHistory.loadHistory(context, userId)
 
+            val quota = DailyQuotaPrefs.loadQuotaTarget(context, userId)
+            val sundayMakeup = SundayMakeupPrefs.isEnabled(context, userId)
+            val effectiveRate = settings?.commissionRate ?: 8
+            val purified = settings?.purifiedPrice ?: 30
+            val alkaline = settings?.alkalinePrice ?: 40
+            val sukli = settings?.defaultSukli ?: 0
+
+            val appPreferences = BackupAppPreferences(
+                purifiedPrice = purified,
+                alkalinePrice = alkaline,
+                commissionRate = effectiveRate,
+                defaultSukli = sukli,
+                dailyQuotaTarget = quota,
+                sundayMakeupEnabled = sundayMakeup,
+            )
+
+            val totalPickups = deliveries.count { it.paymentType == "PICK_UP" }
+            val totalPautang = deliveries.count { it.paymentType == "PAUTANG" }
+
+            val backupMetadata = BackupMetadata(
+                appVersion = BuildConfig.VERSION_NAME,
+                versionCode = BuildConfig.VERSION_CODE,
+                exportedAt = formatBackupTimestamp(now),
+                totalDeliveries = deliveries.size,
+                totalPickups = totalPickups,
+                totalPautang = totalPautang,
+                totalExpenses = expenses.size,
+                totalCustomers = customers.size,
+                totalPayments = utangPayments.size,
+            )
+
             val backupData = MinigeBackupData(
-                version = 1,
+                version = 2,
                 backupTimestamp = now,
                 userId = userId,
                 deliveries = deliveries,
@@ -94,20 +149,23 @@ object DriveBackupManager {
                 settings = settings,
                 customers = customers,
                 commissionRateHistory = rateHistory,
+                preferences = appPreferences,
+                metadata = backupMetadata,
             )
 
             val jsonPayload = serializeBackupPayload(backupData)
-            val existingFileId = findExistingBackupFileId(accessToken)
+            val folderId = findOrCreateBackupFolder(accessToken)
+            val existingFileId = findExistingBackupFileId(accessToken, folderId)
 
             if (existingFileId != null) {
-                overwriteDriveFile(accessToken, existingFileId, jsonPayload)
+                overwriteDriveFile(accessToken, existingFileId, folderId, jsonPayload)
             } else {
-                createNewDriveFile(accessToken, jsonPayload)
+                createNewDriveFile(accessToken, folderId, jsonPayload)
             }
 
             saveLastBackupTimestamp(context, userId, now)
             saveCachedToken(context, userId, accessToken)
-            Log.i(TAG, "Successfully backed up Minige to Google Drive appDataFolder at $now")
+            Log.i(TAG, "Successfully backed up Minige to Google Drive folder '$BACKUP_FOLDER_NAME' at $now")
             Result.success(now)
         } catch (e: Exception) {
             Log.w(TAG, "Google Drive backup failed: ${e.message}", e)
@@ -122,15 +180,16 @@ object DriveBackupManager {
         context: Context,
     ): Result<DriveRestoreSummary> = withContext(Dispatchers.IO) {
         try {
-            val fileId = findExistingBackupFileId(accessToken)
+            val folderId = findBackupFolder(accessToken)
+            val fileId = findExistingBackupFileId(accessToken, folderId)
                 ?: return@withContext Result.failure(
-                    NoSuchElementException("Walang nahanap na backup file ($BACKUP_FILE_NAME) sa Google Drive appDataFolder.")
+                    NoSuchElementException("Walang nahanap na backup file ($BACKUP_FILE_NAME) sa '$BACKUP_FOLDER_NAME' sa Google Drive.")
                 )
 
             val jsonPayload = downloadDriveFile(accessToken, fileId)
             val backupData = deserializeBackupPayload(jsonPayload)
 
-            // Restore records into Room with pendingSync = true so they also sync up to Firestore
+            // Upsert records into Room by ID to prevent duplicate deliveries, payments, or pautangs
             val restoredDeliveries = backupData.deliveries.map {
                 it.copy(userId = userId, pendingSync = true)
             }
@@ -159,9 +218,17 @@ object DriveBackupManager {
                 dao.upsertDailyLedgers(restoredLedgers)
             }
 
-            backupData.settings?.let { s ->
-                dao.upsertSettings(s.copy(userId = userId, pendingSync = true))
-            }
+            val targetSettings = backupData.settings ?: AppSettingsEntity(
+                id = "default",
+                userId = userId,
+                purifiedPrice = backupData.preferences.purifiedPrice,
+                alkalinePrice = backupData.preferences.alkalinePrice,
+                commissionRate = backupData.preferences.commissionRate,
+                defaultSukli = backupData.preferences.defaultSukli,
+                pendingSync = true,
+                updatedAtEpochMs = backupData.backupTimestamp,
+            )
+            dao.upsertSettings(targetSettings.copy(userId = userId, pendingSync = true))
 
             val restoredCustomers = backupData.customers.map {
                 it.copy(userId = userId, pendingSync = true)
@@ -174,6 +241,12 @@ object DriveBackupManager {
                 CommissionRateHistory.saveHistory(context, userId, backupData.commissionRateHistory)
             }
 
+            // Restore App Preferences
+            backupData.preferences.let { p ->
+                DailyQuotaPrefs.saveQuotaTarget(context, userId, p.dailyQuotaTarget)
+                SundayMakeupPrefs.setEnabled(context, userId, p.sundayMakeupEnabled)
+            }
+
             saveLastBackupTimestamp(context, userId, backupData.backupTimestamp)
             saveCachedToken(context, userId, accessToken)
 
@@ -183,8 +256,10 @@ object DriveBackupManager {
                 expenseCount = restoredExpenses.size,
                 customerCount = restoredCustomers.size,
                 backupTimestamp = backupData.backupTimestamp,
+                restoredQuota = backupData.preferences.dailyQuotaTarget,
+                restoredSundayMakeup = backupData.preferences.sundayMakeupEnabled,
             )
-            Log.i(TAG, "Successfully restored Minige from Google Drive: $summary")
+            Log.i(TAG, "Successfully restored Minige from Google Drive folder '$BACKUP_FOLDER_NAME': $summary")
             Result.success(summary)
         } catch (e: Exception) {
             Log.e(TAG, "Restore from Google Drive failed: ${e.message}", e)
@@ -192,8 +267,17 @@ object DriveBackupManager {
         }
     }
 
-    private fun findExistingBackupFileId(accessToken: String): String? {
-        val url = URL(DRIVE_FILES_URL)
+    private fun findOrCreateBackupFolder(accessToken: String): String {
+        val existingId = findBackupFolder(accessToken)
+        if (!existingId.isNullOrBlank()) {
+            return existingId
+        }
+        return createBackupFolder(accessToken)
+    }
+
+    private fun findBackupFolder(accessToken: String): String? {
+        val query = "name%3D'Minige+Backup'+and+mimeType%3D'application%2Fvnd.google-apps.folder'+and+'root'+in+parents+and+trashed%3Dfalse"
+        val url = URL("$DRIVE_FILES_ROOT_URL?q=$query&fields=files(id,name)")
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 12_000
@@ -206,15 +290,12 @@ object DriveBackupManager {
             val code = conn.responseCode
             if (code in 200..299) {
                 val responseText = conn.inputStream.bufferedReader().use { it.readText() }
-                val json = JSONObject(responseText)
-                val files = json.optJSONArray("files")
+                val files = JSONObject(responseText).optJSONArray("files")
                 if (files != null && files.length() > 0) {
                     files.getJSONObject(0).optString("id").takeIf { it.isNotBlank() }
-                } else {
-                    null
-                }
+                } else null
             } else {
-                Log.w(TAG, "Drive list files returned HTTP $code")
+                Log.w(TAG, "Search backup folder returned HTTP $code")
                 null
             }
         } finally {
@@ -222,7 +303,80 @@ object DriveBackupManager {
         }
     }
 
-    private fun createNewDriveFile(accessToken: String, jsonPayload: String): String {
+    private fun createBackupFolder(accessToken: String): String {
+        val url = URL(DRIVE_FILES_ROOT_URL)
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            doOutput = true
+            connectTimeout = 15_000
+            readTimeout = 20_000
+            setRequestProperty("Authorization", "Bearer $accessToken")
+            setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+        }
+
+        val metadata = JSONObject().apply {
+            put("name", BACKUP_FOLDER_NAME)
+            put("mimeType", "application/vnd.google-apps.folder")
+            put("parents", JSONArray(listOf("root")))
+        }.toString()
+
+        conn.outputStream.use { os ->
+            os.write(metadata.toByteArray(StandardCharsets.UTF_8))
+            os.flush()
+        }
+
+        val code = conn.responseCode
+        if (code !in 200..299) {
+            val errorText = runCatching {
+                conn.errorStream?.bufferedReader()?.use { it.readText() }
+            }.getOrNull()
+            throw IllegalStateException("Failed to create '$BACKUP_FOLDER_NAME' folder (HTTP $code): $errorText")
+        }
+
+        val responseText = conn.inputStream.bufferedReader().use { it.readText() }
+        val id = JSONObject(responseText).optString("id")
+        if (id.isBlank()) {
+            throw IllegalStateException("Created '$BACKUP_FOLDER_NAME' folder but returned no ID.")
+        }
+        return id
+    }
+
+    private fun findExistingBackupFileId(accessToken: String, folderId: String?): String? {
+        val folderQuery = if (!folderId.isNullOrBlank()) {
+            "name%3D'minige_auto_backup.json'+and+'$folderId'+in+parents+and+trashed%3Dfalse"
+        } else {
+            "name%3D'minige_auto_backup.json'+and+trashed%3Dfalse"
+        }
+        val url = URL("$DRIVE_FILES_ROOT_URL?q=$folderQuery&fields=files(id,name,modifiedTime,size)")
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 12_000
+            readTimeout = 12_000
+            setRequestProperty("Authorization", "Bearer $accessToken")
+            setRequestProperty("Accept", "application/json")
+        }
+
+        return try {
+            val code = conn.responseCode
+            if (code in 200..299) {
+                val responseText = conn.inputStream.bufferedReader().use { it.readText() }
+                val files = JSONObject(responseText).optJSONArray("files")
+                if (files != null && files.length() > 0) {
+                    files.getJSONObject(0).optString("id").takeIf { it.isNotBlank() }
+                } else if (!folderId.isNullOrBlank()) {
+                    // Fallback to global search if not found in folder
+                    findExistingBackupFileId(accessToken, folderId = null)
+                } else null
+            } else {
+                Log.w(TAG, "Search backup file returned HTTP $code")
+                null
+            }
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun createNewDriveFile(accessToken: String, folderId: String, jsonPayload: String): String {
         val url = URL(DRIVE_UPLOAD_URL)
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
@@ -235,7 +389,7 @@ object DriveBackupManager {
 
         val metadataJson = JSONObject().apply {
             put("name", BACKUP_FILE_NAME)
-            put("parents", JSONArray(listOf("appDataFolder")))
+            put("parents", JSONArray(listOf(folderId)))
         }.toString()
 
         val body = buildMultipartBody(metadataJson, jsonPayload)
@@ -258,7 +412,7 @@ object DriveBackupManager {
         return responseJson.optString("id")
     }
 
-    private fun overwriteDriveFile(accessToken: String, fileId: String, jsonPayload: String): String {
+    private fun overwriteDriveFile(accessToken: String, fileId: String, folderId: String, jsonPayload: String): String {
         val url = URL("https://www.googleapis.com/upload/drive/v3/files/$fileId?uploadType=multipart")
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
@@ -286,9 +440,8 @@ object DriveBackupManager {
             val errorText = runCatching {
                 conn.errorStream?.bufferedReader()?.use { it.readText() }
             }.getOrNull()
-            // If file was deleted remotely, fallback to create new file
             if (code == 404) {
-                return createNewDriveFile(accessToken, jsonPayload)
+                return createNewDriveFile(accessToken, folderId, jsonPayload)
             }
             throw IllegalStateException("Drive file overwrite failed (HTTP $code): $errorText")
         }
@@ -429,6 +582,29 @@ object DriveBackupManager {
             put("customers", custArr)
 
             put("commissionRateHistory", CommissionRateHistory.serialize(data.commissionRateHistory))
+
+            // App Preferences
+            put("preferences", JSONObject().apply {
+                put("purifiedPrice", data.preferences.purifiedPrice)
+                put("alkalinePrice", data.preferences.alkalinePrice)
+                put("commissionRate", data.preferences.commissionRate)
+                put("defaultSukli", data.preferences.defaultSukli)
+                put("dailyQuotaTarget", data.preferences.dailyQuotaTarget)
+                put("sundayMakeupEnabled", data.preferences.sundayMakeupEnabled)
+            })
+
+            // Metadata
+            put("metadata", JSONObject().apply {
+                put("appVersion", data.metadata.appVersion)
+                put("versionCode", data.metadata.versionCode)
+                put("exportedAt", data.metadata.exportedAt)
+                put("totalDeliveries", data.metadata.totalDeliveries)
+                put("totalPickups", data.metadata.totalPickups)
+                put("totalPautang", data.metadata.totalPautang)
+                put("totalExpenses", data.metadata.totalExpenses)
+                put("totalCustomers", data.metadata.totalCustomers)
+                put("totalPayments", data.metadata.totalPayments)
+            })
         }
         return root.toString(2)
     }
@@ -569,6 +745,47 @@ object DriveBackupManager {
             CommissionRateHistory.deserialize(root.optString("commissionRateHistory", ""))
         } else emptyList()
 
+        val preferences = if (root.has("preferences")) {
+            val pObj = root.getJSONObject("preferences")
+            BackupAppPreferences(
+                purifiedPrice = pObj.optInt("purifiedPrice", settings?.purifiedPrice ?: 30),
+                alkalinePrice = pObj.optInt("alkalinePrice", settings?.alkalinePrice ?: 40),
+                commissionRate = pObj.optInt("commissionRate", settings?.commissionRate ?: 8),
+                defaultSukli = pObj.optInt("defaultSukli", settings?.defaultSukli ?: 0),
+                dailyQuotaTarget = pObj.optInt("dailyQuotaTarget", 50),
+                sundayMakeupEnabled = pObj.optBoolean("sundayMakeupEnabled", false),
+            )
+        } else {
+            BackupAppPreferences(
+                purifiedPrice = settings?.purifiedPrice ?: 30,
+                alkalinePrice = settings?.alkalinePrice ?: 40,
+                commissionRate = settings?.commissionRate ?: 8,
+                defaultSukli = settings?.defaultSukli ?: 0,
+            )
+        }
+
+        val metadata = if (root.has("metadata")) {
+            val mObj = root.getJSONObject("metadata")
+            BackupMetadata(
+                appVersion = mObj.optString("appVersion", BuildConfig.VERSION_NAME),
+                versionCode = mObj.optInt("versionCode", BuildConfig.VERSION_CODE),
+                exportedAt = mObj.optString("exportedAt", ""),
+                totalDeliveries = mObj.optInt("totalDeliveries", deliveries.size),
+                totalPickups = mObj.optInt("totalPickups", deliveries.count { it.paymentType == "PICK_UP" }),
+                totalPautang = mObj.optInt("totalPautang", deliveries.count { it.paymentType == "PAUTANG" }),
+                totalExpenses = mObj.optInt("totalExpenses", expenses.size),
+                totalCustomers = mObj.optInt("totalCustomers", customers.size),
+                totalPayments = mObj.optInt("totalPayments", utangPayments.size),
+            )
+        } else {
+            BackupMetadata(
+                totalDeliveries = deliveries.size,
+                totalExpenses = expenses.size,
+                totalCustomers = customers.size,
+                totalPayments = utangPayments.size,
+            )
+        }
+
         return MinigeBackupData(
             version = version,
             backupTimestamp = timestamp,
@@ -580,6 +797,8 @@ object DriveBackupManager {
             settings = settings,
             customers = customers,
             commissionRateHistory = commissionRateHistory,
+            preferences = preferences,
+            metadata = metadata,
         )
     }
 

@@ -36,6 +36,7 @@ import com.melvin.minige.sync.DriveBackupStatus
 import com.melvin.minige.ui.components.DailyQuotaPrefs
 import com.melvin.minige.ui.components.SukiAnalyticsHelper
 import com.melvin.minige.ui.components.SundayMakeupHelper
+import com.melvin.minige.ui.components.SundayMakeupPrefs
 import com.melvin.minige.ui.components.WeeklySukiAnalytics
 import com.melvin.minige.util.CommissionRateEntry
 import com.melvin.minige.util.CommissionRateHistory
@@ -133,7 +134,9 @@ class MinigeViewModel(
 ) : ViewModel() {
 
     private val _selectedDate = MutableStateFlow(LocalDate.now())
-    private val _sundayMakeupEnabled = MutableStateFlow(false)
+    private val _sundayMakeupEnabled = MutableStateFlow(
+        appContext?.let { SundayMakeupPrefs.isEnabled(it, currentUserId) } ?: false
+    )
     private val _commissionRateHistory = MutableStateFlow(
         appContext?.let { CommissionRateHistory.loadHistory(it, currentUserId) } ?: emptyList()
     )
@@ -372,6 +375,7 @@ class MinigeViewModel(
 
     fun setSundayMakeupMode(enabled: Boolean) {
         _sundayMakeupEnabled.value = enabled
+        appContext?.let { SundayMakeupPrefs.setEnabled(it, currentUserId, enabled) }
     }
 
     fun updateDailyQuotaTarget(targetGallons: Int) {
@@ -750,7 +754,7 @@ class MinigeViewModel(
                     _driveLastBackupTimestamp.value = ts
                     _driveBackupStatus.value = DriveBackupStatus.ACTIVE
                     if (!isSilent) {
-                        _events.tryEmit(MinigeEvent.ShowMessage("Backed up to Google Drive (appDataFolder) ✓"))
+                        _events.tryEmit(MinigeEvent.ShowMessage("Backed up to Google Drive (Minige Backup folder) ✓"))
                     }
                 }.onFailure { err ->
                     _driveBackupStatus.value = DriveBackupStatus.ERROR
@@ -836,9 +840,12 @@ class MinigeViewModel(
                 res.onSuccess { summary ->
                     _driveLastBackupTimestamp.value = summary.backupTimestamp
                     _driveBackupStatus.value = DriveBackupStatus.ACTIVE
+                    summary.restoredQuota?.let { q -> _dailyQuotaTarget.value = q }
+                    summary.restoredSundayMakeup?.let { sm -> _sundayMakeupEnabled.value = sm }
+                    _commissionRateHistory.value = CommissionRateHistory.loadHistory(context, currentUserId)
                     _events.tryEmit(
                         MinigeEvent.ShowMessage(
-                            "Restored ${summary.deliveryCount} deliveries, ${summary.paymentCount} payments, and ${summary.customerCount} customers from Drive ✓"
+                            "Restored ${summary.deliveryCount} deliveries, ${summary.paymentCount} payments, preferences, at customer directory mula sa 'Minige Backup' folder ✓"
                         )
                     )
                 }.onFailure { err ->

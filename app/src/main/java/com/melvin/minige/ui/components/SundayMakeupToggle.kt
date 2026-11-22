@@ -27,9 +27,25 @@ import com.melvin.minige.domain.ExpenseRecord
 import com.melvin.minige.domain.MinigeCalculator
 import com.melvin.minige.domain.MinigeDateUtils
 import com.melvin.minige.domain.UtangPaymentRecord
+import android.content.Context
 import com.melvin.minige.domain.WeeklyDaySummary
 import com.melvin.minige.domain.WeeklySummary
 import java.time.LocalDate
+
+object SundayMakeupPrefs {
+    private const val PREFS_NAME = "minige_sunday_makeup_prefs"
+    private const val KEY_ENABLED = "sunday_makeup_enabled_"
+
+    fun isEnabled(context: Context, userId: String): Boolean {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean("$KEY_ENABLED$userId", false)
+    }
+
+    fun setEnabled(context: Context, userId: String, enabled: Boolean) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putBoolean("$KEY_ENABLED$userId", enabled).apply()
+    }
+}
 
 object SundayMakeupHelper {
 

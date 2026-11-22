@@ -5,10 +5,12 @@ import android.content.pm.PackageManager
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
@@ -20,17 +22,16 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.rounded.CloudDownload
 import androidx.compose.material.icons.rounded.CloudSync
 import androidx.compose.material.icons.rounded.CloudUpload
 import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.NewReleases
 import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.material.icons.rounded.SystemUpdate
@@ -39,31 +40,36 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
-import com.melvin.minige.sync.DriveBackupManager
-import com.melvin.minige.sync.DriveBackupStatus
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.melvin.minige.BuildConfig
+import com.melvin.minige.sync.DriveBackupManager
+import com.melvin.minige.sync.DriveBackupStatus
 import com.melvin.minige.sync.GitHubAppUpdater
+import com.melvin.minige.sync.GitHubReleaseInfo
 import com.melvin.minige.sync.UpdateCheckOutcome
 import com.melvin.minige.ui.MinigeUiState
 import com.melvin.minige.ui.components.CommissionRateCard
@@ -89,6 +95,10 @@ fun SettingsScreen(
 
     var isCheckingOrDownloadingUpdate by remember { mutableStateOf(false) }
     var updateStatusText by remember { mutableStateOf<String?>(null) }
+    var pendingUpdateRelease by remember { mutableStateOf<GitHubReleaseInfo?>(null) }
+    var isDownloadingUpdate by remember { mutableStateOf(false) }
+    var downloadProgressPercent by remember { mutableIntStateOf(0) }
+    var downloadProgressStatus by remember { mutableStateOf("Ready to download") }
     var showRestoreConfirmDialog by remember { mutableStateOf(false) }
 
     var purifiedText by remember(uiState.settings.purifiedPrice) {
@@ -191,7 +201,7 @@ fun SettingsScreen(
                                     alkalineText.toIntOrNull() ?: 40,
                                     rateText.toIntOrNull() ?: 8,
                                     defaultSukliText.toIntOrNull() ?: 0,
-                                )
+                                    )
                             },
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -275,7 +285,7 @@ fun SettingsScreen(
                                     when (val outcome = GitHubAppUpdater.checkForUpdate(context)) {
                                         is UpdateCheckOutcome.AlreadyUpToDate -> {
                                             isCheckingOrDownloadingUpdate = false
-                                            updateStatusText = "Already up to date!"
+                                            updateStatusText = "Minige is up to date! (v${BuildConfig.VERSION_NAME})"
                                             Toast.makeText(context, "Already up to date!", Toast.LENGTH_SHORT).show()
                                         }
                                         is UpdateCheckOutcome.Error -> {
@@ -284,14 +294,9 @@ fun SettingsScreen(
                                             Toast.makeText(context, outcome.message, Toast.LENGTH_LONG).show()
                                         }
                                         is UpdateCheckOutcome.UpdateAvailable -> {
-                                            updateStatusText = "Downloading update..."
-                                            Toast.makeText(context, "Downloading update...", Toast.LENGTH_SHORT).show()
-                                            GitHubAppUpdater.startDownloadAndInstall(
-                                                context = context,
-                                                release = outcome.release,
-                                                onStatus = { status -> updateStatusText = status },
-                                                onFinished = { isCheckingOrDownloadingUpdate = false },
-                                            )
+                                            isCheckingOrDownloadingUpdate = false
+                                            updateStatusText = "Update available: ${outcome.release.tagName}"
+                                            pendingUpdateRelease = outcome.release
                                         }
                                     }
                                 }
@@ -339,6 +344,74 @@ fun SettingsScreen(
                             Icon(Icons.AutoMirrored.Rounded.Logout, contentDescription = null)
                             Spacer(modifier = Modifier.width(8.dp))
                             Text("Sign Out")
+                        }
+                    }
+                }
+            }
+
+            item(key = "whats_new_card", contentType = "whats_new_card") {
+                OutlinedCard(
+                    shape = RoundedCornerShape(20.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("whats_new_card"),
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.NewReleases,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                            Text(
+                                text = "What's New in Minige",
+                                style = MaterialTheme.typography.titleMedium,
+                            )
+                            Spacer(modifier = Modifier.weight(1f))
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(MaterialTheme.colorScheme.primaryContainer)
+                                    .padding(horizontal = 8.dp, vertical = 2.dp),
+                            ) {
+                                Text(
+                                    text = "v${BuildConfig.VERSION_NAME}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                            }
+                        }
+
+                        val whatsNewBullets = remember {
+                            GitHubAppUpdater.getWhatsNewForCurrentVersion(context)
+                        }
+
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            whatsNewBullets.forEach { bullet ->
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.Top,
+                                ) {
+                                    Text(
+                                        text = "✓",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary,
+                                    )
+                                    Text(
+                                        text = bullet,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -414,7 +487,7 @@ fun SettingsScreen(
                         )
 
                         Text(
-                            text = "Naka-store sa nakatagong Google Drive appDataFolder ng iyong account para ligtas ang deliveries, pautang, at customer directory kahit magpalit ka ng device.",
+                            text = "Naka-save sa nakikitang folder na 'Minige Backup' sa iyong Google Drive (My Drive) bilang 'minige_auto_backup.json'. Ligtas, madaling basahin, at puwedeng i-export sa ibang app.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -478,6 +551,169 @@ fun SettingsScreen(
         }
     }
 
+    // Update Available Dialog with Release Notes and Live Download Progress
+    val updateRelease = pendingUpdateRelease
+    if (updateRelease != null) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!isDownloadingUpdate) {
+                    pendingUpdateRelease = null
+                }
+            },
+            icon = {
+                Icon(
+                    imageVector = Icons.Rounded.SystemUpdate,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(32.dp),
+                )
+            },
+            title = {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = "Update Available",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        text = updateRelease.tagName,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    val bullets = GitHubAppUpdater.formatReleaseNotes(updateRelease.releaseNotes)
+                    if (bullets.isNotEmpty()) {
+                        Text(
+                            text = "What's New in this Version:",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            bullets.forEach { note ->
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.Top,
+                                ) {
+                                    Text(
+                                        text = "•",
+                                        color = MaterialTheme.colorScheme.primary,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Bold,
+                                    )
+                                    Text(
+                                        text = note,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        Text(
+                            text = "May bagong bersyon ng Minige na handa nang i-install na naglalaman ng mga bagong features at route improvements.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+
+                    if (isDownloadingUpdate) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            if (downloadProgressPercent > 0) {
+                                LinearProgressIndicator(
+                                    progress = { downloadProgressPercent / 100f },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(8.dp)
+                                        .clip(RoundedCornerShape(4.dp)),
+                                )
+                            } else {
+                                LinearProgressIndicator(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(8.dp)
+                                        .clip(RoundedCornerShape(4.dp)),
+                                )
+                            }
+                            Text(
+                                text = downloadProgressStatus,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (isDownloadingUpdate) return@Button
+                        isDownloadingUpdate = true
+                        downloadProgressPercent = 0
+                        downloadProgressStatus = "Starting download..."
+                        GitHubAppUpdater.startDownloadAndInstall(
+                            context = context,
+                            release = updateRelease,
+                            onStatus = { status ->
+                                downloadProgressStatus = status
+                                updateStatusText = status
+                            },
+                            onProgress = { pct, status ->
+                                downloadProgressPercent = pct
+                                downloadProgressStatus = status
+                            },
+                            onFinished = {
+                                isDownloadingUpdate = false
+                                pendingUpdateRelease = null
+                            },
+                        )
+                    },
+                    enabled = !isDownloadingUpdate,
+                    modifier = Modifier.testTag("download_and_install_button"),
+                ) {
+                    if (isDownloadingUpdate) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(if (downloadProgressPercent > 0) "$downloadProgressPercent%" else "Downloading...")
+                    } else {
+                        Icon(Icons.Rounded.SystemUpdate, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Download & Install")
+                    }
+                }
+            },
+            dismissButton = {
+                if (!isDownloadingUpdate) {
+                    TextButton(
+                        onClick = { pendingUpdateRelease = null },
+                        modifier = Modifier.testTag("dismiss_update_dialog"),
+                    ) {
+                        Text("Later")
+                    }
+                }
+            },
+        )
+    }
+
     if (showRestoreConfirmDialog) {
         AlertDialog(
             onDismissRequest = { showRestoreConfirmDialog = false },
@@ -493,7 +729,7 @@ fun SettingsScreen(
             },
             text = {
                 Text(
-                    "I-re-restore nito ang lahat ng deliveries, pautang records, customer prices, at commission history mula sa iyong Google Drive auto-backup (${DriveBackupManager.BACKUP_FILE_NAME}). Nais mo bang magpatuloy?"
+                    "I-re-restore nito ang lahat ng deliveries, pautang records, customer prices, preferences, at commission history mula sa 'Minige Backup/${DriveBackupManager.BACKUP_FILE_NAME}' sa iyong Google Drive. Nais mo bang magpatuloy?"
                 )
             },
             confirmButton = {
