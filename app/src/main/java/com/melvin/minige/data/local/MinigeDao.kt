@@ -132,4 +132,19 @@ interface MinigeDao {
         """
     )
     fun observeTotalPendingSyncCount(userId: String): Flow<Int>
+
+    @Query("SELECT * FROM deliveries WHERE userId = :userId AND isDeleted = 0")
+    suspend fun getAllDeliveriesOnce(userId: String): List<DeliveryEntity>
+
+    @Query("SELECT * FROM utang_payments WHERE userId = :userId AND isDeleted = 0")
+    suspend fun getAllUtangPaymentsOnce(userId: String): List<UtangPaymentEntity>
+
+    @Query("SELECT * FROM expenses WHERE userId = :userId AND isDeleted = 0")
+    suspend fun getAllExpensesOnce(userId: String): List<ExpenseEntity>
+
+    @Query("SELECT * FROM daily_ledgers WHERE userId = :userId")
+    suspend fun getAllDailyLedgersOnce(userId: String): List<DailyLedgerEntity>
+
+    @Query("SELECT * FROM customers WHERE userId = :userId")
+    suspend fun getAllCustomersOnce(userId: String): List<CustomerEntity>
 }

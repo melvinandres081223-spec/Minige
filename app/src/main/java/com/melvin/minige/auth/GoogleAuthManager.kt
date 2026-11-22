@@ -8,6 +8,13 @@ import androidx.credentials.CredentialManager
 import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.GetCredentialCancellationException
+import android.content.Intent
+import android.content.IntentSender
+import com.google.android.gms.auth.api.identity.AuthorizationRequest
+import com.google.android.gms.auth.api.identity.Identity
+import com.google.android.gms.auth.api.signin.GoogleSignIn
+import com.google.android.gms.auth.api.signin.GoogleSignInOptions
+import com.google.android.gms.common.api.Scope
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
@@ -27,9 +34,67 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 
+sealed interface DriveAuthResult {
+    data class Authorized(val accessToken: String) : DriveAuthResult
+    data class NeedsConsent(val intentSender: IntentSender) : DriveAuthResult
+    data class Failure(val message: String) : DriveAuthResult
+}
+
 object GoogleAuthManager {
 
     private const val TAG = "GoogleAuthManager"
+    const val DRIVE_APPDATA_SCOPE = "https://www.googleapis.com/auth/drive.appdata"
+    val DRIVE_SCOPE = Scope(DRIVE_APPDATA_SCOPE)
+
+    fun createGoogleSignInOptions(clientId: String): GoogleSignInOptions {
+        return GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
+            .requestIdToken(clientId)
+            .requestEmail()
+            .requestScopes(DRIVE_SCOPE)
+            .build()
+    }
+
+    fun hasDrivePermission(context: Context): Boolean {
+        val account = GoogleSignIn.getLastSignedInAccount(context)
+        return account != null && GoogleSignIn.hasPermissions(account, DRIVE_SCOPE)
+    }
+
+    suspend fun checkOrRequestDriveAuthorization(context: Context): DriveAuthResult {
+        return try {
+            val request = AuthorizationRequest.builder()
+                .setRequestedScopes(listOf(DRIVE_SCOPE))
+                .build()
+            val result = Identity.getAuthorizationClient(context)
+                .authorize(request)
+                .await()
+
+            val pendingIntent = result.pendingIntent
+            val token = result.accessToken
+            when {
+                result.hasResolution() && pendingIntent != null -> {
+                    DriveAuthResult.NeedsConsent(pendingIntent.intentSender)
+                }
+                !token.isNullOrBlank() -> {
+                    DriveAuthResult.Authorized(token)
+                }
+                else -> {
+                    DriveAuthResult.Failure("No Google Drive access token returned.")
+                }
+            }
+        } catch (e: Exception) {
+            DriveAuthResult.Failure(e.localizedMessage ?: "Failed to authorize Google Drive.")
+        }
+    }
+
+    fun extractDriveTokenFromIntent(context: Context, data: Intent?): String? {
+        return try {
+            val result = Identity.getAuthorizationClient(context)
+                .getAuthorizationResultFromIntent(data)
+            result.accessToken
+        } catch (_: Exception) {
+            null
+        }
+    }
 
     fun currentUser(): FirebaseUser? = Firebase.auth.currentUser
 

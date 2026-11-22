@@ -5,10 +5,18 @@ import androidx.room.Room
 import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.test.core.app.ApplicationProvider
 import com.google.firebase.firestore.FirebaseFirestoreException
+import com.melvin.minige.data.local.AppSettingsEntity
 import com.melvin.minige.data.local.CustomerEntity
+import com.melvin.minige.data.local.DailyLedgerEntity
+import com.melvin.minige.data.local.DeliveryEntity
+import com.melvin.minige.data.local.ExpenseEntity
 import com.melvin.minige.data.local.MinigeDatabase
+import com.melvin.minige.data.local.UtangPaymentEntity
 import com.melvin.minige.data.remote.FirestoreSyncHelper
+import com.melvin.minige.sync.DriveBackupManager
 import com.melvin.minige.sync.GitHubAppUpdater
+import com.melvin.minige.sync.MinigeBackupData
+import com.melvin.minige.util.CommissionRateEntry
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -211,5 +219,188 @@ class ExampleRobolectricTest {
         assertEquals("Saved offline — will auto-sync when online", FirestoreSyncHelper.formatSyncErrorMessage(unavailable))
         assertFalse(FirestoreSyncHelper.isOfflineFirestoreError(denied))
         assertTrue(FirestoreSyncHelper.isPermissionDeniedError(denied))
+    }
+
+    @Test
+    fun `drive backup manager serializes and deserializes local records without data loss`() {
+        val original = MinigeBackupData(
+            version = 1,
+            backupTimestamp = 1732212900000L,
+            userId = "user_42",
+            deliveries = listOf(
+                DeliveryEntity(
+                    id = "deliv_1",
+                    userId = "user_42",
+                    dateKey = "2026-11-21",
+                    customerName = "Aling Nena",
+                    purifiedGallons = 5,
+                    alkalineGallons = 2,
+                    purifiedUnitPrice = 30,
+                    alkalineUnitPrice = 40,
+                    totalAmount = 230,
+                    amountPaid = 230,
+                    paymentType = "CASH",
+                    commissionRate = 8,
+                    commissionEarned = 56,
+                    settledDateKey = "2026-11-21",
+                    notes = "Delivered on time",
+                    calendarEventId = "cal_event_1",
+                    pendingSync = false,
+                    isDeleted = false,
+                    createdAtEpochMs = 1732212000000L,
+                    updatedAtEpochMs = 1732212000000L,
+                )
+            ),
+            utangPayments = listOf(
+                UtangPaymentEntity(
+                    id = "pay_1",
+                    deliveryId = "deliv_1",
+                    userId = "user_42",
+                    dateKey = "2026-11-21",
+                    amount = 50,
+                    method = "CASH",
+                    notes = "Partial payment",
+                    pendingSync = false,
+                    isDeleted = false,
+                    createdAtEpochMs = 1732212500000L,
+                )
+            ),
+            expenses = listOf(
+                ExpenseEntity(
+                    id = "exp_1",
+                    userId = "user_42",
+                    dateKey = "2026-11-21",
+                    category = "GAS",
+                    amount = 120,
+                    notes = "Motorcycle fuel",
+                    pendingSync = false,
+                    isDeleted = false,
+                    createdAtEpochMs = 1732212600000L,
+                    updatedAtEpochMs = 1732212600000L,
+                )
+            ),
+            dailyLedgers = listOf(
+                DailyLedgerEntity(
+                    dateKey = "2026-11-21",
+                    userId = "user_42",
+                    startingSukli = 350,
+                    notes = "Starting loose coins",
+                    pendingSync = false,
+                    updatedAtEpochMs = 1732212700000L,
+                )
+            ),
+            settings = AppSettingsEntity(
+                id = "default",
+                userId = "user_42",
+                purifiedPrice = 30,
+                alkalinePrice = 40,
+                commissionRate = 8,
+                defaultSukli = 300,
+                pendingSync = false,
+                updatedAtEpochMs = 1732212800000L,
+            ),
+            customers = listOf(
+                CustomerEntity(
+                    id = "aling_nena",
+                    userId = "user_42",
+                    name = "Aling Nena",
+                    lastUnitPrice = 28.0,
+                    pendingSync = false,
+                    updatedAtEpochMs = 1732212850000L,
+                )
+            ),
+            commissionRateHistory = listOf(
+                CommissionRateEntry(
+                    effectiveDateKey = "2026-11-01",
+                    ratePerGallon = 8.0,
+                    updatedAtEpochMs = 1732200000000L,
+                )
+            ),
+        )
+
+        val serialized = DriveBackupManager.serializeBackupPayload(original)
+        val deserialized = DriveBackupManager.deserializeBackupPayload(serialized)
+
+        assertEquals(original.version, deserialized.version)
+        assertEquals(original.backupTimestamp, deserialized.backupTimestamp)
+        assertEquals(original.userId, deserialized.userId)
+        assertEquals(1, deserialized.deliveries.size)
+        assertEquals("Aling Nena", deserialized.deliveries[0].customerName)
+        assertEquals(230, deserialized.deliveries[0].totalAmount)
+        assertEquals(1, deserialized.utangPayments.size)
+        assertEquals(50, deserialized.utangPayments[0].amount)
+        assertEquals(1, deserialized.expenses.size)
+        assertEquals("GAS", deserialized.expenses[0].category)
+        assertEquals(1, deserialized.dailyLedgers.size)
+        assertEquals(350, deserialized.dailyLedgers[0].startingSukli)
+        assertEquals(30, deserialized.settings?.purifiedPrice)
+        assertEquals(1, deserialized.customers.size)
+        assertEquals(28.0, deserialized.customers[0].lastUnitPrice ?: 0.0, 0.001)
+        assertEquals(1, deserialized.commissionRateHistory.size)
+        assertEquals(8.0, deserialized.commissionRateHistory[0].ratePerGallon, 0.001)
+        assertEquals(DriveBackupManager.BACKUP_FILE_NAME, "minige_auto_backup.json")
+    }
+
+    @Test
+    fun `drive backup manager reads all local room entities once for backup`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, MinigeDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        try {
+            val dao = db.minigeDao()
+            dao.upsertDelivery(
+                DeliveryEntity(
+                    id = "d1",
+                    userId = "u1",
+                    dateKey = "2026-11-21",
+                    customerName = "Kuya Jun",
+                    purifiedGallons = 10,
+                    alkalineGallons = 0,
+                    purifiedUnitPrice = 30,
+                    alkalineUnitPrice = 40,
+                    totalAmount = 300,
+                    amountPaid = 300,
+                    paymentType = "CASH",
+                    commissionRate = 8,
+                    commissionEarned = 80,
+                    settledDateKey = "2026-11-21",
+                    notes = "",
+                    calendarEventId = null,
+                    pendingSync = false,
+                    isDeleted = false,
+                    createdAtEpochMs = 100L,
+                    updatedAtEpochMs = 100L,
+                )
+            )
+            dao.upsertExpense(
+                ExpenseEntity(
+                    id = "e1",
+                    userId = "u1",
+                    dateKey = "2026-11-21",
+                    category = "FOOD",
+                    amount = 65,
+                    notes = "",
+                    pendingSync = false,
+                    isDeleted = false,
+                    createdAtEpochMs = 100L,
+                    updatedAtEpochMs = 100L,
+                )
+            )
+
+            val deliveries = dao.getAllDeliveriesOnce("u1")
+            assertEquals(1, deliveries.size)
+            assertEquals("Kuya Jun", deliveries[0].customerName)
+
+            val expenses = dao.getAllExpensesOnce("u1")
+            assertEquals(1, expenses.size)
+            assertEquals(65, expenses[0].amount)
+
+            assertEquals(0, dao.getAllUtangPaymentsOnce("u1").size)
+            assertEquals(0, dao.getAllDailyLedgersOnce("u1").size)
+            assertEquals(0, dao.getAllCustomersOnce("u1").size)
+        } finally {
+            db.close()
+        }
     }
 }

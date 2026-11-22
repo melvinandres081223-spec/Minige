@@ -22,12 +22,19 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Logout
+import androidx.compose.material.icons.rounded.CloudDownload
 import androidx.compose.material.icons.rounded.CloudSync
+import androidx.compose.material.icons.rounded.CloudUpload
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.Save
+import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.material.icons.rounded.SystemUpdate
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
@@ -37,6 +44,11 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import com.melvin.minige.sync.DriveBackupManager
+import com.melvin.minige.sync.DriveBackupStatus
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -66,6 +78,9 @@ fun SettingsScreen(
     onSaveSettings: (purified: Int, alkaline: Int, rate: Int, defaultSukli: Int) -> Unit,
     onScheduleCommissionRate: (ratePerGallon: Double, effectiveDate: LocalDate) -> Unit,
     onSyncNow: () -> Unit,
+    onGrantDriveAccess: () -> Unit = {},
+    onBackupToDriveNow: () -> Unit = {},
+    onRestoreFromDrive: () -> Unit = {},
     onSignOut: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -74,6 +89,7 @@ fun SettingsScreen(
 
     var isCheckingOrDownloadingUpdate by remember { mutableStateOf(false) }
     var updateStatusText by remember { mutableStateOf<String?>(null) }
+    var showRestoreConfirmDialog by remember { mutableStateOf(false) }
 
     var purifiedText by remember(uiState.settings.purifiedPrice) {
         mutableStateOf(uiState.settings.purifiedPrice.toString())
@@ -328,9 +344,174 @@ fun SettingsScreen(
                 }
             }
 
+            item(key = "google_drive_backup_card", contentType = "drive_backup_card") {
+                OutlinedCard(
+                    shape = RoundedCornerShape(20.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("drive_backup_card"),
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Storage,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                            Text(
+                                text = "Google Drive Auto-Backup (15 GB)",
+                                style = MaterialTheme.typography.titleMedium,
+                            )
+                        }
+
+                        // Live status badge row
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            if (uiState.isDriveBackingUp || uiState.driveBackupStatus == DriveBackupStatus.BACKING_UP) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(12.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                                Text(
+                                    text = "Backing up...",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            } else {
+                                val (dotColor, statusLabel) = when (uiState.driveBackupStatus) {
+                                    DriveBackupStatus.ACTIVE -> Color(0xFF1E9E52) to "Active (Auto-syncs on changes)"
+                                    DriveBackupStatus.NEEDS_PERMISSION -> Color(0xFFE59200) to "Needs Drive Permission"
+                                    DriveBackupStatus.ERROR -> MaterialTheme.colorScheme.error to "Error (Will auto-retry)"
+                                    DriveBackupStatus.BACKING_UP -> MaterialTheme.colorScheme.primary to "Backing up..."
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .size(10.dp)
+                                        .clip(CircleShape)
+                                        .background(dotColor),
+                                )
+                                Text(
+                                    text = statusLabel,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = dotColor,
+                                )
+                            }
+                        }
+
+                        Text(
+                            text = "Last backup: ${DriveBackupManager.formatBackupTimestamp(uiState.driveLastBackupTimestamp)}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+
+                        Text(
+                            text = "Naka-store sa nakatagong Google Drive appDataFolder ng iyong account para ligtas ang deliveries, pautang, at customer directory kahit magpalit ka ng device.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+
+                        if (uiState.driveBackupStatus == DriveBackupStatus.NEEDS_PERMISSION) {
+                            Button(
+                                onClick = onGrantDriveAccess,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .testTag("grant_drive_access_button"),
+                            ) {
+                                Icon(Icons.Rounded.CloudUpload, contentDescription = null)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Grant Drive Access")
+                            }
+                        }
+
+                        Button(
+                            onClick = onBackupToDriveNow,
+                            enabled = !uiState.isDriveBackingUp,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("backup_now_button"),
+                        ) {
+                            if (uiState.isDriveBackingUp) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.onPrimary,
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Backing up to Drive...")
+                            } else {
+                                Icon(Icons.Rounded.CloudUpload, contentDescription = null)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Backup Now")
+                            }
+                        }
+
+                        OutlinedButton(
+                            onClick = { showRestoreConfirmDialog = true },
+                            enabled = !uiState.isDriveBackingUp,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("restore_from_drive_button"),
+                        ) {
+                            Icon(Icons.Rounded.CloudDownload, contentDescription = null)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Restore from Drive")
+                        }
+                    }
+                }
+            }
+
             item(key = "developer_signature_card", contentType = "developer_signature") {
                 DeveloperSignatureCard()
             }
         }
+    }
+
+    if (showRestoreConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { showRestoreConfirmDialog = false },
+            icon = {
+                Icon(
+                    imageVector = Icons.Rounded.CloudDownload,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            },
+            title = {
+                Text("Restore from Google Drive?")
+            },
+            text = {
+                Text(
+                    "I-re-restore nito ang lahat ng deliveries, pautang records, customer prices, at commission history mula sa iyong Google Drive auto-backup (${DriveBackupManager.BACKUP_FILE_NAME}). Nais mo bang magpatuloy?"
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showRestoreConfirmDialog = false
+                        onRestoreFromDrive()
+                    },
+                    modifier = Modifier.testTag("confirm_restore_drive_dialog"),
+                ) {
+                    Text("Restore")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRestoreConfirmDialog = false }) {
+                    Text("Cancel")
+                }
+            },
+        )
     }
 }

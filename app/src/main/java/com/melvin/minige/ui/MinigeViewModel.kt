@@ -27,8 +27,12 @@ import com.melvin.minige.domain.UtangMethod
 import com.melvin.minige.domain.UtangPaymentRecord
 import com.melvin.minige.domain.WeeklyDaySummary
 import com.melvin.minige.domain.WeeklySummary
+import com.melvin.minige.auth.DriveAuthResult
+import com.melvin.minige.auth.GoogleAuthManager
 import com.melvin.minige.sync.CalendarAuthResult
 import com.melvin.minige.sync.CalendarSyncManager
+import com.melvin.minige.sync.DriveBackupManager
+import com.melvin.minige.sync.DriveBackupStatus
 import com.melvin.minige.ui.components.DailyQuotaPrefs
 import com.melvin.minige.ui.components.SukiAnalyticsHelper
 import com.melvin.minige.ui.components.SundayMakeupHelper
@@ -110,11 +114,15 @@ data class MinigeUiState(
     val isSyncing: Boolean = false,
     val isCalendarSyncing: Boolean = false,
     val statusMessage: String? = null,
+    val driveBackupStatus: DriveBackupStatus = DriveBackupStatus.NEEDS_PERMISSION,
+    val driveLastBackupTimestamp: Long = 0L,
+    val isDriveBackingUp: Boolean = false,
 )
 
 sealed interface MinigeEvent {
     data class ShowMessage(val message: String) : MinigeEvent
     data class LaunchCalendarConsent(val intentSender: IntentSender) : MinigeEvent
+    data class LaunchDriveConsent(val intentSender: IntentSender) : MinigeEvent
 }
 
 class MinigeViewModel(
@@ -136,6 +144,19 @@ class MinigeViewModel(
     private val _isSyncing = MutableStateFlow(false)
     private val _isCalendarSyncing = MutableStateFlow(false)
     private val _statusMessage = MutableStateFlow<String?>(null)
+    private val _driveBackupStatus = MutableStateFlow(
+        appContext?.let {
+            if (GoogleAuthManager.hasDrivePermission(it)) DriveBackupStatus.ACTIVE
+            else DriveBackupStatus.NEEDS_PERMISSION
+        } ?: DriveBackupStatus.NEEDS_PERMISSION
+    )
+    private val _driveLastBackupTimestamp = MutableStateFlow(
+        appContext?.let { DriveBackupManager.getLastBackupTimestamp(it, currentUserId) } ?: 0L
+    )
+    private val _isDriveBackingUp = MutableStateFlow(false)
+    private var autoBackupJob: Job? = null
+    private var cachedDriveToken: String? = null
+
     private val _undoableAction = MutableStateFlow<UndoableAction?>(null)
     val undoableAction: StateFlow<UndoableAction?> = _undoableAction.asStateFlow()
     private var undoDismissJob: Job? = null
@@ -147,6 +168,11 @@ class MinigeViewModel(
     val events: SharedFlow<MinigeEvent> = _events.asSharedFlow()
 
     init {
+        viewModelScope.launch {
+            repository.localDataChangeEvents.collect {
+                scheduleAutoBackup()
+            }
+        }
         viewModelScope.launch {
             try {
                 repository.startCloudSync(
@@ -198,15 +224,27 @@ class MinigeViewModel(
         val quotaTarget: Int,
     )
 
+    private data class DriveBackupSnapshot(
+        val status: DriveBackupStatus,
+        val lastTimestamp: Long,
+        val isBackingUp: Boolean,
+    )
+
     val uiState: StateFlow<MinigeUiState> = combine(
         combine(_selectedDate, _sundayMakeupEnabled, _commissionRateHistory, _dailyQuotaTarget) { date, sundayEnabled, rateHist, quotaTarget ->
             ViewPrefsSnapshot(date, sundayEnabled, rateHist, quotaTarget)
         },
         localDataFlow,
+        combine(_driveBackupStatus, _driveLastBackupTimestamp, _isDriveBackingUp) { status, lastTs, backingUp ->
+            DriveBackupSnapshot(status, lastTs, backingUp)
+        },
         _isSyncing,
-        _isCalendarSyncing,
-        _statusMessage,
-    ) { prefs, bundle, syncing, calSyncing, status ->
+        combine(_isCalendarSyncing, _statusMessage) { calSyncing, status ->
+            Pair(calSyncing, status)
+        },
+    ) { prefs, bundle, driveSnap, syncing, calAndStatus ->
+        val calSyncing = calAndStatus.first
+        val status = calAndStatus.second
         val date = prefs.date
         val sundayEnabled = prefs.sundayEnabled
         val rateHist = prefs.rateHistory
@@ -310,6 +348,9 @@ class MinigeViewModel(
             isSyncing = syncing,
             isCalendarSyncing = calSyncing,
             statusMessage = status,
+            driveBackupStatus = driveSnap.status,
+            driveLastBackupTimestamp = driveSnap.lastTimestamp,
+            isDriveBackingUp = driveSnap.isBackingUp,
         )
     }.flowOn(Dispatchers.Default).stateIn(
         scope = viewModelScope,
@@ -659,6 +700,155 @@ class MinigeViewModel(
                     "Commission rate ₱$formattedRate/gal effective $dateKey (past commissions preserved)"
                 )
             )
+            scheduleAutoBackup()
+        }
+    }
+
+    fun scheduleAutoBackup() {
+        autoBackupJob?.cancel()
+        autoBackupJob = viewModelScope.launch(Dispatchers.IO) {
+            delay(5_000L) // 5 seconds debounce
+            performDriveBackup(isSilent = true)
+        }
+    }
+
+    fun performDriveBackup(isSilent: Boolean) {
+        val context = appContext ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            _isDriveBackingUp.value = true
+            try {
+                var token = cachedDriveToken ?: DriveBackupManager.getCachedToken(context, currentUserId)
+                if (token.isNullOrBlank()) {
+                    when (val auth = GoogleAuthManager.checkOrRequestDriveAuthorization(context)) {
+                        is DriveAuthResult.Authorized -> {
+                            token = auth.accessToken
+                            cachedDriveToken = auth.accessToken
+                            DriveBackupManager.saveCachedToken(context, currentUserId, auth.accessToken)
+                        }
+                        is DriveAuthResult.NeedsConsent -> {
+                            _driveBackupStatus.value = DriveBackupStatus.NEEDS_PERMISSION
+                            _isDriveBackingUp.value = false
+                            if (!isSilent) {
+                                _events.tryEmit(MinigeEvent.LaunchDriveConsent(auth.intentSender))
+                            }
+                            return@launch
+                        }
+                        is DriveAuthResult.Failure -> {
+                            _driveBackupStatus.value = DriveBackupStatus.ERROR
+                            _isDriveBackingUp.value = false
+                            if (!isSilent) {
+                                _events.tryEmit(MinigeEvent.ShowMessage(auth.message))
+                            }
+                            return@launch
+                        }
+                    }
+                }
+
+                _driveBackupStatus.value = DriveBackupStatus.BACKING_UP
+                val res = repository.backupToDrive(token, currentUserId, context)
+                res.onSuccess { ts ->
+                    _driveLastBackupTimestamp.value = ts
+                    _driveBackupStatus.value = DriveBackupStatus.ACTIVE
+                    if (!isSilent) {
+                        _events.tryEmit(MinigeEvent.ShowMessage("Backed up to Google Drive (appDataFolder) ✓"))
+                    }
+                }.onFailure { err ->
+                    _driveBackupStatus.value = DriveBackupStatus.ERROR
+                    val msg = if (FirestoreSyncHelper.isOfflineFirestoreError(err)) {
+                        "Drive backup saved offline — will auto-backup when online"
+                    } else {
+                        "Drive backup failed: ${err.localizedMessage ?: "Unknown error"}"
+                    }
+                    if (!isSilent) {
+                        _events.tryEmit(MinigeEvent.ShowMessage(msg))
+                    }
+                }
+            } catch (e: Exception) {
+                _driveBackupStatus.value = DriveBackupStatus.ERROR
+                if (!isSilent) {
+                    _events.tryEmit(MinigeEvent.ShowMessage("Drive backup error: ${e.localizedMessage ?: "Unknown error"}"))
+                }
+            } finally {
+                _isDriveBackingUp.value = false
+            }
+        }
+    }
+
+    fun triggerDriveConsent(context: android.content.Context) {
+        viewModelScope.launch {
+            when (val auth = GoogleAuthManager.checkOrRequestDriveAuthorization(context)) {
+                is DriveAuthResult.Authorized -> {
+                    cachedDriveToken = auth.accessToken
+                    DriveBackupManager.saveCachedToken(context, currentUserId, auth.accessToken)
+                    _driveBackupStatus.value = DriveBackupStatus.ACTIVE
+                    _events.tryEmit(MinigeEvent.ShowMessage("Google Drive access verified ✓"))
+                    performDriveBackup(isSilent = false)
+                }
+                is DriveAuthResult.NeedsConsent -> {
+                    _events.tryEmit(MinigeEvent.LaunchDriveConsent(auth.intentSender))
+                }
+                is DriveAuthResult.Failure -> {
+                    _driveBackupStatus.value = DriveBackupStatus.ERROR
+                    _events.tryEmit(MinigeEvent.ShowMessage(auth.message))
+                }
+            }
+        }
+    }
+
+    fun onDriveConsentGranted(token: String) {
+        cachedDriveToken = token
+        appContext?.let { DriveBackupManager.saveCachedToken(it, currentUserId, token) }
+        _driveBackupStatus.value = DriveBackupStatus.ACTIVE
+        _events.tryEmit(MinigeEvent.ShowMessage("Google Drive access granted ✓"))
+        performDriveBackup(isSilent = false)
+    }
+
+    fun manualBackupNow(context: android.content.Context) {
+        performDriveBackup(isSilent = false)
+    }
+
+    fun restoreFromDrive(context: android.content.Context) {
+        viewModelScope.launch(Dispatchers.IO) {
+            _isDriveBackingUp.value = true
+            try {
+                var token = cachedDriveToken ?: DriveBackupManager.getCachedToken(context, currentUserId)
+                if (token.isNullOrBlank()) {
+                    when (val auth = GoogleAuthManager.checkOrRequestDriveAuthorization(context)) {
+                        is DriveAuthResult.Authorized -> {
+                            token = auth.accessToken
+                            cachedDriveToken = auth.accessToken
+                            DriveBackupManager.saveCachedToken(context, currentUserId, auth.accessToken)
+                        }
+                        is DriveAuthResult.NeedsConsent -> {
+                            _isDriveBackingUp.value = false
+                            _events.tryEmit(MinigeEvent.LaunchDriveConsent(auth.intentSender))
+                            return@launch
+                        }
+                        is DriveAuthResult.Failure -> {
+                            _isDriveBackingUp.value = false
+                            _events.tryEmit(MinigeEvent.ShowMessage("Drive auth failed: ${auth.message}"))
+                            return@launch
+                        }
+                    }
+                }
+
+                val res = repository.restoreFromDrive(token, currentUserId, context)
+                res.onSuccess { summary ->
+                    _driveLastBackupTimestamp.value = summary.backupTimestamp
+                    _driveBackupStatus.value = DriveBackupStatus.ACTIVE
+                    _events.tryEmit(
+                        MinigeEvent.ShowMessage(
+                            "Restored ${summary.deliveryCount} deliveries, ${summary.paymentCount} payments, and ${summary.customerCount} customers from Drive ✓"
+                        )
+                    )
+                }.onFailure { err ->
+                    _events.tryEmit(MinigeEvent.ShowMessage("Restore failed: ${err.localizedMessage ?: "Unknown error"}"))
+                }
+            } catch (e: Exception) {
+                _events.tryEmit(MinigeEvent.ShowMessage("Restore error: ${e.localizedMessage ?: "Unknown error"}"))
+            } finally {
+                _isDriveBackingUp.value = false
+            }
         }
     }
 

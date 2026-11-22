@@ -26,6 +26,12 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import android.content.Context
+import com.melvin.minige.sync.DriveBackupManager
+import com.melvin.minige.sync.DriveRestoreSummary
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import java.util.UUID
 import kotlin.math.roundToInt
 
@@ -34,6 +40,24 @@ class MinigeRepository(
     private val remote: MinigeFirestoreDataSource,
     private val pricingRepository: PricingRepository = PricingRepository(dao, remote),
 ) {
+    private val _localDataChangeEvents = MutableSharedFlow<Unit>(extraBufferCapacity = 32)
+    val localDataChangeEvents: SharedFlow<Unit> = _localDataChangeEvents.asSharedFlow()
+
+    private fun notifyLocalDataChanged() {
+        _localDataChangeEvents.tryEmit(Unit)
+    }
+
+    suspend fun backupToDrive(accessToken: String, userId: String, context: Context): Result<Long> {
+        return DriveBackupManager.backupToDrive(accessToken, dao, userId, context)
+    }
+
+    suspend fun restoreFromDrive(accessToken: String, userId: String, context: Context): Result<DriveRestoreSummary> {
+        val result = DriveBackupManager.restoreFromDrive(accessToken, dao, userId, context)
+        if (result.isSuccess) {
+            notifyLocalDataChanged()
+        }
+        return result
+    }
     fun observeDeliveries(userId: String): Flow<List<DeliveryRecord>> =
         dao.observeDeliveries(userId).map { list -> list.map { it.toDomain() } }
 
@@ -378,6 +402,7 @@ class MinigeRepository(
             now = now,
         )
 
+        notifyLocalDataChanged()
         return syncResult
     }
 
@@ -476,6 +501,7 @@ class MinigeRepository(
             now = now,
         )
 
+        notifyLocalDataChanged()
         return syncResult
     }
 
@@ -555,6 +581,7 @@ class MinigeRepository(
         val dRes = remote.upsertDelivery(userId, updatedDelivery)
         if (dRes.isSuccess) dao.markDeliverySynced(deliveryId)
 
+        notifyLocalDataChanged()
         return if (pRes.isFailure) Result.failure(pRes.exceptionOrNull()!!)
         else if (dRes.isFailure) Result.failure(dRes.exceptionOrNull()!!)
         else Result.success(isNowFullyPaid)
@@ -624,6 +651,7 @@ class MinigeRepository(
         if (res.isSuccess) {
             dao.markDeliverySynced(snapshot.id)
         }
+        notifyLocalDataChanged()
         return res
     }
 
@@ -638,6 +666,7 @@ class MinigeRepository(
         if (deleteRes.isSuccess) {
             dao.hardDeleteUtangPayment(createdPaymentId)
         }
+        notifyLocalDataChanged()
         return if (restoreRes.isFailure) restoreRes else deleteRes
     }
 
@@ -648,6 +677,7 @@ class MinigeRepository(
         if (res.isSuccess) {
             dao.hardDeleteDelivery(deliveryId)
         }
+        notifyLocalDataChanged()
         return res
     }
 
@@ -676,6 +706,7 @@ class MinigeRepository(
         dao.upsertExpense(entity)
         val res = remote.upsertExpense(userId, entity)
         if (res.isSuccess) dao.markExpenseSynced(id)
+        notifyLocalDataChanged()
         return res
     }
 
@@ -684,6 +715,7 @@ class MinigeRepository(
         dao.softDeleteExpense(expenseId, now)
         val res = remote.deleteExpense(userId, expenseId)
         if (res.isSuccess) dao.hardDeleteExpense(expenseId)
+        notifyLocalDataChanged()
         return res
     }
 
@@ -704,6 +736,7 @@ class MinigeRepository(
         dao.upsertDailyLedger(entity)
         val res = remote.upsertDailyLedger(userId, entity)
         if (res.isSuccess) dao.markDailyLedgerSynced(dateKey)
+        notifyLocalDataChanged()
         return res
     }
 
@@ -729,6 +762,7 @@ class MinigeRepository(
         if (res.isSuccess) {
             dao.upsertSettings(entity.copy(pendingSync = false))
         }
+        notifyLocalDataChanged()
         return res
     }
 

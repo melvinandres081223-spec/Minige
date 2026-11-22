@@ -169,12 +169,31 @@ fun MinigeMainShell(
         }
     }
 
+    val driveConsentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult(),
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val token = GoogleAuthManager.extractDriveTokenFromIntent(context, result.data)
+            if (!token.isNullOrBlank()) {
+                viewModel.onDriveConsentGranted(token)
+            } else {
+                scope.launch { snackbarHostState.showSnackbar("Google Drive permission granted.") }
+                viewModel.manualBackupNow(context)
+            }
+        }
+    }
+
     LaunchedEffect(viewModel) {
         viewModel.events.collect { event ->
             when (event) {
                 is MinigeEvent.ShowMessage -> snackbarHostState.showSnackbar(event.message)
                 is MinigeEvent.LaunchCalendarConsent -> {
                     calendarConsentLauncher.launch(
+                        IntentSenderRequest.Builder(event.intentSender).build()
+                    )
+                }
+                is MinigeEvent.LaunchDriveConsent -> {
+                    driveConsentLauncher.launch(
                         IntentSenderRequest.Builder(event.intentSender).build()
                     )
                 }
@@ -318,6 +337,9 @@ fun MinigeMainShell(
                     onSaveSettings = viewModel::updateSettings,
                     onScheduleCommissionRate = viewModel::scheduleCommissionRate,
                     onSyncNow = viewModel::syncNow,
+                    onGrantDriveAccess = { viewModel.triggerDriveConsent(context) },
+                    onBackupToDriveNow = { viewModel.manualBackupNow(context) },
+                    onRestoreFromDrive = { viewModel.restoreFromDrive(context) },
                     onSignOut = {
                         GoogleAuthManager.signOut(
                             credentialManager = credentialManager,
