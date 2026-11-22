@@ -190,12 +190,18 @@ fun TodayScreen(
             }
 
             item(key = "boss_pickup_update_card", contentType = "boss_pickup") {
+                val deliveredGallons = remember(uiState.deliveriesForDay) {
+                    uiState.deliveriesForDay
+                        .filter { it.paymentType != PaymentType.PICK_UP && it.totalGallons > 0 }
+                        .sumOf { it.totalGallons }
+                }
                 BossPickupUpdateCard(
                     pickupMessage = uiState.bossPickupMessage,
                     pickupGallons = uiState.dailySummary.pickupGallons,
+                    deliveredGallons = deliveredGallons,
                     onSendToBoss = {
                         copyAndShareToMessenger(context, uiState.bossPickupMessage)
-                        onBossSendTriggered("Pick-up summary copied & opened share sheet")
+                        onBossSendTriggered("Daily Hakot report copied & opened share sheet")
                     },
                 )
             }
@@ -636,6 +642,7 @@ private fun CommissionHeroCard(
 private fun BossPickupUpdateCard(
     pickupMessage: String,
     pickupGallons: Int,
+    deliveredGallons: Int,
     onSendToBoss: () -> Unit,
 ) {
     ElevatedCard(
@@ -665,11 +672,11 @@ private fun BossPickupUpdateCard(
                     )
                     Column(modifier = Modifier.fillMaxWidth()) {
                         Text(
-                            text = "Na-pick up na Gallon",
+                            text = "Daily Hakot Report (Pick-Up & Delivered)",
                             style = MaterialTheme.typography.titleMedium,
                         )
                         Text(
-                            text = "$pickupGallons gal(s) • ₱0 commission",
+                            text = "$pickupGallons pick-up • $deliveredGallons delivered gal(s)",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )

@@ -137,8 +137,11 @@ class ExampleUnitTest {
             delivery("p1", "2026-11-20", "Nene", 45, 0, PaymentType.PICK_UP, 0),
             delivery("p2", "2026-11-20", "Jhon", 1, 0, PaymentType.PICK_UP, 0),
             delivery("p3", "2026-11-20", "Melvin", 2, 0, PaymentType.PICK_UP, 0),
-            // Should be ignored completely:
+            // Delivered entries: customer name, peso total, and commission must NEVER appear,
+            // only gallon breakdown by channel in NA-DELIVER NA GALLON
             delivery("c1", "2026-11-20", "Secret Cash", 10, 0, PaymentType.CASH, 300, 8, 80, "2026-11-20"),
+            delivery("b1", "2026-11-20", "Secret Bank", 5, 0, PaymentType.BANK_DEPOSIT, 150, 8, 40, "2026-11-20"),
+            delivery("u1", "2026-11-20", "Secret Utang", 1, 0, PaymentType.PAUTANG, 0),
         )
 
         val formatted = BossPickupFormatter.format(date, entries)
@@ -151,17 +154,33 @@ class ExampleUnitTest {
             Melvin    —  2 gals
             ━━━━━━━━━━━━━━━
             TOTAL:      48 gals
+
+            🚚 NA-DELIVER NA GALLON
+            ━━━━━━━━━━━━━━━
+            Cash / Paid           — 10 gals
+            Bank Transfer/Deposit —  5 gals
+            Pautang               —  1 gal
+            ━━━━━━━━━━━━━━━
+            TOTAL DELIVERED:        16 gals
         """.trimIndent()
 
         assertEquals(expected, formatted)
         val lines = formatted.lines()
-        // Verify numbers end at the exact same character index in monospace
+        // Verify pick-up numbers end at the exact same character index in monospace
         assertEquals(lines[3].indexOf(" gals"), lines[5].indexOf(" gals"))
         assertEquals(lines[3].indexOf(" gals"), lines[7].indexOf(" gals"))
         assertEquals(lines[3].indexOf(" gals"), lines[4].indexOf(" gal"))
+        // Verify delivered numbers end at the exact same character index in monospace
+        assertEquals(lines[11].indexOf(" gals"), lines[12].indexOf(" gals"))
+        assertEquals(lines[11].indexOf(" gals"), lines[13].indexOf(" gal"))
+        assertEquals(lines[11].indexOf(" gals"), lines[15].indexOf(" gals"))
         assertFalse(formatted.contains("Secret Cash"))
+        assertFalse(formatted.contains("Secret Bank"))
+        assertFalse(formatted.contains("Secret Utang"))
         assertFalse(formatted.contains("₱"))
         assertFalse(formatted.contains("Commission", ignoreCase = true))
+        assertFalse(formatted.contains("Remit", ignoreCase = true))
+        assertFalse(formatted.contains("Sukli", ignoreCase = true))
     }
 
     @Test
@@ -771,5 +790,38 @@ class ExampleUnitTest {
             "Sync timed out (15s). Mahina o walang internet connection.",
             FirestoreSyncHelper.MSG_SYNC_TIMEOUT,
         )
+    }
+
+    @Test
+    fun `fifo helper sorts open utang oldest first and previews partial plus excess allocation`() {
+        val newest = delivery("u3", "2026-11-21", "Aling Nena", 2, 0, PaymentType.PAUTANG, 0)
+            .copy(createdAtEpochMs = 300L)
+        val oldest = delivery("u1", "2026-11-18", "  aling nena ", 3, 0, PaymentType.PAUTANG, 0)
+            .copy(createdAtEpochMs = 100L)
+        val middle = delivery("u2", "2026-11-19", "Aling Nena", 3, 0, PaymentType.PAUTANG, 30) // ₱60 left
+            .copy(createdAtEpochMs = 200L)
+        val otherCustomer = delivery("u4", "2026-11-17", "Kuya Jun", 5, 0, PaymentType.PAUTANG, 0)
+
+        val sorted = com.melvin.minige.util.BulkUtangFifoHelper.sortFifoOpenUtang(
+            deliveries = listOf(newest, oldest, middle, otherCustomer),
+            customerName = "Aling Nena",
+        )
+        assertEquals(listOf("u1", "u2", "u3"), sorted.map { it.id })
+
+        val partialPreview = com.melvin.minige.util.BulkUtangFifoHelper.previewFifoAllocation(sorted, 120)
+        assertEquals(210, partialPreview.totalOpenBalance) // 90 + 60 + 60
+        assertEquals(120, partialPreview.totalAppliedAmount)
+        assertEquals(0, partialPreview.excessAmount)
+        assertEquals(90, partialPreview.remainingCustomerBalanceAfter)
+        assertTrue(partialPreview.steps[0].willFullySettle) // u1 ₱90
+        assertEquals(30, partialPreview.steps[1].allocatedAmount) // u2 ₱30 / ₱60
+        assertFalse(partialPreview.steps[1].willFullySettle)
+        assertEquals(0, partialPreview.steps[2].allocatedAmount) // u3 untouched
+
+        val excessPreview = com.melvin.minige.util.BulkUtangFifoHelper.previewFifoAllocation(sorted, 250)
+        assertEquals(210, excessPreview.totalAppliedAmount)
+        assertEquals(40, excessPreview.excessAmount)
+        assertEquals(0, excessPreview.remainingCustomerBalanceAfter)
+        assertTrue(excessPreview.steps.all { it.willFullySettle })
     }
 }

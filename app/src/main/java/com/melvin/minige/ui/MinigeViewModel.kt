@@ -39,6 +39,7 @@ import com.melvin.minige.ui.components.DailyQuotaPrefs
 import com.melvin.minige.ui.components.SukiAnalyticsHelper
 import com.melvin.minige.ui.components.SundayMakeupHelper
 import com.melvin.minige.ui.components.WeeklySukiAnalytics
+import com.melvin.minige.util.BulkUtangSettlementSummary
 import com.melvin.minige.util.CommissionRateEntry
 import com.melvin.minige.util.CommissionRateHistory
 import com.melvin.minige.util.CustomerDirectoryHelper
@@ -122,6 +123,7 @@ data class MinigeUiState(
     val driveBackupSummary: com.melvin.minige.sync.BackupMetadataSummary? = null,
     val driveBackupPreview: DriveBackupPreview? = null,
     val showRestorePreviewDialog: Boolean = false,
+    val bulkSettlementConfirmation: BulkUtangSettlementSummary? = null,
 )
 
 sealed interface MinigeEvent {
@@ -163,6 +165,7 @@ class MinigeViewModel(
     private val _isDriveBackingUp = MutableStateFlow(false)
     private val _driveBackupPreview = MutableStateFlow<DriveBackupPreview?>(null)
     private val _showRestorePreviewDialog = MutableStateFlow(false)
+    private val _bulkSettlementConfirmation = MutableStateFlow<BulkUtangSettlementSummary?>(null)
 
     private var autoBackupJob: Job? = null
     private var cachedDriveToken: String? = null
@@ -251,12 +254,13 @@ class MinigeViewModel(
             DriveBackupSnapshot(status, lastTs, backingUp, preview, showPreview)
         },
         _isSyncing,
-        combine(_isCalendarSyncing, _statusMessage) { calSyncing, status ->
-            Pair(calSyncing, status)
+        combine(_isCalendarSyncing, _statusMessage, _bulkSettlementConfirmation) { calSyncing, status, bulkSummary ->
+            Triple(calSyncing, status, bulkSummary)
         },
-    ) { prefs, bundle, driveSnap, syncing, calAndStatus ->
-        val calSyncing = calAndStatus.first
-        val status = calAndStatus.second
+    ) { prefs, bundle, driveSnap, syncing, calStatusBulk ->
+        val calSyncing = calStatusBulk.first
+        val status = calStatusBulk.second
+        val bulkSummary = calStatusBulk.third
         val date = prefs.date
         val sundayEnabled = prefs.sundayEnabled
         val rateHist = prefs.rateHistory
@@ -350,7 +354,7 @@ class MinigeViewModel(
             todayPaymentBreakdown = todayPaymentBreakdown,
             sundayMakeupEnabled = sundayEnabled,
             sundayMakeupDaySummary = sundayMakeupDaySummary,
-            bossPickupMessage = BossPickupFormatter.format(date, pickupsForDay),
+            bossPickupMessage = BossPickupFormatter.format(date, deliveriesForDay),
             customers = mergedCustomers,
             sukiDirectory = sukiDirectory,
             commissionRateHistory = rateHist,
@@ -367,6 +371,7 @@ class MinigeViewModel(
             driveBackupSummary = driveMetaSummary,
             driveBackupPreview = driveSnap.preview,
             showRestorePreviewDialog = driveSnap.showPreview,
+            bulkSettlementConfirmation = bulkSummary,
         )
     }.flowOn(Dispatchers.Default).stateIn(
         scope = viewModelScope,
@@ -636,6 +641,49 @@ class MinigeViewModel(
                 scheduleAutoBackup()
             }.onFailure { err ->
                 _events.tryEmit(MinigeEvent.ShowMessage(err.localizedMessage ?: "Partial payment saved locally."))
+            }
+        }
+    }
+
+    fun dismissBulkSettlementConfirmation() {
+        _bulkSettlementConfirmation.value = null
+    }
+
+    fun onRecordBulkUtangPayment(
+        customerName: String,
+        amount: Int,
+        method: UtangMethod,
+        notes: String,
+    ) {
+        val paymentDateKey = MinigeDateUtils.toKey(_selectedDate.value)
+        val activeRate = uiState.value.activeCommissionRate
+        viewModelScope.launch {
+            val result = repository.recordBulkUtangPayment(
+                userId = currentUserId,
+                customerName = customerName,
+                amount = amount,
+                method = method,
+                paymentDateKey = paymentDateKey,
+                notes = notes,
+                overrideCommissionRate = activeRate,
+            )
+            result.onSuccess { summary ->
+                _bulkSettlementConfirmation.value = summary
+                val settledDatesText = summary.settledDateKeys.distinct().joinToString(", ")
+                val msg = when {
+                    summary.settledDateKeys.isNotEmpty() && summary.partiallyPaidCount > 0 ->
+                        "Lump-sum ₱${summary.totalAppliedAmount} (${summary.customerName}): Settled $settledDatesText + partial on newer balance"
+                    summary.settledDateKeys.isNotEmpty() ->
+                        "Lump-sum ₱${summary.totalAppliedAmount} (${summary.customerName}): Settled $settledDatesText ✓"
+                    else ->
+                        "Lump-sum ₱${summary.totalAppliedAmount} applied to oldest balance (₱${summary.remainingCustomerBalance} left)"
+                }
+                _events.tryEmit(MinigeEvent.ShowMessage(msg))
+                scheduleAutoBackup()
+            }.onFailure { err ->
+                _events.tryEmit(
+                    MinigeEvent.ShowMessage(err.localizedMessage ?: "Failed to record lump-sum payment.")
+                )
             }
         }
     }

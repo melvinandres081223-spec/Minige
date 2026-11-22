@@ -355,21 +355,24 @@ object BossPickupFormatter {
     private val headerDateFormatter = DateTimeFormatter.ofPattern("MMM dd, yyyy (EEEE)", Locale.ENGLISH)
 
     /**
-     * Generates the strict Boss-facing pick-up message containing ONLY Na-pick up na Gallon entries.
-     * Never includes commission, cash remit, expenses, utang, or bank deposit.
+     * Generates the strict Boss-facing Daily Hakot report containing ONLY:
+     * 1) Picked-up gallon counts (`PaymentType.PICK_UP`)
+     * 2) Delivered gallon counts by channel (`Cash / Paid`, `Bank Transfer/Deposit`, `Pautang`)
+     * Never includes peso signs (`₱`), prices, commissions, cash remit, expenses, or sukli.
      */
-    fun format(date: LocalDate, pickups: List<DeliveryRecord>): String {
-        val onlyPickups = pickups.filter { it.paymentType == PaymentType.PICK_UP && it.totalGallons > 0 }
-        val totalGals = onlyPickups.sumOf { it.totalGallons }
-        val nameColWidth = (onlyPickups.maxOfOrNull { it.customerName.trim().length } ?: 0).coerceAtLeast(9)
-        val countColWidth = maxOf(
-            totalGals.toString().length,
+    fun format(date: LocalDate, entries: List<DeliveryRecord>): String {
+        val onlyPickups = entries.filter { it.paymentType == PaymentType.PICK_UP && it.totalGallons > 0 }
+        val totalPickupGals = onlyPickups.sumOf { it.totalGallons }
+        val separator = " — "
+
+        val pickupNameColWidth = (onlyPickups.maxOfOrNull { it.customerName.trim().length } ?: 0).coerceAtLeast(9)
+        val pickupCountColWidth = maxOf(
+            totalPickupGals.toString().length,
             onlyPickups.maxOfOrNull { it.totalGallons.toString().length } ?: 1,
         ).coerceAtLeast(2)
-        val separator = " — "
-        val totalPrefix = "TOTAL:"
-        val totalNumberPad = (nameColWidth + separator.length + countColWidth - totalPrefix.length)
-            .coerceAtLeast(countColWidth + 1)
+        val pickupTotalPrefix = "TOTAL:"
+        val pickupTotalPad = (pickupNameColWidth + separator.length + pickupCountColWidth - pickupTotalPrefix.length)
+            .coerceAtLeast(pickupCountColWidth + 1)
 
         val sb = StringBuilder()
         sb.appendLine("📦 NA-PICK UP NA GALLON")
@@ -380,17 +383,62 @@ object BossPickupFormatter {
             sb.appendLine("(Walang pick-up ngayon)")
         } else {
             onlyPickups.forEach { entry ->
-                val name = entry.customerName.trim().padEnd(nameColWidth, ' ')
+                val name = entry.customerName.trim().padEnd(pickupNameColWidth, ' ')
                 val count = entry.totalGallons
                 val unit = if (count == 1) "gal" else "gals"
-                val countStr = count.toString().padStart(countColWidth, ' ')
+                val countStr = count.toString().padStart(pickupCountColWidth, ' ')
                 sb.appendLine("$name$separator$countStr $unit")
             }
         }
 
         sb.appendLine("━━━━━━━━━━━━━━━")
-        val totalUnit = if (totalGals == 1) "gal" else "gals"
-        sb.append("$totalPrefix${totalGals.toString().padStart(totalNumberPad, ' ')} $totalUnit")
+        val pickupTotalUnit = if (totalPickupGals == 1) "gal" else "gals"
+        sb.appendLine("$pickupTotalPrefix${totalPickupGals.toString().padStart(pickupTotalPad, ' ')} $pickupTotalUnit")
+
+        val onlyDeliveries = entries.filter { it.paymentType != PaymentType.PICK_UP && it.totalGallons > 0 }
+        val cashDeliveredGals = onlyDeliveries
+            .filter { it.paymentType == PaymentType.CASH }
+            .sumOf { it.totalGallons }
+        val bankDeliveredGals = onlyDeliveries
+            .filter { it.paymentType == PaymentType.BANK_DEPOSIT }
+            .sumOf { it.totalGallons }
+        val pautangDeliveredGals = onlyDeliveries
+            .filter { it.paymentType == PaymentType.PAUTANG }
+            .sumOf { it.totalGallons }
+        val totalDeliveredGals = cashDeliveredGals + bankDeliveredGals + pautangDeliveredGals
+
+        val delivRows = listOf(
+            "Cash / Paid" to cashDeliveredGals,
+            "Bank Transfer/Deposit" to bankDeliveredGals,
+            "Pautang" to pautangDeliveredGals,
+        )
+        val delivTotalPrefix = "TOTAL DELIVERED:"
+        val delivLabelColWidth = maxOf(
+            delivRows.maxOf { it.first.length },
+            delivTotalPrefix.length,
+        )
+        val delivCountColWidth = maxOf(
+            totalDeliveredGals.toString().length,
+            delivRows.maxOf { it.second.toString().length },
+        ).coerceAtLeast(2)
+        val delivTotalPad = (delivLabelColWidth + separator.length + delivCountColWidth - delivTotalPrefix.length)
+            .coerceAtLeast(delivCountColWidth + 1)
+
+        sb.appendLine()
+        sb.appendLine("🚚 NA-DELIVER NA GALLON")
+        sb.appendLine("━━━━━━━━━━━━━━━")
+        if (onlyDeliveries.isEmpty()) {
+            sb.appendLine("(Walang delivery ngayon)")
+        } else {
+            delivRows.forEach { (label, count) ->
+                val unit = if (count == 1) "gal" else "gals"
+                val countStr = count.toString().padStart(delivCountColWidth, ' ')
+                sb.appendLine("${label.padEnd(delivLabelColWidth, ' ')}$separator$countStr $unit")
+            }
+        }
+        sb.appendLine("━━━━━━━━━━━━━━━")
+        val delivTotalUnit = if (totalDeliveredGals == 1) "gal" else "gals"
+        sb.append("$delivTotalPrefix${totalDeliveredGals.toString().padStart(delivTotalPad, ' ')} $delivTotalUnit")
         return sb.toString()
     }
 }

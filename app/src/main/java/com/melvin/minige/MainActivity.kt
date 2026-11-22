@@ -318,6 +318,8 @@ fun MinigeMainShell(
                     uiState = uiState,
                     onRecordPayment = viewModel::recordUtangPayment,
                     onRecordPartialGallonPayment = viewModel::recordPartialGallonPayment,
+                    onRecordBulkPayment = viewModel::onRecordBulkUtangPayment,
+                    onDismissBulkSettlementConfirmation = viewModel::dismissBulkSettlementConfirmation,
                 )
                 MinigeTab.WEEKLY -> WeeklyScreen(
                     uiState = uiState,

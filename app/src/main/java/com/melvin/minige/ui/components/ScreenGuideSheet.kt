@@ -74,8 +74,8 @@ object ScreenGuideCatalog {
                 ),
                 GuideItem(
                     badgeOrButton = "Daily Hakot",
-                    taglishExplanation = "1-Tap send kay Boss sa Messenger. Tanging bilang ng na-pick up na galon lang ang laman nito—walang commission o gastos.",
-                    example = "Hal: Nene — 45 gals • TOTAL: 45 gals",
+                    taglishExplanation = "1-Tap send kay Boss sa Messenger. Laman nito ang na-pick up at na-deliver na bilang ng galon lang—walang presyo (₱), commission, o gastos.",
+                    example = "Hal: Pick-up: 45 gals • Delivered: 18 gals",
                 ),
                 GuideItem(
                     badgeOrButton = "By Area",
@@ -113,6 +113,11 @@ object ScreenGuideCatalog {
                     badgeOrButton = "Collect",
                     taglishExplanation = "Gamitin kapag buo o cash/bank payment na ang ibabayad. Pag umabot sa ₱0 ang balanse, papasok ang natitirang commission sa araw ng bayad.",
                     example = "Hal: Bal ₱90 → Collect ₱90 = Settled",
+                ),
+                GuideItem(
+                    badgeOrButton = "Settle Lump-Sum",
+                    taglishExplanation = "Kapag may 2 o higit pang open utang ang isang customer at nagbayad ng isang bagsakan, awtomatikong ibabawas ito mula pinakamatandang petsa (FIFO) bago ang mas bago.",
+                    example = "Hal: ₱150 bayad → bayad muna ang Nov 18 bago Nov 20",
                 ),
                 GuideItem(
                     badgeOrButton = "5s Undo Banner",

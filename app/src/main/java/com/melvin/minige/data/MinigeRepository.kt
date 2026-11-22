@@ -13,9 +13,12 @@ import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.ExpenseCategory
 import com.melvin.minige.domain.ExpenseRecord
 import com.melvin.minige.domain.MinigeSettings
+import androidx.annotation.VisibleForTesting
 import com.melvin.minige.domain.PaymentType
 import com.melvin.minige.domain.UtangMethod
 import com.melvin.minige.domain.UtangPaymentRecord
+import com.melvin.minige.util.BulkUtangFifoHelper
+import com.melvin.minige.util.BulkUtangSettlementSummary
 import com.melvin.minige.util.CommissionRateHistory
 import com.melvin.minige.util.PaidChannel
 import com.melvin.minige.util.PartialPaymentHelper
@@ -42,6 +45,9 @@ class MinigeRepository(
 ) {
     private val _localDataChangeEvents = MutableSharedFlow<Unit>(extraBufferCapacity = 32)
     val localDataChangeEvents: SharedFlow<Unit> = _localDataChangeEvents.asSharedFlow()
+
+    @VisibleForTesting
+    internal var utangSyncOverrideForTest: (suspend (userId: String, payment: UtangPaymentEntity, delivery: DeliveryEntity) -> Pair<Result<Unit>, Result<Unit>>)? = null
 
     private fun notifyLocalDataChanged() {
         _localDataChangeEvents.tryEmit(Unit)
@@ -575,16 +581,140 @@ class MinigeRepository(
 
         dao.upsertDelivery(updatedDelivery)
 
-        val pRes = remote.upsertUtangPayment(userId, paymentEntity)
+        val (pRes, dRes) = if (utangSyncOverrideForTest != null) {
+            utangSyncOverrideForTest!!.invoke(userId, paymentEntity, updatedDelivery)
+        } else {
+            remote.upsertUtangPayment(userId, paymentEntity) to remote.upsertDelivery(userId, updatedDelivery)
+        }
         if (pRes.isSuccess) dao.markUtangPaymentSynced(paymentId)
-
-        val dRes = remote.upsertDelivery(userId, updatedDelivery)
         if (dRes.isSuccess) dao.markDeliverySynced(deliveryId)
 
         notifyLocalDataChanged()
         return if (pRes.isFailure) Result.failure(pRes.exceptionOrNull()!!)
         else if (dRes.isFailure) Result.failure(dRes.exceptionOrNull()!!)
         else Result.success(isNowFullyPaid)
+    }
+
+    /**
+     * Applies a lump-sum payment across all open Pautang deliveries for [customerName]
+     * in FIFO order (`dateKey ASC, createdAtEpochMs ASC`), delegating each entry allocation
+     * to [recordUtangPayment] so payment history, partial-gallon commission, settled dates,
+     * and Firestore sync queue stay completely consistent.
+     */
+    suspend fun recordBulkUtangPayment(
+        userId: String,
+        customerName: String,
+        amount: Int,
+        method: UtangMethod,
+        paymentDateKey: String,
+        notes: String,
+        overrideCommissionRate: Double? = null,
+    ): Result<BulkUtangSettlementSummary> {
+        val cleanCustomer = customerName.trim()
+        if (cleanCustomer.isEmpty()) {
+            return Result.failure(IllegalArgumentException("Customer name is required."))
+        }
+        if (amount <= 0) {
+            return Result.failure(IllegalArgumentException("Payment amount must be greater than ₱0."))
+        }
+
+        val targetKey = BulkUtangFifoHelper.normalizeCustomerKey(cleanCustomer)
+        val openUtang = dao.getAllDeliveriesOnce(userId)
+            .map { it.toDomain() }
+            .filter {
+                it.paymentType == PaymentType.PAUTANG &&
+                    it.remainingBalance > 0 &&
+                    BulkUtangFifoHelper.normalizeCustomerKey(it.customerName) == targetKey
+            }
+            .sortedWith(
+                compareBy<DeliveryRecord> { it.dateKey }
+                    .thenBy { it.createdAtEpochMs }
+                    .thenBy { it.id }
+            )
+
+        if (openUtang.isEmpty()) {
+            return Result.failure(IllegalStateException("No unpaid pautang entries found for $cleanCustomer."))
+        }
+
+        val totalOpenBefore = openUtang.sumOf { it.remainingBalance }
+        var remainingToAllocate = amount
+        var totalApplied = 0
+        var affectedCount = 0
+        var fullySettledCount = 0
+        var partiallyPaidCount = 0
+        val settledDateKeys = mutableListOf<String>()
+        val partiallyPaidDateKeys = mutableListOf<String>()
+        var anyPendingCloudSync = false
+
+        for (delivery in openUtang) {
+            if (remainingToAllocate <= 0) break
+            val remainingForEntry = delivery.remainingBalance
+            if (remainingForEntry <= 0) continue
+
+            val chunk = minOf(remainingToAllocate, remainingForEntry)
+            val amountPaidBefore = delivery.amountPaid
+
+            val stepRes = recordUtangPayment(
+                userId = userId,
+                deliveryId = delivery.id,
+                amount = chunk,
+                method = method,
+                paymentDateKey = paymentDateKey,
+                notes = notes,
+                overrideCommissionRate = overrideCommissionRate,
+            )
+
+            val afterDelivery = dao.getDeliveryById(delivery.id)?.toDomain()
+            val appliedLocally = if (afterDelivery != null) {
+                (afterDelivery.amountPaid - amountPaidBefore).coerceAtLeast(0)
+            } else {
+                0
+            }
+
+            if (stepRes.isSuccess || appliedLocally > 0) {
+                if (stepRes.isFailure) {
+                    anyPendingCloudSync = true
+                }
+                val actualApplied = if (appliedLocally > 0) appliedLocally else chunk
+                remainingToAllocate = (remainingToAllocate - actualApplied).coerceAtLeast(0)
+                totalApplied += actualApplied
+                affectedCount++
+                val isSettled = afterDelivery?.isUtangFullyPaid == true || stepRes.getOrNull() == true
+                if (isSettled) {
+                    fullySettledCount++
+                    settledDateKeys += delivery.dateKey
+                } else {
+                    partiallyPaidCount++
+                    partiallyPaidDateKeys += delivery.dateKey
+                }
+            } else {
+                if (totalApplied == 0) {
+                    return Result.failure(
+                        stepRes.exceptionOrNull()
+                            ?: IllegalStateException("Failed to record bulk pautang payment.")
+                    )
+                } else {
+                    anyPendingCloudSync = true
+                    break
+                }
+            }
+        }
+
+        return Result.success(
+            BulkUtangSettlementSummary(
+                customerName = openUtang.first().customerName.trim(),
+                requestedAmount = amount,
+                totalAppliedAmount = totalApplied,
+                excessAmount = (amount - totalApplied).coerceAtLeast(0),
+                remainingCustomerBalance = (totalOpenBefore - totalApplied).coerceAtLeast(0),
+                affectedCount = affectedCount,
+                fullySettledCount = fullySettledCount,
+                partiallyPaidCount = partiallyPaidCount,
+                settledDateKeys = settledDateKeys,
+                partiallyPaidDateKeys = partiallyPaidDateKeys,
+                pendingCloudSync = anyPendingCloudSync,
+            )
+        )
     }
 
     suspend fun recordPartialGallonPayment(

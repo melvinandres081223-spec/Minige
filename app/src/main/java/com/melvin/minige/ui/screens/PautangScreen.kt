@@ -27,6 +27,7 @@ import androidx.compose.material.icons.rounded.CreditScore
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -56,12 +57,16 @@ import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.UtangMethod
 import com.melvin.minige.domain.UtangPaymentRecord
 import com.melvin.minige.ui.MinigeUiState
+import com.melvin.minige.ui.components.BulkCollectUtangDialog
+import com.melvin.minige.ui.components.BulkSettlementConfirmationDialog
 import com.melvin.minige.ui.components.DeliveryFilterBar
 import com.melvin.minige.ui.components.DeliveryFilterChip
 import com.melvin.minige.ui.components.DeliveryFilterHelper
 import com.melvin.minige.ui.components.OverduePautangBadge
 import com.melvin.minige.ui.components.OverduePautangBanner
 import com.melvin.minige.ui.components.PartialPaymentDialog
+import com.melvin.minige.util.BulkUtangFifoHelper
+import com.melvin.minige.util.CustomerOpenUtangGroup
 import com.melvin.minige.util.PaidChannel
 import com.melvin.minige.util.PartialPaymentHelper
 import com.melvin.minige.util.PautangOverdueHelper
@@ -75,12 +80,15 @@ fun PautangScreen(
     uiState: MinigeUiState,
     onRecordPayment: (deliveryId: String, amount: Int, method: UtangMethod, notes: String) -> Unit,
     onRecordPartialGallonPayment: (deliveryId: String, paidGallons: Int, amount: Int, channel: PaidChannel, notes: String) -> Unit,
+    onRecordBulkPayment: (customerName: String, amount: Int, method: UtangMethod, notes: String) -> Unit = { _, _, _, _ -> },
+    onDismissBulkSettlementConfirmation: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     var selectedUtang by remember { mutableStateOf<DeliveryRecord?>(null) }
     var partialPayTarget by remember { mutableStateOf<DeliveryRecord?>(null) }
+    var bulkPayTargetGroup by remember { mutableStateOf<CustomerOpenUtangGroup?>(null) }
     var searchQuery by remember { mutableStateOf("") }
     var debouncedSearchQuery by remember { mutableStateOf("") }
     var selectedFilter by remember { mutableStateOf(DeliveryFilterChip.ALL) }
@@ -100,12 +108,27 @@ fun PautangScreen(
     val overdueSummary by remember(uiState.activeUtangList) {
         derivedStateOf { PautangOverdueHelper.summarizeOverdue(uiState.activeUtangList) }
     }
-    val filteredActiveUtang by remember(uiState.activeUtangList, selectedFilter) {
+    val filteredActiveUtang by remember(uiState.activeUtangList, debouncedSearchQuery, selectedFilter) {
         derivedStateOf {
             DeliveryFilterHelper.filterDeliveries(uiState.activeUtangList, debouncedSearchQuery, selectedFilter)
         }
     }
-    val filteredSettledUtang by remember(uiState.settledUtangList, selectedFilter) {
+    val multiUtangGroups by remember(uiState.activeUtangList) {
+        derivedStateOf {
+            BulkUtangFifoHelper.buildMultiEntryCustomerGroups(uiState.activeUtangList)
+        }
+    }
+    val visibleMultiUtangGroups by remember(multiUtangGroups, filteredActiveUtang) {
+        derivedStateOf {
+            val visibleKeys = filteredActiveUtang
+                .map { BulkUtangFifoHelper.normalizeCustomerKey(it.customerName) }
+                .toSet()
+            multiUtangGroups.values
+                .filter { it.normalizedKey in visibleKeys }
+                .sortedByDescending { it.combinedBalance }
+        }
+    }
+    val filteredSettledUtang by remember(uiState.settledUtangList, debouncedSearchQuery, selectedFilter) {
         derivedStateOf {
             DeliveryFilterHelper.filterDeliveries(uiState.settledUtangList, debouncedSearchQuery, selectedFilter)
         }
@@ -190,6 +213,19 @@ fun PautangScreen(
                     style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.padding(top = 4.dp),
                 )
+            }
+
+            if (visibleMultiUtangGroups.isNotEmpty()) {
+                items(
+                    items = visibleMultiUtangGroups,
+                    key = { "multi_utang_group_${it.normalizedKey}" },
+                    contentType = { "multi_utang_group_card" },
+                ) { group ->
+                    MultiUtangLumpSumCard(
+                        group = group,
+                        onSettleLumpSumClick = { bulkPayTargetGroup = group },
+                    )
+                }
             }
 
             if (filteredActiveUtang.isEmpty()) {
@@ -279,6 +315,83 @@ fun PautangScreen(
                 partialPayTarget = null
             },
         )
+    }
+
+    bulkPayTargetGroup?.let { group ->
+        BulkCollectUtangDialog(
+            customerName = group.displayName,
+            openEntriesFifo = group.entriesFifo,
+            paymentDateKey = uiState.selectedDateKey,
+            onDismiss = { bulkPayTargetGroup = null },
+            onConfirm = { amount, method, notes ->
+                onRecordBulkPayment(group.displayName, amount, method, notes)
+                bulkPayTargetGroup = null
+            },
+        )
+    }
+
+    uiState.bulkSettlementConfirmation?.let { summary ->
+        BulkSettlementConfirmationDialog(
+            summary = summary,
+            onDismiss = onDismissBulkSettlementConfirmation,
+        )
+    }
+}
+
+@Composable
+private fun MultiUtangLumpSumCard(
+    group: CustomerOpenUtangGroup,
+    onSettleLumpSumClick: () -> Unit,
+) {
+    Surface(
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("multi_utang_card_${group.normalizedKey}"),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(
+                    text = group.displayName,
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = "${group.entriesFifo.size} open dates • ${group.totalGallons} gal",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.85f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = "Combined Balance: ₱${group.combinedBalance}",
+                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                    color = MaterialTheme.colorScheme.error,
+                    maxLines = 1,
+                    softWrap = false,
+                )
+            }
+            FilledTonalButton(
+                onClick = onSettleLumpSumClick,
+                modifier = Modifier
+                    .defaultMinSize(minHeight = 48.dp)
+                    .testTag("settle_lump_sum_${group.normalizedKey}"),
+            ) {
+                Text("Settle Lump-Sum", maxLines = 1, softWrap = false)
+            }
+        }
     }
 }
 

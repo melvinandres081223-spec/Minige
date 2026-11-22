@@ -4,7 +4,12 @@ import android.content.Context
 import androidx.room.Room
 import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.test.core.app.ApplicationProvider
+import com.google.firebase.FirebaseApp
+import com.google.firebase.FirebaseOptions
+import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreException
+import com.melvin.minige.data.MinigeRepository
+import com.melvin.minige.data.PricingRepository
 import com.melvin.minige.data.local.AppSettingsEntity
 import com.melvin.minige.data.local.CustomerEntity
 import com.melvin.minige.data.local.DailyLedgerEntity
@@ -13,13 +18,19 @@ import com.melvin.minige.data.local.ExpenseEntity
 import com.melvin.minige.data.local.MinigeDatabase
 import com.melvin.minige.data.local.UtangPaymentEntity
 import com.melvin.minige.data.remote.FirestoreSyncHelper
+import com.melvin.minige.data.remote.MinigeFirestoreDataSource
 import com.melvin.minige.auth.GoogleAuthManager
+import com.melvin.minige.domain.BossPickupFormatter
+import com.melvin.minige.domain.DeliveryRecord
+import com.melvin.minige.domain.PaymentType
+import com.melvin.minige.domain.UtangMethod
 import com.melvin.minige.sync.BackupAppPreferences
 import com.melvin.minige.sync.BackupMetadata
 import com.melvin.minige.sync.DriveBackupManager
 import com.melvin.minige.sync.GitHubAppUpdater
 import com.melvin.minige.sync.MinigeBackupData
 import com.melvin.minige.util.CommissionRateEntry
+import java.time.LocalDate
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -481,6 +492,273 @@ class ExampleRobolectricTest {
         assertEquals("Direct in-app APK installer", bullets[1])
         assertEquals("Zero-lag 120Hz display refresh lock", bullets[2])
         assertEquals("5-second undo banner", bullets[3])
+    }
+
+    @Test
+    fun `boss pickup formatter includes picked up and delivered gallon counts with zero peso amounts`() {
+        val date = LocalDate.of(2026, 11, 22)
+        val entries = listOf(
+            DeliveryRecord(
+                id = "pk1",
+                userId = "u1",
+                dateKey = "2026-11-22",
+                customerName = "Nene",
+                purifiedGallons = 12,
+                alkalineGallons = 0,
+                purifiedUnitPrice = 30,
+                alkalineUnitPrice = 40,
+                totalAmount = 0,
+                amountPaid = 0,
+                paymentType = PaymentType.PICK_UP,
+                commissionRate = 8,
+                commissionEarned = 0,
+                settledDateKey = null,
+                notes = "",
+                calendarEventId = null,
+                pendingSync = false,
+                createdAtEpochMs = 1L,
+                updatedAtEpochMs = 1L,
+            ),
+            DeliveryRecord(
+                id = "c1",
+                userId = "u1",
+                dateKey = "2026-11-22",
+                customerName = "Store Alpha",
+                purifiedGallons = 8,
+                alkalineGallons = 2,
+                purifiedUnitPrice = 30,
+                alkalineUnitPrice = 40,
+                totalAmount = 320,
+                amountPaid = 320,
+                paymentType = PaymentType.CASH,
+                commissionRate = 8,
+                commissionEarned = 80,
+                settledDateKey = "2026-11-22",
+                notes = "",
+                calendarEventId = null,
+                pendingSync = false,
+                createdAtEpochMs = 2L,
+                updatedAtEpochMs = 2L,
+            ),
+            DeliveryRecord(
+                id = "b1",
+                userId = "u1",
+                dateKey = "2026-11-22",
+                customerName = "Store Beta",
+                purifiedGallons = 5,
+                alkalineGallons = 0,
+                purifiedUnitPrice = 30,
+                alkalineUnitPrice = 40,
+                totalAmount = 150,
+                amountPaid = 150,
+                paymentType = PaymentType.BANK_DEPOSIT,
+                commissionRate = 8,
+                commissionEarned = 40,
+                settledDateKey = "2026-11-22",
+                notes = "[Bank Transfer]",
+                calendarEventId = null,
+                pendingSync = false,
+                createdAtEpochMs = 3L,
+                updatedAtEpochMs = 3L,
+            ),
+            DeliveryRecord(
+                id = "u1",
+                userId = "u1",
+                dateKey = "2026-11-22",
+                customerName = "Ate Rosa",
+                purifiedGallons = 4,
+                alkalineGallons = 0,
+                purifiedUnitPrice = 30,
+                alkalineUnitPrice = 40,
+                totalAmount = 120,
+                amountPaid = 0,
+                paymentType = PaymentType.PAUTANG,
+                commissionRate = 8,
+                commissionEarned = 0,
+                settledDateKey = null,
+                notes = "",
+                calendarEventId = null,
+                pendingSync = false,
+                createdAtEpochMs = 4L,
+                updatedAtEpochMs = 4L,
+            ),
+        )
+
+        val report = BossPickupFormatter.format(date, entries)
+        assertTrue(report.contains("NA-PICK UP NA GALLON"))
+        assertTrue(report.contains("Nene"))
+        assertTrue(report.contains("12 gals"))
+        assertTrue(report.contains("NA-DELIVER NA GALLON"))
+        assertTrue(report.contains("Cash / Paid"))
+        assertTrue(report.contains("10 gals"))
+        assertTrue(report.contains("Bank Transfer/Deposit"))
+        assertTrue(report.contains("5 gals"))
+        assertTrue(report.contains("Pautang"))
+        assertTrue(report.contains("4 gals"))
+        assertTrue(report.contains("TOTAL DELIVERED:"))
+        assertTrue(report.contains("19 gals"))
+        assertFalse(report.contains("₱"))
+        assertFalse(report.contains("320"))
+        assertFalse(report.contains("Commission", ignoreCase = true))
+        assertFalse(report.contains("Remit", ignoreCase = true))
+    }
+
+    @Test
+    fun `repository recordBulkUtangPayment settles oldest entries FIFO and updates commissions`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        if (FirebaseApp.getApps(context).isEmpty()) {
+            FirebaseApp.initializeApp(
+                context,
+                FirebaseOptions.Builder()
+                    .setProjectId("minige-f6338")
+                    .setApplicationId("1:466130893778:android:c5d0d190ec29d4fb2be60b")
+                    .setApiKey("AIzaSyFakeKeyForRobolectricTest")
+                    .build()
+            )
+        }
+        val db = Room.inMemoryDatabaseBuilder(context, MinigeDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        try {
+            val dao = db.minigeDao()
+            val firestore = FirebaseFirestore.getInstance()
+            val remote = MinigeFirestoreDataSource(firestore)
+            val repo = MinigeRepository(
+                dao = dao,
+                remote = remote,
+                pricingRepository = PricingRepository(dao, remote),
+            )
+            // Simulate successful cloud sync first
+            repo.utangSyncOverrideForTest = { _, _, _ -> Result.success(Unit) to Result.success(Unit) }
+
+            dao.upsertSettings(
+                AppSettingsEntity(
+                    id = "default",
+                    userId = "rider_1",
+                    purifiedPrice = 30,
+                    alkalinePrice = 40,
+                    commissionRate = 8,
+                    defaultSukli = 0,
+                    pendingSync = false,
+                    updatedAtEpochMs = 1L,
+                )
+            )
+
+            // Two open pautang entries for Aling Nena (oldest Nov 18 ₱90, newer Nov 20 ₱60)
+            dao.upsertDeliveries(
+                listOf(
+                    DeliveryEntity(
+                        id = "d_new",
+                        userId = "rider_1",
+                        dateKey = "2026-11-20",
+                        customerName = "Aling Nena",
+                        purifiedGallons = 2,
+                        alkalineGallons = 0,
+                        purifiedUnitPrice = 30,
+                        alkalineUnitPrice = 40,
+                        totalAmount = 60,
+                        amountPaid = 0,
+                        paymentType = "PAUTANG",
+                        commissionRate = 8,
+                        commissionEarned = 0,
+                        settledDateKey = null,
+                        notes = "",
+                        calendarEventId = null,
+                        pendingSync = false,
+                        isDeleted = false,
+                        createdAtEpochMs = 2000L,
+                        updatedAtEpochMs = 2000L,
+                    ),
+                    DeliveryEntity(
+                        id = "d_old",
+                        userId = "rider_1",
+                        dateKey = "2026-11-18",
+                        customerName = "aling nena",
+                        purifiedGallons = 3,
+                        alkalineGallons = 0,
+                        purifiedUnitPrice = 30,
+                        alkalineUnitPrice = 40,
+                        totalAmount = 90,
+                        amountPaid = 0,
+                        paymentType = "PAUTANG",
+                        commissionRate = 8,
+                        commissionEarned = 0,
+                        settledDateKey = null,
+                        notes = "",
+                        calendarEventId = null,
+                        pendingSync = false,
+                        isDeleted = false,
+                        createdAtEpochMs = 1000L,
+                        updatedAtEpochMs = 1000L,
+                    ),
+                )
+            )
+
+            val res = repo.recordBulkUtangPayment(
+                userId = "rider_1",
+                customerName = "Aling Nena",
+                amount = 120,
+                method = UtangMethod.BANK_DEPOSIT,
+                paymentDateKey = "2026-11-22",
+                notes = "[Bank Transfer] Lump sum bayad",
+                overrideCommissionRate = 8.0,
+            )
+
+            assertTrue(res.isSuccess)
+            val summary = res.getOrThrow()
+            assertEquals(120, summary.totalAppliedAmount)
+            assertEquals(0, summary.excessAmount)
+            assertEquals(30, summary.remainingCustomerBalance)
+            assertEquals(1, summary.fullySettledCount)
+            assertEquals(1, summary.partiallyPaidCount)
+            assertEquals(listOf("2026-11-18"), summary.settledDateKeys)
+            assertEquals(listOf("2026-11-20"), summary.partiallyPaidDateKeys)
+            assertFalse(summary.pendingCloudSync)
+
+            val updatedOld = dao.getDeliveryById("d_old")!!
+            assertEquals(90, updatedOld.amountPaid)
+            assertEquals(24, updatedOld.commissionEarned) // 3 * 8 unlocked on settlement
+            assertEquals("2026-11-22", updatedOld.settledDateKey)
+
+            val updatedNew = dao.getDeliveryById("d_new")!!
+            assertEquals(30, updatedNew.amountPaid)
+            assertEquals(0, updatedNew.commissionEarned) // partial peso pay earns 0 until settled
+            assertNull(updatedNew.settledDateKey)
+
+            val payments = dao.getAllUtangPaymentsOnce("rider_1")
+            assertEquals(2, payments.size)
+            assertEquals(120, payments.sumOf { it.amount })
+
+            // Now simulate offline cloud failure while settling remaining ₱30 + ₱20 excess (₱50 tendered)
+            repo.utangSyncOverrideForTest = { _, _, _ ->
+                val offlineEx = FirebaseFirestoreException("offline", FirebaseFirestoreException.Code.UNAVAILABLE)
+                Result.failure<Unit>(offlineEx) to Result.failure(offlineEx)
+            }
+            val res2 = repo.recordBulkUtangPayment(
+                userId = "rider_1",
+                customerName = "Aling Nena",
+                amount = 50,
+                method = UtangMethod.CASH,
+                paymentDateKey = "2026-11-23",
+                notes = "Final balance",
+                overrideCommissionRate = 8.0,
+            )
+            assertTrue(res2.isSuccess)
+            val summary2 = res2.getOrThrow()
+            assertEquals(30, summary2.totalAppliedAmount)
+            assertEquals(20, summary2.excessAmount)
+            assertEquals(0, summary2.remainingCustomerBalance)
+            assertEquals(listOf("2026-11-20"), summary2.settledDateKeys)
+            assertTrue(summary2.pendingCloudSync)
+
+            val finalNew = dao.getDeliveryById("d_new")!!
+            assertEquals(60, finalNew.amountPaid)
+            assertEquals(16, finalNew.commissionEarned) // 2 * 8 unlocked on Nov 23
+            assertEquals("2026-11-23", finalNew.settledDateKey)
+            assertTrue(finalNew.pendingSync)
+        } finally {
+            db.close()
+        }
     }
 }
 
