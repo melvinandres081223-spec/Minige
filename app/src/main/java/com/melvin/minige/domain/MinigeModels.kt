@@ -355,6 +355,14 @@ object BossPickupFormatter {
     private val headerDateFormatter = DateTimeFormatter.ofPattern("MMM dd, yyyy", Locale.ENGLISH)
     private const val DIVIDER = "━━━━━━━━━━━━━━━━━━━━"
 
+    @Immutable
+    data class DailyHakotReport(
+        val paidGallons: Int,
+        val unpaidPautangGallons: Int,
+        val grandTotalGallons: Int,
+        val message: String,
+    )
+
     fun tagalogDayName(dayOfWeek: DayOfWeek): String = when (dayOfWeek) {
         DayOfWeek.MONDAY -> "Lunes"
         DayOfWeek.TUESDAY -> "Martes"
@@ -372,24 +380,32 @@ object BossPickupFormatter {
     )
 
     /**
-     * Generates the Boss-facing Daily Hakot report containing ONLY commission-earning (paid)
-     * delivered gallons for [date]:
-     * - Direct paid deliveries (`CASH` and `BANK_DEPOSIT` / Bank Transfer) on `dateKey`
-     * - Partial-gallon `PAUTANG` payments paid on `dateKey` (tagged via `UtangPaymentRecord`)
-     * - Fully settled `PAUTANG` remainder gallons with `settledDateKey == dateKey`
+     * Generates the Boss-facing Daily Hakot report containing two clearly separated sections
+     * for [date]:
+     * 1) Paid / commission-earning delivered gallons (`CASH`, `BANK_DEPOSIT` / Bank Transfer,
+     *    partial-gallon `PAUTANG` payments collected on `dateKey`, and settled `PAUTANG` remainder
+     *    gallons with `settledDateKey == dateKey`).
+     * 2) Unpaid `PAUTANG` deliveries created/delivered on `dateKey` (`!isUtangFullyPaid`), showing
+     *    remaining unpaid gallons if a partial-gallon payment already happened on `dateKey`.
      *
-     * Strictly excludes unpaid `PAUTANG` entries, `PICK_UP` entries, peso signs (`₱`),
-     * unit prices, commissions, cash remittance, and sukli.
+     * Strictly excludes `PICK_UP` entries, peso signs (`₱`), unit prices, commissions,
+     * cash remittance, and sukli.
      */
     fun format(
         date: LocalDate,
         deliveries: List<DeliveryRecord>,
         utangPayments: List<UtangPaymentRecord> = emptyList(),
-    ): String {
+    ): String = buildReport(date, deliveries, utangPayments).message
+
+    fun buildReport(
+        date: LocalDate,
+        deliveries: List<DeliveryRecord>,
+        utangPayments: List<UtangPaymentRecord> = emptyList(),
+    ): DailyHakotReport {
         val dateKey = MinigeDateUtils.toKey(date)
         val deliveryById = deliveries.associateBy { it.id }
 
-        val rows = mutableListOf<HakotRow>()
+        val paidRows = mutableListOf<HakotRow>()
 
         // 1) Direct paid deliveries on selected date
         deliveries
@@ -399,7 +415,7 @@ object BossPickupFormatter {
                     it.totalGallons > 0
             }
             .forEach { entry ->
-                rows += HakotRow(
+                paidRows += HakotRow(
                     customerName = entry.customerName.trim().ifEmpty { "Customer" },
                     gallons = entry.totalGallons,
                     sortTimestamp = entry.createdAtEpochMs,
@@ -415,7 +431,7 @@ object BossPickupFormatter {
                     val parent = deliveryById[payment.deliveryId]
                     if (parent == null || parent.paymentType == PaymentType.PAUTANG) {
                         val name = parent?.customerName?.trim()?.ifEmpty { "Customer" } ?: "Customer"
-                        rows += HakotRow(
+                        paidRows += HakotRow(
                             customerName = name,
                             gallons = paidGals,
                             sortTimestamp = payment.createdAtEpochMs,
@@ -438,7 +454,7 @@ object BossPickupFormatter {
                         .filter { it.deliveryId == utang.id && it.dateKey == dateKey }
                         .maxOfOrNull { it.createdAtEpochMs }
                         ?: utang.updatedAtEpochMs
-                    rows += HakotRow(
+                    paidRows += HakotRow(
                         customerName = utang.customerName.trim().ifEmpty { "Customer" },
                         gallons = remGallons,
                         sortTimestamp = lastPaymentTs,
@@ -446,38 +462,98 @@ object BossPickupFormatter {
                 }
             }
 
-        val orderedRows = rows.sortedBy { it.sortTimestamp }
-        val totalGals = orderedRows.sumOf { it.gallons }
+        // 4) Unpaid Pautang deliveries created/delivered on selected date
+        val pautangRows = mutableListOf<HakotRow>()
+        deliveries
+            .filter {
+                it.dateKey == dateKey &&
+                    it.paymentType == PaymentType.PAUTANG &&
+                    !it.isUtangFullyPaid &&
+                    it.totalGallons > 0
+            }
+            .forEach { utang ->
+                val paidTaggedOnOrBeforeDate = utangPayments
+                    .filter { it.deliveryId == utang.id && it.dateKey <= dateKey }
+                    .sumOf { PartialPaymentHelper.extractPaidGallons(it) }
+                val remainingUnpaidGals = (utang.totalGallons - paidTaggedOnOrBeforeDate).coerceAtLeast(0)
+                if (remainingUnpaidGals > 0) {
+                    pautangRows += HakotRow(
+                        customerName = utang.customerName.trim().ifEmpty { "Customer" },
+                        gallons = remainingUnpaidGals,
+                        sortTimestamp = utang.createdAtEpochMs,
+                    )
+                }
+            }
+
+        val orderedPaidRows = paidRows.sortedBy { it.sortTimestamp }
+        val orderedPautangRows = pautangRows.sortedBy { it.sortTimestamp }
+        val allRows = orderedPaidRows + orderedPautangRows
+
+        val paidTotalGals = orderedPaidRows.sumOf { it.gallons }
+        val pautangTotalGals = orderedPautangRows.sumOf { it.gallons }
+        val grandTotalGals = paidTotalGals + pautangTotalGals
+
         val separator = " — "
-        val totalPrefix = "TOTAL:"
-        val nameColWidth = (orderedRows.maxOfOrNull { it.customerName.length } ?: 0).coerceAtLeast(9)
+        val paidTotalPrefix = "PAID TOTAL:"
+        val pautangTotalPrefix = "PAUTANG TOTAL:"
+        val grandTotalPrefix = "GRAND TOTAL:"
+
+        // Ensure minimum name column width accommodates longest total prefix ("PAUTANG TOTAL:" = 14) + 1 space
+        val nameColWidth = (allRows.maxOfOrNull { it.customerName.length } ?: 0).coerceAtLeast(12)
         val countColWidth = maxOf(
-            totalGals.toString().length,
-            orderedRows.maxOfOrNull { it.gallons.toString().length } ?: 1,
+            grandTotalGals.toString().length,
+            paidTotalGals.toString().length,
+            pautangTotalGals.toString().length,
+            allRows.maxOfOrNull { it.gallons.toString().length } ?: 1,
         ).coerceAtLeast(2)
-        val totalNumberPad = (nameColWidth + separator.length + countColWidth - totalPrefix.length)
-            .coerceAtLeast(countColWidth + 1)
+
+        val valueEndColumn = nameColWidth + separator.length + countColWidth
+        val paidPad = (valueEndColumn - paidTotalPrefix.length).coerceAtLeast(countColWidth + 1)
+        val pautangPad = (valueEndColumn - pautangTotalPrefix.length).coerceAtLeast(countColWidth + 1)
+        val grandPad = (valueEndColumn - grandTotalPrefix.length).coerceAtLeast(countColWidth + 1)
+
+        fun formatUnit(count: Int): String = if (count == 1) "gal" else "gals"
 
         val sb = StringBuilder()
         sb.appendLine("🚚 DAILY HAKOT (DELIVERED)")
         sb.appendLine("📅 Petsa: ${date.format(headerDateFormatter)} (${tagalogDayName(date.dayOfWeek)})")
         sb.appendLine(DIVIDER)
 
-        if (orderedRows.isEmpty()) {
+        if (orderedPaidRows.isEmpty()) {
             sb.appendLine("(Wala pang paid delivery ngayon)")
         } else {
-            orderedRows.forEach { row ->
+            orderedPaidRows.forEach { row ->
                 val name = row.customerName.padEnd(nameColWidth, ' ')
-                val count = row.gallons
-                val unit = if (count == 1) "gal" else "gals"
-                val countStr = count.toString().padStart(countColWidth, ' ')
-                sb.appendLine("$name$separator$countStr $unit")
+                val countStr = row.gallons.toString().padStart(countColWidth, ' ')
+                sb.appendLine("$name$separator$countStr ${formatUnit(row.gallons)}")
             }
         }
 
         sb.appendLine(DIVIDER)
-        val totalUnit = if (totalGals == 1) "gal" else "gals"
-        sb.append("$totalPrefix${totalGals.toString().padStart(totalNumberPad, ' ')} $totalUnit")
-        return sb.toString()
+        sb.appendLine("$paidTotalPrefix${paidTotalGals.toString().padStart(paidPad, ' ')} ${formatUnit(paidTotalGals)}")
+        sb.appendLine()
+        sb.appendLine("📋 PAUTANG DELIVERED TODAY")
+        sb.appendLine(DIVIDER)
+
+        if (orderedPautangRows.isEmpty()) {
+            sb.appendLine("(Walang pautang delivered today)")
+        } else {
+            orderedPautangRows.forEach { row ->
+                val name = row.customerName.padEnd(nameColWidth, ' ')
+                val countStr = row.gallons.toString().padStart(countColWidth, ' ')
+                sb.appendLine("$name$separator$countStr ${formatUnit(row.gallons)}")
+            }
+        }
+
+        sb.appendLine(DIVIDER)
+        sb.appendLine("$pautangTotalPrefix${pautangTotalGals.toString().padStart(pautangPad, ' ')} ${formatUnit(pautangTotalGals)}")
+        sb.append("$grandTotalPrefix${grandTotalGals.toString().padStart(grandPad, ' ')} ${formatUnit(grandTotalGals)}")
+
+        return DailyHakotReport(
+            paidGallons = paidTotalGals,
+            unpaidPautangGallons = pautangTotalGals,
+            grandTotalGallons = grandTotalGals,
+            message = sb.toString(),
+        )
     }
 }

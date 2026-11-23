@@ -109,6 +109,7 @@ data class MinigeUiState(
         expenses = emptyList(),
     ),
     val bossPickupMessage: String = "",
+    val bossHakotPautangGallons: Int = 0,
     val customers: List<CustomerRecord> = emptyList(),
     val sukiDirectory: List<SukiCustomerProfile> = emptyList(),
     val commissionRateHistory: List<CommissionRateEntry> = emptyList(),
@@ -348,6 +349,12 @@ class MinigeViewModel(
         val pendingCount = bundle.pendingCount
         val driveMetaSummary = appContext?.let { DriveBackupManager.getBackupMetadataSummary(it, currentUserId) }
 
+        val hakotReport = BossPickupFormatter.buildReport(
+            date = date,
+            deliveries = bundle.deliveries,
+            utangPayments = bundle.payments,
+        )
+
         MinigeUiState(
             selectedDate = date,
             selectedDateKey = dateKey,
@@ -363,11 +370,8 @@ class MinigeViewModel(
             todayPaymentBreakdown = todayPaymentBreakdown,
             sundayMakeupEnabled = sundayEnabled,
             sundayMakeupDaySummary = sundayMakeupDaySummary,
-            bossPickupMessage = BossPickupFormatter.format(
-                date = date,
-                deliveries = bundle.deliveries,
-                utangPayments = bundle.payments,
-            ),
+            bossPickupMessage = hakotReport.message,
+            bossHakotPautangGallons = hakotReport.unpaidPautangGallons,
             customers = mergedCustomers,
             sukiDirectory = sukiDirectory,
             commissionRateHistory = rateHist,

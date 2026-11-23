@@ -193,6 +193,7 @@ fun TodayScreen(
                 BossPickupUpdateCard(
                     pickupMessage = uiState.bossPickupMessage,
                     totalPaidGallons = uiState.dailySummary.totalPaidGallons,
+                    totalPautangGallons = uiState.bossHakotPautangGallons,
                     onSendToBoss = {
                         copyAndShareToMessenger(context, uiState.bossPickupMessage)
                         onBossSendTriggered("Daily Hakot report copied & opened share sheet")
@@ -636,6 +637,7 @@ private fun CommissionHeroCard(
 private fun BossPickupUpdateCard(
     pickupMessage: String,
     totalPaidGallons: Int,
+    totalPautangGallons: Int,
     onSendToBoss: () -> Unit,
 ) {
     ElevatedCard(
@@ -669,7 +671,7 @@ private fun BossPickupUpdateCard(
                             style = MaterialTheme.typography.titleMedium,
                         )
                         Text(
-                            text = "$totalPaidGallons delivered gal(s)",
+                            text = "$totalPaidGallons paid • $totalPautangGallons pautang gal(s)",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )

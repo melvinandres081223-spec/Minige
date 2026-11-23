@@ -507,7 +507,7 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `boss pickup formatter lists paid deliveries with tagalog day and excludes unpaid pautang and pickup`() {
+    fun `boss pickup formatter lists paid deliveries and unpaid pautang delivered today with tagalog day and excludes pickup`() {
         val date = LocalDate.of(2026, 11, 23) // Monday -> Lunes
         val entries = listOf(
             DeliveryRecord(
@@ -595,6 +595,48 @@ class ExampleRobolectricTest {
                 updatedAtEpochMs = 4L,
             ),
             DeliveryRecord(
+                id = "u_unpaid_today_partial",
+                userId = "u1",
+                dateKey = "2026-11-23",
+                customerName = "Kuya Joel Split",
+                purifiedGallons = 3,
+                alkalineGallons = 0,
+                purifiedUnitPrice = 30,
+                alkalineUnitPrice = 40,
+                totalAmount = 90,
+                amountPaid = 30,
+                paymentType = PaymentType.PAUTANG,
+                commissionRate = 8,
+                commissionEarned = 0,
+                settledDateKey = null,
+                notes = "",
+                calendarEventId = null,
+                pendingSync = false,
+                createdAtEpochMs = 5L,
+                updatedAtEpochMs = 55L,
+            ),
+            DeliveryRecord(
+                id = "u_old_unpaid",
+                userId = "u1",
+                dateKey = "2026-11-21",
+                customerName = "Old Unpaid Customer",
+                purifiedGallons = 6,
+                alkalineGallons = 0,
+                purifiedUnitPrice = 30,
+                alkalineUnitPrice = 40,
+                totalAmount = 180,
+                amountPaid = 0,
+                paymentType = PaymentType.PAUTANG,
+                commissionRate = 8,
+                commissionEarned = 0,
+                settledDateKey = null,
+                notes = "",
+                calendarEventId = null,
+                pendingSync = false,
+                createdAtEpochMs = 1L,
+                updatedAtEpochMs = 1L,
+            ),
+            DeliveryRecord(
                 id = "u_settled",
                 userId = "u1",
                 dateKey = "2026-11-19",
@@ -648,10 +690,27 @@ class ExampleRobolectricTest {
                 notes = "[Gallons:2 Comm:16]",
                 pendingSync = false,
                 createdAtEpochMs = 70L,
-            )
+            ),
+            UtangPaymentRecord(
+                id = "pay_2",
+                deliveryId = "u_unpaid_today_partial",
+                userId = "u1",
+                dateKey = "2026-11-23",
+                amount = 30,
+                method = UtangMethod.CASH,
+                notes = "[Gallons:1 Comm:8]",
+                pendingSync = false,
+                createdAtEpochMs = 80L,
+            ),
         )
 
-        val formatted = BossPickupFormatter.format(date, entries, payments)
+        val report = BossPickupFormatter.buildReport(date, entries, payments)
+        val formatted = report.message
+
+        assertEquals(21, report.paidGallons) // 10 + 5 + 3 + 2 + 1
+        assertEquals(6, report.unpaidPautangGallons) // 4 (Ate Rosa) + 2 remaining (Kuya Joel)
+        assertEquals(27, report.grandTotalGallons)
+
         assertTrue(formatted.contains("🚚 DAILY HAKOT (DELIVERED)"))
         assertTrue(formatted.contains("📅 Petsa: Nov 23, 2026 (Lunes)"))
         assertTrue(formatted.contains("Store Alpha"))
@@ -661,15 +720,37 @@ class ExampleRobolectricTest {
         assertTrue(formatted.contains("Kuya Ben Settled"))
         assertTrue(formatted.contains("3 gals"))
         assertTrue(formatted.contains("Mang Tomas Partial"))
+        assertTrue(formatted.contains("PAID TOTAL:"))
+        assertTrue(formatted.contains("21 gals"))
+
+        assertTrue(formatted.contains("📋 PAUTANG DELIVERED TODAY"))
+        assertTrue(formatted.contains("Ate Rosa Unpaid"))
+        assertTrue(formatted.contains("4 gals"))
+        assertTrue(formatted.contains("Kuya Joel Split"))
         assertTrue(formatted.contains("2 gals"))
-        assertTrue(formatted.contains("TOTAL:"))
-        assertTrue(formatted.contains("20 gals"))
+        assertTrue(formatted.contains("PAUTANG TOTAL:"))
+        assertTrue(formatted.contains("6 gals"))
+        assertTrue(formatted.contains("GRAND TOTAL:"))
+        assertTrue(formatted.contains("27 gals"))
+
+        // Verify PICK_UP and older unpaid Pautang are excluded, and zero peso/money figures appear
         assertFalse(formatted.contains("Nene Pickup"))
-        assertFalse(formatted.contains("Ate Rosa Unpaid"))
+        assertFalse(formatted.contains("Old Unpaid Customer"))
         assertFalse(formatted.contains("₱"))
         assertFalse(formatted.contains("320"))
         assertFalse(formatted.contains("Commission", ignoreCase = true))
         assertFalse(formatted.contains("Remit", ignoreCase = true))
+
+        // Verify Tagalog day names and empty state
+        val emptySunday = BossPickupFormatter.format(LocalDate.of(2026, 11, 22), listOf(entries.first()))
+        assertTrue(emptySunday.contains("Nov 22, 2026 (Linggo)"))
+        assertTrue(emptySunday.contains("(Wala pang paid delivery ngayon)"))
+        assertTrue(emptySunday.contains("(Walang pautang delivered today)"))
+        assertEquals("Martes", BossPickupFormatter.tagalogDayName(java.time.DayOfWeek.TUESDAY))
+        assertEquals("Miyerkules", BossPickupFormatter.tagalogDayName(java.time.DayOfWeek.WEDNESDAY))
+        assertEquals("Huwebes", BossPickupFormatter.tagalogDayName(java.time.DayOfWeek.THURSDAY))
+        assertEquals("Biyernes", BossPickupFormatter.tagalogDayName(java.time.DayOfWeek.FRIDAY))
+        assertEquals("Sabado", BossPickupFormatter.tagalogDayName(java.time.DayOfWeek.SATURDAY))
     }
 
     @Test
