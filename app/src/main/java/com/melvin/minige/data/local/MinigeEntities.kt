@@ -11,6 +11,7 @@ import com.melvin.minige.domain.MinigeSettings
 import com.melvin.minige.domain.PaymentType
 import com.melvin.minige.domain.UtangMethod
 import com.melvin.minige.domain.UtangPaymentRecord
+import com.melvin.minige.util.PaymentBreakdownHelper
 
 @Entity(tableName = "deliveries")
 data class DeliveryEntity(
@@ -46,7 +47,7 @@ data class DeliveryEntity(
         alkalineUnitPrice = alkalineUnitPrice,
         totalAmount = totalAmount,
         amountPaid = amountPaid,
-        paymentType = PaymentType.fromRaw(paymentType),
+        paymentType = PaymentType.fromEntityRaw(paymentType, notes),
         commissionRate = commissionRate,
         commissionEarned = commissionEarned,
         settledDateKey = settledDateKey,
@@ -101,9 +102,9 @@ data class ExpenseEntity(
         id = id,
         userId = userId,
         dateKey = dateKey,
-        category = ExpenseCategory.fromRaw(category),
+        category = ExpenseCategory.fromEntityRaw(category, notes),
         amount = amount,
-        notes = notes,
+        notes = PaymentBreakdownHelper.stripCashAdvanceTag(notes),
         pendingSync = pendingSync,
         createdAtEpochMs = createdAtEpochMs,
         updatedAtEpochMs = updatedAtEpochMs,

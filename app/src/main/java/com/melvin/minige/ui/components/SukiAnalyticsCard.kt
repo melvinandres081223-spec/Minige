@@ -128,7 +128,10 @@ object SukiAnalyticsHelper {
             tally.totalGallons += gals
             tally.orderCount += 1
 
-            if (delivery.paymentType == PaymentType.CASH || delivery.paymentType == PaymentType.BANK_DEPOSIT) {
+            if (delivery.paymentType == PaymentType.CASH ||
+                delivery.paymentType == PaymentType.BANK_DEPOSIT ||
+                delivery.paymentType == PaymentType.PAID_WALK_IN
+            ) {
                 tally.paidGallons += gals
                 tally.commissionEarned += delivery.commissionEarned
                 when (cls) {

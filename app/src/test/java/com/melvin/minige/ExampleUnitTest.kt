@@ -169,19 +169,19 @@ class ExampleUnitTest {
             🚚 DAILY HAKOT (DELIVERED)
             📅 Petsa: Nov 23, 2026 (Lunes)
             ━━━━━━━━━━━━━━━━━━━━
-            Aling Nena   — 10 gals
-            Kuya Jun     —  1 gal
-            Ate Rosa     —  5 gals
-            Mang Ben     —  2 gals
+            Aling Nena          — 10 gals
+            Kuya Jun            —  1 gal
+            Ate Rosa            —  5 gals
+            Mang Ben            —  2 gals
             ━━━━━━━━━━━━━━━━━━━━
-            PAID TOTAL:    18 gals
+            DELIVERED PAID TOTAL: 18 gals
 
             📋 PAUTANG DELIVERED TODAY
             ━━━━━━━━━━━━━━━━━━━━
-            Unpaid Juan  —  4 gals
+            Unpaid Juan         —  4 gals
             ━━━━━━━━━━━━━━━━━━━━
-            PAUTANG TOTAL:  4 gals
-            GRAND TOTAL:   22 gals
+            PAUTANG TOTAL:         4 gals
+            GRAND TOTAL:          22 gals
         """.trimIndent()
 
         assertEquals(expected, formatted)
@@ -267,15 +267,15 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun `payment breakdown helper separates cash to remit from bank transfer and deposit while keeping commission`() {
+    fun `payment breakdown helper merges bank online while keeping legacy bank transfer tags and commissions`() {
         val today = "2026-11-21"
         val cashDelivery = delivery("c1", today, "Cash Store", 10, 0, PaymentType.CASH, 300, 8, 80, today)
-        val bankTransferDelivery = delivery(
+        val bankOnlineDelivery = delivery(
             "b1", today, "Ate Maria", 5, 0, PaymentType.BANK_DEPOSIT, 150, 8, 40, today
-        ).copy(notes = PaymentBreakdownHelper.applyChannelTag("", PaidChannel.BANK_TRANSFER))
-        val bankDepositDelivery = delivery(
+        ).copy(notes = PaymentBreakdownHelper.applyChannelTag("", PaidChannel.BANK_ONLINE))
+        val legacyDepositDelivery = delivery(
             "b2", today, "Kuya Jun", 4, 0, PaymentType.BANK_DEPOSIT, 120, 8, 32, today
-        ).copy(notes = PaymentBreakdownHelper.applyChannelTag("", PaidChannel.BANK_DEPOSIT))
+        ).copy(notes = "[Bank Deposit]")
         val settledUtangTransfer = delivery(
             "u1", "2026-11-18", "Settled Transfer", 2, 0, PaymentType.PAUTANG, 60, 8, 16, today
         )
@@ -288,7 +288,7 @@ class ExampleUnitTest {
                 dateKey = today,
                 amount = 60,
                 method = UtangMethod.BANK_DEPOSIT,
-                notes = PaymentBreakdownHelper.applyChannelTag("GCash transfer", PaidChannel.BANK_TRANSFER),
+                notes = PaymentBreakdownHelper.applyChannelTag("GCash transfer", PaidChannel.BANK_ONLINE),
                 pendingSync = false,
                 createdAtEpochMs = 0L,
             )
@@ -299,25 +299,22 @@ class ExampleUnitTest {
 
         val breakdown = PaymentBreakdownHelper.calculateBreakdown(
             dateKey = today,
-            deliveries = listOf(cashDelivery, bankTransferDelivery, bankDepositDelivery, settledUtangTransfer),
+            deliveries = listOf(cashDelivery, bankOnlineDelivery, legacyDepositDelivery, settledUtangTransfer),
             utangPayments = payments,
             expenses = expenses,
         )
 
         assertEquals(10, breakdown.cashPaidGallons)
-        assertEquals(7, breakdown.bankTransferGallons) // 5 direct + 2 settled utang
-        assertEquals(4, breakdown.bankDepositGallons)
+        assertEquals(11, breakdown.bankOnlineGallons) // 5 + 4 direct + 2 settled utang
         assertEquals(300, breakdown.cashCollected)
         assertEquals(100, breakdown.cashExpenses)
         assertEquals(200, breakdown.cashToRemit) // 300 - 100
-        assertEquals(210, breakdown.bankTransferAmount) // 150 + 60
-        assertEquals(120, breakdown.bankDepositAmount)
-        assertEquals(330, breakdown.bankPaidTotal)
+        assertEquals(330, breakdown.bankPaidTotal) // 150 + 120 + 60
         assertEquals(80, breakdown.commissionFromCash)
         assertEquals(88, breakdown.commissionFromBank) // 40 + 32 + 16
         assertEquals(168, breakdown.totalPaidCommission)
-        assertEquals("Bank Transfer", PaymentBreakdownHelper.displayMethodLabel(bankTransferDelivery))
-        assertEquals("Bank Deposit", PaymentBreakdownHelper.displayMethodLabel(bankDepositDelivery))
+        assertEquals("Bank / Online", PaymentBreakdownHelper.displayMethodLabel(bankOnlineDelivery))
+        assertEquals("Bank / Online", PaymentBreakdownHelper.displayMethodLabel(legacyDepositDelivery))
     }
 
     @Test
@@ -346,9 +343,14 @@ class ExampleUnitTest {
         assertTrue(transferParsed.isAlkaline)
         assertNull(transferParsed.classification)
         assertEquals(PaymentType.BANK_DEPOSIT, transferParsed.paymentType)
-        assertEquals(PaidChannel.BANK_TRANSFER, transferParsed.paidChannel)
+        assertEquals(PaidChannel.BANK_ONLINE, transferParsed.paidChannel)
         assertEquals("Aling Nena", transferParsed.customerName)
         assertNull(transferParsed.rememberedUnitPrice)
+
+        val walkInParsed = DeliveryVoiceParser.parse("4 paid walk-in Mang Ben", customers)
+        assertEquals(4, walkInParsed.gallons)
+        assertEquals(PaymentType.PAID_WALK_IN, walkInParsed.paymentType)
+        assertEquals("Mang Ben", walkInParsed.customerName)
     }
 
     @Test
@@ -469,7 +471,7 @@ class ExampleUnitTest {
         assertEquals(16, day1Summary.dailyCommission)
         assertEquals(60, day1Summary.cashCollected)
 
-        // Day 2: Remaining 3 gallons paid via Bank Transfer (₱90, +₱24 comm)
+        // Day 2: Remaining 3 gallons paid via Bank / Online (₱90, +₱24 comm)
         val day2Payment = UtangPaymentRecord(
             id = "p2",
             deliveryId = "d1",
@@ -477,7 +479,7 @@ class ExampleUnitTest {
             dateKey = day2,
             amount = 90,
             method = UtangMethod.BANK_DEPOSIT,
-            notes = PartialPaymentHelper.applyPartialGallonTag("", paidGallons = 3, commissionEarned = 24, channel = PaidChannel.BANK_TRANSFER),
+            notes = PartialPaymentHelper.applyPartialGallonTag("", paidGallons = 3, commissionEarned = 24, channel = PaidChannel.BANK_ONLINE),
             pendingSync = false,
             createdAtEpochMs = 2L,
         )
@@ -501,7 +503,7 @@ class ExampleUnitTest {
             utangPayments = listOf(day1Payment, day2Payment),
             expenses = emptyList(),
         )
-        assertEquals(3, day2Breakdown.bankTransferGallons)
+        assertEquals(3, day2Breakdown.bankOnlineGallons)
         assertEquals(24, day2Breakdown.commissionFromBank)
     }
 
@@ -547,7 +549,7 @@ class ExampleUnitTest {
         val today = "2026-11-21"
         val cash = delivery("c1", today, "Ate Maria", 10, 0, PaymentType.CASH, 300, 8, 80, today)
         val bank = delivery("b1", today, "Canteen", 5, 0, PaymentType.BANK_DEPOSIT, 150, 8, 40, today)
-            .copy(notes = PaymentBreakdownHelper.applyChannelTag("", PaidChannel.BANK_TRANSFER))
+            .copy(notes = PaymentBreakdownHelper.applyChannelTag("", PaidChannel.BANK_ONLINE))
         val pautang = delivery("u1", today, "Kuya Jun", 3, 0, PaymentType.PAUTANG, 0, 8, 0, null)
         val pickup = delivery("p1", today, "Nene", 12, 0, PaymentType.PICK_UP, 0, 8, 0, null)
         val expenses = listOf(ExpenseRecord("e1", "u1", today, ExpenseCategory.GAS, 80, "", false, 0L, 0L))
@@ -567,7 +569,7 @@ class ExampleUnitTest {
         assertEquals(15, closing.totalPaidGallons)
         assertEquals(3, closing.pautangUnpaidGallons)
         assertEquals(120, closing.totalCommissionEarned)
-        assertEquals(150, closing.bankTransferAmount)
+        assertEquals(150, closing.bankPaidTotal)
         assertEquals(300, closing.retainedSukli)
         assertEquals(250, closing.defaultStartingSukli)
         assertEquals(220, closing.netCashToRemitToBoss)
@@ -852,5 +854,92 @@ class ExampleUnitTest {
         assertEquals(40, excessPreview.excessAmount)
         assertEquals(0, excessPreview.remainingCustomerBalanceAfter)
         assertTrue(excessPreview.steps.all { it.willFullySettle })
+    }
+
+    @Test
+    fun `paid walk in earns zero cash remit, honors optional commission toggle, and always appears in daily hakot`() {
+        val date = LocalDate.of(2026, 11, 24) // Tuesday -> Martes
+        val today = "2026-11-24"
+
+        val cash = delivery("c1", today, "Store A", 10, 0, PaymentType.CASH, 300, 8, 80, today)
+            .copy(createdAtEpochMs = 10L)
+        val walkInWithComm = delivery("w1", today, "Walk-in Suki", 4, 0, PaymentType.PAID_WALK_IN, 0, 8, 32, today)
+            .copy(totalAmount = 0, notes = PaymentBreakdownHelper.applyPaidWalkInTags("", hasCommission = true), createdAtEpochMs = 20L)
+        val walkInNoComm = delivery("w2", today, "Walk-in Zero", 3, 0, PaymentType.PAID_WALK_IN, 0, 8, 0, today)
+            .copy(totalAmount = 0, notes = PaymentBreakdownHelper.applyPaidWalkInTags("", hasCommission = false), createdAtEpochMs = 30L)
+
+        val deliveries = listOf(cash, walkInWithComm, walkInNoComm)
+        val summary = MinigeCalculator.calculateDailySummary(today, deliveries, emptyList(), emptyList(), startingSukli = 0)
+        val breakdown = PaymentBreakdownHelper.calculateBreakdown(today, deliveries, emptyList(), emptyList())
+
+        // All 3 count in delivered paid gallons (10 + 4 + 3 = 17), while only cash + walkInWithComm earn commission (80 + 32 = 112)
+        assertEquals(17, summary.totalPaidGallons)
+        assertEquals(112, summary.dailyCommission)
+        assertNull(summary.effectiveRateDisplay) // mixed (0 comm entry present)
+        assertEquals(300, summary.cashCollected)
+        assertEquals(0, summary.bankDepositTotal)
+        assertEquals(300, summary.netCashRemit)
+
+        assertEquals(7, breakdown.paidWalkInGallons)
+        assertEquals(32, breakdown.commissionFromPaidWalkIn)
+        assertEquals(300, breakdown.cashToRemit)
+        assertEquals("Paid Walk-in", PaymentBreakdownHelper.displayMethodLabel(walkInWithComm))
+        assertEquals("Paid Walk-in", PaymentBreakdownHelper.displayMethodLabel(walkInNoComm))
+        assertTrue(walkInWithComm.hasPaidWalkInCommission)
+        assertFalse(walkInNoComm.hasPaidWalkInCommission)
+
+        // Daily Hakot includes BOTH Paid Walk-in entries with zero peso symbols
+        val hakot = BossPickupFormatter.buildReport(date, deliveries, emptyList())
+        assertEquals(17, hakot.paidGallons)
+        assertTrue(hakot.message.contains("Walk-in Suki"))
+        assertTrue(hakot.message.contains("Walk-in Zero"))
+        assertTrue(hakot.message.contains("DELIVERED PAID TOTAL: 17 gals"))
+        assertFalse(hakot.message.contains("₱"))
+        assertFalse(hakot.message.contains("Commission", ignoreCase = true))
+    }
+
+    @Test
+    fun `cash advance is separated from route expenses, deducts daily net remit and weekly net remaining commission`() {
+        val monday = LocalDate.of(2026, 11, 23)
+        val monKey = "2026-11-23"
+        val tueKey = "2026-11-24"
+        val sunKey = "2026-11-29"
+
+        val deliveries = listOf(
+            delivery("d1", monKey, "Customer 1", 20, 0, PaymentType.CASH, 600, 8, 160, monKey),
+            delivery("d2", tueKey, "Customer 2", 15, 0, PaymentType.CASH, 450, 8, 120, tueKey),
+            delivery("d_sun", sunKey, "Sunday Customer", 10, 0, PaymentType.CASH, 300, 8, 80, sunKey),
+        )
+        val expenses = listOf(
+            ExpenseRecord("e_gas", "u1", monKey, ExpenseCategory.GAS, 100, "", false, 0L, 0L),
+            ExpenseRecord("e_adv1", "u1", monKey, ExpenseCategory.CASH_ADVANCE, 200, "Monday advance", false, 0L, 0L),
+            ExpenseRecord("e_adv2", "u1", sunKey, ExpenseCategory.CASH_ADVANCE, 50, "Sunday advance", false, 0L, 0L),
+        )
+
+        val monSummary = MinigeCalculator.calculateDailySummary(monKey, deliveries, emptyList(), expenses, startingSukli = 150)
+        assertEquals(100, monSummary.expensesTotal) // GAS only
+        assertEquals(200, monSummary.cashAdvanceTotal) // CASH_ADVANCE tracked separately
+        assertEquals(300, monSummary.netCashRemit) // 600 - 100 - 200
+        assertEquals(450, monSummary.cashOnHand) // 150 + 300
+
+        val monBreakdown = PaymentBreakdownHelper.calculateBreakdown(monKey, deliveries, emptyList(), expenses)
+        assertEquals(100, monBreakdown.cashExpenses)
+        assertEquals(200, monBreakdown.cashAdvanceTotal)
+        assertEquals(300, monBreakdown.cashToRemit)
+
+        // Mon-Sat weekly summary
+        val baseWeekly = MinigeCalculator.calculateWeeklySummary(monday, deliveries, emptyList(), expenses)
+        assertEquals(100, baseWeekly.totalExpenses)
+        assertEquals(200, baseWeekly.totalCashAdvance)
+        assertEquals(280, baseWeekly.totalCommission) // 160 + 120
+        assertEquals(80, baseWeekly.netRemainingCommission) // 280 - 200
+
+        // Mon-Sun with Sunday Makeup enabled
+        val sundayDay = SundayMakeupHelper.calculateSundayDaySummary(monday, deliveries, emptyList(), expenses)
+        assertEquals(50, sundayDay.cashAdvance)
+        val makeupWeekly = SundayMakeupHelper.applySundayMakeup(baseWeekly, sundayDay, enabled = true)
+        assertEquals(360, makeupWeekly.totalCommission)
+        assertEquals(250, makeupWeekly.totalCashAdvance)
+        assertEquals(110, makeupWeekly.netRemainingCommission)
     }
 }

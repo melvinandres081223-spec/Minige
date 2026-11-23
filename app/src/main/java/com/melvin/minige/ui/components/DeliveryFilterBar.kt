@@ -63,10 +63,12 @@ object DeliveryFilterHelper {
             DeliveryFilterChip.RESIDENTIAL -> classification == CustomerClassification.RESIDENTIAL
             DeliveryFilterChip.PAID -> delivery.paymentType == PaymentType.CASH ||
                 delivery.paymentType == PaymentType.BANK_DEPOSIT ||
+                delivery.paymentType == PaymentType.PAID_WALK_IN ||
                 (delivery.paymentType == PaymentType.PAUTANG && delivery.isUtangFullyPaid)
             DeliveryFilterChip.PAUTANG -> delivery.paymentType == PaymentType.PAUTANG &&
                 !delivery.isUtangFullyPaid
             DeliveryFilterChip.BANK -> delivery.paymentType == PaymentType.BANK_DEPOSIT ||
+                delivery.notes.contains("[Bank / Online]", ignoreCase = true) ||
                 delivery.notes.contains("[Bank Transfer]", ignoreCase = true) ||
                 delivery.notes.contains("[Bank Deposit]", ignoreCase = true)
         }

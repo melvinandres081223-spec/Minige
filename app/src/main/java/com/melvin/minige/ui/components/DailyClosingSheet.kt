@@ -64,6 +64,7 @@ data class DailyClosingData(
     val defaultStartingSukli: Int,
     val cashCollected: Int,
     val expensesTotal: Int,
+    val cashAdvanceTotal: Int = 0,
     val netCashToRemitToBoss: Int,
     val cashOnHand: Int,
 )
@@ -85,7 +86,7 @@ object DailyClosingHelper {
             totalPaidGallons = summary.totalPaidGallons,
             pautangUnpaidGallons = summary.unpaidUtangGallons,
             cashPaidGallons = breakdown.cashPaidGallons,
-            bankPaidGallons = breakdown.bankTransferGallons + breakdown.bankDepositGallons,
+            bankPaidGallons = breakdown.bankOnlineGallons,
             totalCommissionEarned = summary.dailyCommission,
             activeCommissionRate = activeCommissionRate,
             bankTransferAmount = breakdown.bankTransferAmount,
@@ -95,6 +96,7 @@ object DailyClosingHelper {
             defaultStartingSukli = defaultStartingSukli,
             cashCollected = breakdown.cashCollected,
             expensesTotal = breakdown.cashExpenses,
+            cashAdvanceTotal = breakdown.cashAdvanceTotal,
             netCashToRemitToBoss = breakdown.cashToRemit,
             cashOnHand = summary.cashOnHand,
         )
@@ -105,11 +107,11 @@ object DailyClosingHelper {
         return buildString {
             appendLine("MINIGE PRIVATE CLOSING (${data.dateKey})")
             appendLine("Picked Up: ${data.totalPickedUpGallons} gal")
-            appendLine("Paid Gallons: ${data.totalPaidGallons} gal (Cash ${data.cashPaidGallons}g + Bank ${data.bankPaidGallons}g)")
+            appendLine("Paid Gallons: ${data.totalPaidGallons} gal (Cash ${data.cashPaidGallons}g + Bank / Online ${data.bankPaidGallons}g)")
             appendLine("Unpaid Pautang: ${data.pautangUnpaidGallons} gal")
             appendLine("Commission Earned: ₱${data.totalCommissionEarned} (Rate ₱$rateText/gal)")
-            appendLine("Bank Transfer: ₱${data.bankTransferAmount} | Bank Deposit: ₱${data.bankDepositAmount}")
-            appendLine("Cash Collected: ₱${data.cashCollected} | Expenses: -₱${data.expensesTotal}")
+            appendLine("Bank / Online: ₱${data.bankPaidTotal}")
+            appendLine("Cash Collected: ₱${data.cashCollected} | Expenses: -₱${data.expensesTotal} | Cash Advance: -₱${data.cashAdvanceTotal}")
             appendLine("Retained Sukli: ₱${data.retainedSukli} (Default ₱${data.defaultStartingSukli})")
             append("Net Cash to Remit to Boss: ₱${data.netCashToRemitToBoss}")
         }
@@ -207,7 +209,7 @@ fun DailyClosingSheet(
                         color = MaterialTheme.colorScheme.onPrimaryContainer,
                     )
                     Text(
-                        text = "Cash ₱${closingData.cashCollected} − Expenses ₱${closingData.expensesTotal} • Cash on Hand ₱${closingData.cashOnHand}",
+                        text = "Cash ₱${closingData.cashCollected} − Exp ₱${closingData.expensesTotal} − Adv ₱${closingData.cashAdvanceTotal} • On Hand ₱${closingData.cashOnHand}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f),
                     )
@@ -217,24 +219,23 @@ fun DailyClosingSheet(
             ClosingSectionCard(title = "Gallon Totals", icon = Icons.Rounded.LocalShipping) {
                 ClosingLine("Total Gallons Picked Up (Hakot)", "${closingData.totalPickedUpGallons} gal")
                 ClosingLine("Paid Gallons (Direct + Settled)", "${closingData.totalPaidGallons} gal", emphasize = true)
-                ClosingLine("  • Cash Paid / Bank Paid", "${closingData.cashPaidGallons}g Cash • ${closingData.bankPaidGallons}g Bank")
+                ClosingLine("  • Cash Paid / Bank / Online", "${closingData.cashPaidGallons}g Cash • ${closingData.bankPaidGallons}g Bank / Online")
                 ClosingLine("Unpaid Pautang Gallons", "${closingData.pautangUnpaidGallons} gal")
             }
 
-            ClosingSectionCard(title = "Commission & Bank", icon = Icons.Rounded.AccountBalance) {
+            ClosingSectionCard(title = "Commission & Bank / Online", icon = Icons.Rounded.AccountBalance) {
                 ClosingLine(
                     "Total Commission (Rate ₱${CommissionRateHistory.formatRate(closingData.activeCommissionRate)}/g)",
                     "₱${closingData.totalCommissionEarned}",
                     emphasize = true,
                 )
-                ClosingLine("Bank Transfers", "₱${closingData.bankTransferAmount}")
-                ClosingLine("Bank Deposits", "₱${closingData.bankDepositAmount}")
-                ClosingLine("Total Bank-Paid (Boss Account)", "₱${closingData.bankPaidTotal}")
+                ClosingLine("Bank / Online (Boss Account)", "₱${closingData.bankPaidTotal}")
             }
 
             ClosingSectionCard(title = "Sukli & Remittance", icon = Icons.Rounded.Savings) {
                 ClosingLine("Cash Collected", "₱${closingData.cashCollected}")
                 ClosingLine("Route Expenses", "-₱${closingData.expensesTotal}")
+                ClosingLine("Cash Advance", "-₱${closingData.cashAdvanceTotal}")
                 ClosingLine("Retained Customer Sukli", "₱${closingData.retainedSukli}")
                 ClosingLine("Default Starting Sukli", "₱${closingData.defaultStartingSukli}")
                 HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))

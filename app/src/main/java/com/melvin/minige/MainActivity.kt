@@ -64,6 +64,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.melvin.minige.auth.GoogleAuthManager
 import com.melvin.minige.domain.DeliveryRecord
+import com.melvin.minige.domain.ExpenseCategory
 import com.melvin.minige.sync.CalendarSyncManager
 import com.melvin.minige.ui.MinigeEvent
 import com.melvin.minige.ui.MinigeViewModel
@@ -153,6 +154,7 @@ fun MinigeMainShell(
     var editingDelivery by remember { mutableStateOf<DeliveryRecord?>(null) }
     var showAddDeliverySheet by remember { mutableStateOf(false) }
     var showAddExpenseSheet by remember { mutableStateOf(false) }
+    var initialExpenseCategory by remember { mutableStateOf(ExpenseCategory.FOOD) }
     var showEditSukliDialog by remember { mutableStateOf(false) }
     var showScreenGuideSheet by remember { mutableStateOf(false) }
 
@@ -312,7 +314,14 @@ fun MinigeMainShell(
                         showAddDeliverySheet = true
                     },
                     onDeleteDelivery = viewModel::deleteDelivery,
-                    onAddExpenseClick = { showAddExpenseSheet = true },
+                    onAddExpenseClick = {
+                        initialExpenseCategory = ExpenseCategory.FOOD
+                        showAddExpenseSheet = true
+                    },
+                    onAddCashAdvanceClick = {
+                        initialExpenseCategory = ExpenseCategory.CASH_ADVANCE
+                        showAddExpenseSheet = true
+                    },
                     onDeleteExpense = viewModel::deleteExpense,
                     onSyncCalendarClick = { viewModel.triggerCalendarSync(context) },
                     onBossSendTriggered = { msg ->
@@ -386,7 +395,7 @@ fun MinigeMainShell(
                 showAddDeliverySheet = false
                 editingDelivery = null
             },
-            onSave = { customerName, purifiedGallons, alkalineGallons, paymentType, notes, customUnitPrice ->
+            onSave = { customerName, purifiedGallons, alkalineGallons, paymentType, notes, customUnitPrice, hasCommission ->
                 val editing = editingDelivery
                 if (editing == null) {
                     viewModel.addDelivery(
@@ -396,6 +405,7 @@ fun MinigeMainShell(
                         paymentType = paymentType,
                         notes = notes,
                         customUnitPrice = customUnitPrice,
+                        hasCommission = hasCommission,
                     )
                 } else {
                     viewModel.updateDelivery(
@@ -406,14 +416,23 @@ fun MinigeMainShell(
                         paymentType = paymentType,
                         notes = notes,
                         customUnitPrice = customUnitPrice,
+                        hasCommission = hasCommission,
                     )
                 }
+            },
+            onSaveCashAdvance = { amount, advNotes ->
+                viewModel.addExpense(
+                    category = ExpenseCategory.CASH_ADVANCE,
+                    amount = amount,
+                    notes = advNotes,
+                )
             },
         )
     }
 
     if (showAddExpenseSheet) {
         AddExpenseSheet(
+            initialCategory = initialExpenseCategory,
             onDismiss = { showAddExpenseSheet = false },
             onSave = viewModel::addExpense,
         )

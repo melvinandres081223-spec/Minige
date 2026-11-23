@@ -19,17 +19,11 @@ enum class PaidChannel(
         storedUtangMethod = UtangMethod.CASH,
         noteTag = null,
     ),
-    BANK_TRANSFER(
-        label = "Bank Transfer",
+    BANK_ONLINE(
+        label = "Bank / Online",
         storedPaymentType = PaymentType.BANK_DEPOSIT,
         storedUtangMethod = UtangMethod.BANK_DEPOSIT,
-        noteTag = "[Bank Transfer]",
-    ),
-    BANK_DEPOSIT(
-        label = "Bank Deposit",
-        storedPaymentType = PaymentType.BANK_DEPOSIT,
-        storedUtangMethod = UtangMethod.BANK_DEPOSIT,
-        noteTag = "[Bank Deposit]",
+        noteTag = "[Bank / Online]",
     ),
 }
 
@@ -47,42 +41,39 @@ data class PaymentChannelBreakdown(
     val commissionFromCash: Int,
     val commissionFromBank: Int,
     val totalPaidCommission: Int,
+    val bankOnlineGallons: Int = bankTransferGallons + bankDepositGallons,
+    val paidWalkInGallons: Int = 0,
+    val commissionFromPaidWalkIn: Int = 0,
+    val cashAdvanceTotal: Int = 0,
 )
 
 object PaymentBreakdownHelper {
 
+    private const val TAG_BANK_ONLINE = "[Bank / Online]"
     private const val TAG_BANK_TRANSFER = "[Bank Transfer]"
     private const val TAG_BANK_DEPOSIT = "[Bank Deposit]"
+    const val TAG_PAID_WALK_IN = "[Paid Walk-in]"
+    const val TAG_NO_COMMISSION = "[No Commission]"
+    const val TAG_CASH_ADVANCE = "[Cash Advance]"
 
     fun resolveDeliveryChannel(delivery: DeliveryRecord): PaidChannel? {
         return when (delivery.paymentType) {
             PaymentType.CASH -> PaidChannel.CASH
-            PaymentType.BANK_DEPOSIT -> {
-                if (delivery.notes.contains(TAG_BANK_TRANSFER, ignoreCase = true)) {
-                    PaidChannel.BANK_TRANSFER
-                } else {
-                    PaidChannel.BANK_DEPOSIT
-                }
-            }
-            PaymentType.PAUTANG, PaymentType.PICK_UP -> null
+            PaymentType.BANK_DEPOSIT -> PaidChannel.BANK_ONLINE
+            PaymentType.PAID_WALK_IN, PaymentType.PAUTANG, PaymentType.PICK_UP -> null
         }
     }
 
     fun resolveUtangPaymentChannel(payment: UtangPaymentRecord): PaidChannel {
         return when (payment.method) {
             UtangMethod.CASH -> PaidChannel.CASH
-            UtangMethod.BANK_DEPOSIT -> {
-                if (payment.notes.contains(TAG_BANK_TRANSFER, ignoreCase = true)) {
-                    PaidChannel.BANK_TRANSFER
-                } else {
-                    PaidChannel.BANK_DEPOSIT
-                }
-            }
+            UtangMethod.BANK_DEPOSIT -> PaidChannel.BANK_ONLINE
         }
     }
 
     fun stripChannelTags(notes: String): String {
         return notes
+            .replace(TAG_BANK_ONLINE, "", ignoreCase = true)
             .replace(TAG_BANK_TRANSFER, "", ignoreCase = true)
             .replace(TAG_BANK_DEPOSIT, "", ignoreCase = true)
             .replace(Regex("\\s{2,}"), " ")
@@ -95,8 +86,63 @@ object PaymentBreakdownHelper {
         return if (cleaned.isEmpty()) tag else "$tag $cleaned".take(300)
     }
 
+    fun hasNoCommissionTag(notes: String): Boolean =
+        notes.contains(TAG_NO_COMMISSION, ignoreCase = true)
+
+    fun isPaidWalkInTagged(notes: String): Boolean =
+        notes.contains(TAG_PAID_WALK_IN, ignoreCase = true)
+
+    fun stripPaidWalkInTags(notes: String): String {
+        return notes
+            .replace(TAG_PAID_WALK_IN, "", ignoreCase = true)
+            .replace(TAG_NO_COMMISSION, "", ignoreCase = true)
+            .replace(Regex("\\s{2,}"), " ")
+            .trim()
+    }
+
+    fun applyPaidWalkInTags(
+        notes: String,
+        hasCommission: Boolean,
+        includeTypeTagForCloud: Boolean = false,
+    ): String {
+        val cleaned = stripPaidWalkInTags(stripChannelTags(notes))
+        val tags = buildList {
+            if (includeTypeTagForCloud) add(TAG_PAID_WALK_IN)
+            if (!hasCommission) add(TAG_NO_COMMISSION)
+        }
+        if (tags.isEmpty()) return cleaned.take(300)
+        val prefix = tags.joinToString(" ")
+        return if (cleaned.isEmpty()) prefix else "$prefix $cleaned".take(300)
+    }
+
+    fun resolvePaidWalkInHasCommission(delivery: DeliveryRecord): Boolean {
+        if (delivery.paymentType != PaymentType.PAID_WALK_IN) return true
+        return !hasNoCommissionTag(delivery.notes) && delivery.commissionEarned > 0
+    }
+
+    fun isCashAdvanceTagged(notes: String): Boolean =
+        notes.contains(TAG_CASH_ADVANCE, ignoreCase = true)
+
+    fun stripCashAdvanceTag(notes: String): String {
+        return notes
+            .replace(TAG_CASH_ADVANCE, "", ignoreCase = true)
+            .replace(Regex("\\s{2,}"), " ")
+            .trim()
+    }
+
+    fun applyCashAdvanceTag(notes: String): String {
+        val cleaned = stripCashAdvanceTag(notes)
+        return if (cleaned.isEmpty()) TAG_CASH_ADVANCE else "$TAG_CASH_ADVANCE $cleaned".take(300)
+    }
+
     fun displayMethodLabel(delivery: DeliveryRecord): String {
-        return resolveDeliveryChannel(delivery)?.label ?: delivery.paymentType.label
+        return when (delivery.paymentType) {
+            PaymentType.BANK_DEPOSIT -> PaidChannel.BANK_ONLINE.label
+            PaymentType.PAID_WALK_IN -> PaymentType.PAID_WALK_IN.label
+            PaymentType.CASH -> PaidChannel.CASH.label
+            PaymentType.PAUTANG -> PaymentType.PAUTANG.label
+            PaymentType.PICK_UP -> PaymentType.PICK_UP.label
+        }
     }
 
     fun calculateBreakdown(
@@ -107,11 +153,17 @@ object PaymentBreakdownHelper {
     ): PaymentChannelBreakdown {
         val deliveriesForDate = deliveries.filter { it.dateKey == dateKey }
         val paymentsForDate = utangPayments.filter { it.dateKey == dateKey }
-        val expensesTotal = expenses.filter { it.dateKey == dateKey }.sumOf { it.amount }
+        val expenseEntriesForDate = expenses.filter { it.dateKey == dateKey }
+        val routeExpensesTotal = expenseEntriesForDate
+            .filter { !it.category.isCashAdvance }
+            .sumOf { it.amount }
+        val cashAdvanceTotal = expenseEntriesForDate
+            .filter { it.category.isCashAdvance }
+            .sumOf { it.amount }
 
         val directCash = deliveriesForDate.filter { resolveDeliveryChannel(it) == PaidChannel.CASH }
-        val directBankTransfer = deliveriesForDate.filter { resolveDeliveryChannel(it) == PaidChannel.BANK_TRANSFER }
-        val directBankDeposit = deliveriesForDate.filter { resolveDeliveryChannel(it) == PaidChannel.BANK_DEPOSIT }
+        val directBankOnline = deliveriesForDate.filter { resolveDeliveryChannel(it) == PaidChannel.BANK_ONLINE }
+        val directPaidWalkIn = deliveriesForDate.filter { it.paymentType == PaymentType.PAID_WALK_IN }
 
         val settledUtangToday = deliveries.filter {
             it.paymentType == PaymentType.PAUTANG &&
@@ -121,8 +173,7 @@ object PaymentBreakdownHelper {
         val settledByDeliveryId = paymentsForDate.groupBy { it.deliveryId }
 
         var utangCashGals = 0
-        var utangTransferGals = 0
-        var utangDepositGals = 0
+        var utangBankGals = 0
         var utangCashComm = 0
         var utangBankComm = 0
 
@@ -135,12 +186,8 @@ object PaymentBreakdownHelper {
                         utangCashGals += chunkGals
                         utangCashComm += chunkComm
                     }
-                    PaidChannel.BANK_TRANSFER -> {
-                        utangTransferGals += chunkGals
-                        utangBankComm += chunkComm
-                    }
-                    PaidChannel.BANK_DEPOSIT -> {
-                        utangDepositGals += chunkGals
+                    PaidChannel.BANK_ONLINE -> {
+                        utangBankGals += chunkGals
                         utangBankComm += chunkComm
                     }
                 }
@@ -160,43 +207,43 @@ object PaymentBreakdownHelper {
                         utangCashGals += remGals
                         utangCashComm += remComm
                     }
-                    PaidChannel.BANK_TRANSFER -> {
-                        utangTransferGals += remGals
-                        utangBankComm += remComm
-                    }
-                    PaidChannel.BANK_DEPOSIT -> {
-                        utangDepositGals += remGals
+                    PaidChannel.BANK_ONLINE -> {
+                        utangBankGals += remGals
                         utangBankComm += remComm
                     }
                 }
             }
         }
 
+        // Paid Walk-in never contributes to cashCollected or bankPaidTotal
         val cashCollected = directCash.sumOf { it.amountPaid } +
             paymentsForDate.filter { resolveUtangPaymentChannel(it) == PaidChannel.CASH }.sumOf { it.amount }
-        val bankTransferAmount = directBankTransfer.sumOf { it.amountPaid } +
-            paymentsForDate.filter { resolveUtangPaymentChannel(it) == PaidChannel.BANK_TRANSFER }.sumOf { it.amount }
-        val bankDepositAmount = directBankDeposit.sumOf { it.amountPaid } +
-            paymentsForDate.filter { resolveUtangPaymentChannel(it) == PaidChannel.BANK_DEPOSIT }.sumOf { it.amount }
+        val bankPaidTotal = directBankOnline.sumOf { it.amountPaid } +
+            paymentsForDate.filter { resolveUtangPaymentChannel(it) == PaidChannel.BANK_ONLINE }.sumOf { it.amount }
 
+        val bankOnlineGallons = directBankOnline.sumOf { it.totalGallons } + utangBankGals
+        val paidWalkInGallons = directPaidWalkIn.sumOf { it.totalGallons }
         val commissionFromCash = directCash.sumOf { it.commissionEarned } + utangCashComm
-        val commissionFromBank = directBankTransfer.sumOf { it.commissionEarned } +
-            directBankDeposit.sumOf { it.commissionEarned } +
-            utangBankComm
+        val commissionFromBank = directBankOnline.sumOf { it.commissionEarned } + utangBankComm
+        val commissionFromPaidWalkIn = directPaidWalkIn.sumOf { it.commissionEarned }
 
         return PaymentChannelBreakdown(
             cashPaidGallons = directCash.sumOf { it.totalGallons } + utangCashGals,
-            bankTransferGallons = directBankTransfer.sumOf { it.totalGallons } + utangTransferGals,
-            bankDepositGallons = directBankDeposit.sumOf { it.totalGallons } + utangDepositGals,
+            bankTransferGallons = 0,
+            bankDepositGallons = bankOnlineGallons,
             cashCollected = cashCollected,
-            cashExpenses = expensesTotal,
-            cashToRemit = cashCollected - expensesTotal,
-            bankTransferAmount = bankTransferAmount,
-            bankDepositAmount = bankDepositAmount,
-            bankPaidTotal = bankTransferAmount + bankDepositAmount,
+            cashExpenses = routeExpensesTotal,
+            cashToRemit = cashCollected - routeExpensesTotal - cashAdvanceTotal,
+            bankTransferAmount = 0,
+            bankDepositAmount = bankPaidTotal,
+            bankPaidTotal = bankPaidTotal,
             commissionFromCash = commissionFromCash,
             commissionFromBank = commissionFromBank,
-            totalPaidCommission = commissionFromCash + commissionFromBank,
+            totalPaidCommission = commissionFromCash + commissionFromBank + commissionFromPaidWalkIn,
+            bankOnlineGallons = bankOnlineGallons,
+            paidWalkInGallons = paidWalkInGallons,
+            commissionFromPaidWalkIn = commissionFromPaidWalkIn,
+            cashAdvanceTotal = cashAdvanceTotal,
         )
     }
 }

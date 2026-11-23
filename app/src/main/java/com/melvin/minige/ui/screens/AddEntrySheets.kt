@@ -41,10 +41,13 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -60,6 +63,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -97,7 +101,9 @@ fun AddDeliverySheet(
         paymentType: PaymentType,
         notes: String,
         customUnitPrice: Double?,
+        hasCommission: Boolean,
     ) -> Unit,
+    onSaveCashAdvance: ((amount: Int, notes: String) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -105,7 +111,11 @@ fun AddDeliverySheet(
     val keyboardController = LocalSoftwareKeyboardController.current
 
     val initialPriceText = remember(initialDelivery?.id, settings) {
-        if (initialDelivery != null && initialDelivery.paymentType != PaymentType.PICK_UP && initialDelivery.totalGallons > 0) {
+        if (initialDelivery != null &&
+            initialDelivery.paymentType != PaymentType.PICK_UP &&
+            initialDelivery.paymentType != PaymentType.PAID_WALK_IN &&
+            initialDelivery.totalGallons > 0
+        ) {
             val expectedSettingsSplit = (initialDelivery.purifiedGallons * initialDelivery.purifiedUnitPrice) +
                 (initialDelivery.alkalineGallons * initialDelivery.alkalineUnitPrice)
             val derivedPrice = if (initialDelivery.totalAmount != expectedSettingsSplit && initialDelivery.totalAmount > 0) {
@@ -121,6 +131,10 @@ fun AddDeliverySheet(
         }
     }
 
+    var isQuickCashAdvanceMode by remember(initialDelivery?.id) { mutableStateOf(false) }
+    var cashAdvanceAmountText by remember(initialDelivery?.id) { mutableStateOf("") }
+    var cashAdvanceNotes by remember(initialDelivery?.id) { mutableStateOf("") }
+
     var customerName by remember(initialDelivery?.id) { mutableStateOf(initialDelivery?.customerName ?: "") }
     var purifiedText by remember(initialDelivery?.id) {
         mutableStateOf((initialDelivery?.purifiedGallons ?: 0).toString())
@@ -130,6 +144,15 @@ fun AddDeliverySheet(
     }
     var paymentType by remember(initialDelivery?.id) {
         mutableStateOf(initialDelivery?.paymentType ?: PaymentType.CASH)
+    }
+    var hasPaidWalkInCommission by remember(initialDelivery?.id) {
+        mutableStateOf(
+            if (initialDelivery?.paymentType == PaymentType.PAID_WALK_IN) {
+                PaymentBreakdownHelper.resolvePaidWalkInHasCommission(initialDelivery)
+            } else {
+                true
+            }
+        )
     }
     var selectedPaidChannel by remember(initialDelivery?.id) {
         mutableStateOf(
@@ -146,7 +169,9 @@ fun AddDeliverySheet(
     val initialCleanNotes = remember(initialDelivery?.id) {
         initialDelivery?.notes?.let {
             CustomerDirectoryHelper.stripRouteAreaTag(
-                PaymentBreakdownHelper.stripChannelTags(DeliveryVoiceParser.stripClassificationTag(it))
+                PaymentBreakdownHelper.stripPaidWalkInTags(
+                    PaymentBreakdownHelper.stripChannelTags(DeliveryVoiceParser.stripClassificationTag(it))
+                )
             )
         } ?: ""
     }
@@ -278,13 +303,19 @@ fun AddDeliverySheet(
         ?: defaultUnitPriceForSelection.toDouble()
 
     val billAmount = when {
-        paymentType == PaymentType.PICK_UP -> 0
+        paymentType == PaymentType.PICK_UP || paymentType == PaymentType.PAID_WALK_IN -> 0
         isMixedDefaultPrice -> (purifiedQty * settings.purifiedPrice) + (alkalineQty * settings.alkalinePrice)
         else -> (totalGallons * parsedUnitPrice).roundToInt()
     }
+    val rateFormatted = CommissionRateHistory.formatRate(activeCommissionRate)
     val previewCommission = when (paymentType) {
         PaymentType.CASH, PaymentType.BANK_DEPOSIT ->
             CommissionRateHistory.calculateCommissionAmount(totalGallons, activeCommissionRate)
+        PaymentType.PAID_WALK_IN -> if (hasPaidWalkInCommission) {
+            CommissionRateHistory.calculateCommissionAmount(totalGallons, activeCommissionRate)
+        } else {
+            0
+        }
         PaymentType.PAUTANG, PaymentType.PICK_UP -> 0
     }
 
@@ -302,9 +333,100 @@ fun AddDeliverySheet(
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Text(
-                text = if (initialDelivery == null) "Log Delivery / Pick-up" else "Edit Delivery / Pick-up",
+                text = when {
+                    initialDelivery != null -> "Edit Delivery / Pick-up"
+                    isQuickCashAdvanceMode -> "Log Cash Advance"
+                    else -> "Log Delivery / Pick-up"
+                },
                 style = MaterialTheme.typography.titleLarge,
             )
+
+            if (initialDelivery == null && onSaveCashAdvance != null) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    FilterChip(
+                        selected = !isQuickCashAdvanceMode,
+                        onClick = {
+                            isQuickCashAdvanceMode = false
+                            formError = null
+                        },
+                        label = { Text("Delivery / Pick-up") },
+                        modifier = Modifier.testTag("entry_mode_delivery_chip"),
+                    )
+                    FilterChip(
+                        selected = isQuickCashAdvanceMode,
+                        onClick = {
+                            isQuickCashAdvanceMode = true
+                            formError = null
+                        },
+                        label = { Text("Cash Advance") },
+                        modifier = Modifier.testTag("entry_mode_cash_advance_chip"),
+                    )
+                }
+            }
+
+            if (isQuickCashAdvanceMode && onSaveCashAdvance != null) {
+                OutlinedTextField(
+                    value = cashAdvanceAmountText,
+                    onValueChange = {
+                        cashAdvanceAmountText = it.filter(Char::isDigit).take(7)
+                        formError = null
+                    },
+                    label = { Text("Cash Advance Amount (₱)") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("quick_cash_advance_amount_input"),
+                )
+                OutlinedTextField(
+                    value = cashAdvanceNotes,
+                    onValueChange = { cashAdvanceNotes = it.take(300) },
+                    label = { Text("Notes (optional)") },
+                    placeholder = { Text("e.g. Advance mula sa cash remittance") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        text = "Ibebawas ito sa Net Cash to Remit to Boss ngayong araw at sa Net Remaining Commission mo sa Weekly Summary.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier.padding(12.dp),
+                    )
+                }
+                if (formError != null) {
+                    Text(
+                        text = formError ?: "",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                Button(
+                    onClick = {
+                        val amt = cashAdvanceAmountText.toIntOrNull() ?: 0
+                        if (amt <= 0) {
+                            formError = "Enter a Cash Advance amount greater than ₱0."
+                        } else {
+                            onSaveCashAdvance(amt, cashAdvanceNotes)
+                            onDismiss()
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(50.dp)
+                        .testTag("quick_save_cash_advance_button"),
+                ) {
+                    Text("Save Cash Advance", style = MaterialTheme.typography.labelLarge)
+                }
+                return@ModalBottomSheet
+            }
 
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(
@@ -407,12 +529,13 @@ fun AddDeliverySheet(
                     hasManualPriceOverride = true
                     formError = null
                 },
-                enabled = paymentType != PaymentType.PICK_UP,
+                enabled = paymentType != PaymentType.PICK_UP && paymentType != PaymentType.PAID_WALK_IN,
                 label = { Text("Unit Price (₱/gal)") },
                 supportingText = {
                     val savedPrice = matchedCustomer?.lastUnitPrice
                     val hint = when {
                         paymentType == PaymentType.PICK_UP -> "Pick-up entries earn ₱0 remittance & commission"
+                        paymentType == PaymentType.PAID_WALK_IN -> "Paid at station — ₱0 to collect/remit"
                         savedPrice != null && !hasManualPriceOverride ->
                             "Auto-filled from ${matchedCustomer.name}'s saved rate (₱${MinigeCustomerUtils.formatPrice(savedPrice)}/gal)"
                         isMixedDefaultPrice ->
@@ -473,6 +596,15 @@ fun AddDeliverySheet(
                         )
                     }
                     FilterChip(
+                        selected = paymentType == PaymentType.PAID_WALK_IN,
+                        onClick = {
+                            paymentType = PaymentType.PAID_WALK_IN
+                            selectedPaidChannel = null
+                        },
+                        label = { Text(PaymentType.PAID_WALK_IN.label) },
+                        modifier = Modifier.testTag("payment_type_PAID_WALK_IN"),
+                    )
+                    FilterChip(
                         selected = paymentType == PaymentType.PAUTANG,
                         onClick = {
                             paymentType = PaymentType.PAUTANG
@@ -490,6 +622,64 @@ fun AddDeliverySheet(
                         label = { Text(PaymentType.PICK_UP.label) },
                         modifier = Modifier.testTag("payment_type_PICK_UP"),
                     )
+                }
+
+                if (paymentType == PaymentType.PAID_WALK_IN) {
+                    OutlinedCard(
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("paid_walk_in_commission_card"),
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text(
+                                text = "Bayad na sa station (hindi kasama sa Cash to Remit), pero kasama sa Daily Hakot dahil ikaw ang nag-deliver.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            HorizontalDivider()
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .padding(end = 10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                                ) {
+                                    Text(
+                                        text = "May Commission (₱$rateFormatted/gal)",
+                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                                    )
+                                    Text(
+                                        text = if (hasPaidWalkInCommission) {
+                                            "May ₱$rateFormatted/gal commission ka sa delivery na ito."
+                                        } else {
+                                            "Walang commission (₱0) — delivery lang ng paid walk-in order."
+                                        },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = if (hasPaidWalkInCommission) {
+                                            MaterialTheme.colorScheme.primary
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                        },
+                                    )
+                                }
+                                Switch(
+                                    checked = hasPaidWalkInCommission,
+                                    onCheckedChange = { hasPaidWalkInCommission = it },
+                                    modifier = Modifier
+                                        .minimumInteractiveComponentSize()
+                                        .testTag("paid_walk_in_commission_switch"),
+                                )
+                            }
+                        }
+                    }
                 }
             }
 
@@ -533,7 +723,11 @@ fun AddDeliverySheet(
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
                         Text(
-                            text = if (paymentType == PaymentType.PICK_UP) "Remittance Bill" else "Total Bill",
+                            text = when (paymentType) {
+                                PaymentType.PICK_UP -> "Remittance Bill"
+                                PaymentType.PAID_WALK_IN -> "Cash to Collect / Remit"
+                                else -> "Total Bill"
+                            },
                             style = MaterialTheme.typography.bodyMedium,
                         )
                         Text("₱$billAmount", style = MaterialTheme.typography.titleMedium)
@@ -547,7 +741,12 @@ fun AddDeliverySheet(
                             text = when (paymentType) {
                                 PaymentType.PAUTANG -> "₱0 (Awarded on paid gallons)"
                                 PaymentType.PICK_UP -> "₱0 (Pick-up)"
-                                else -> "₱$previewCommission ($totalGallons × ₱${CommissionRateHistory.formatRate(activeCommissionRate)})"
+                                PaymentType.PAID_WALK_IN -> if (hasPaidWalkInCommission) {
+                                    "₱$previewCommission ($totalGallons × ₱$rateFormatted)"
+                                } else {
+                                    "₱0 (Paid Walk-in • No Commission)"
+                                }
+                                else -> "₱$previewCommission ($totalGallons × ₱$rateFormatted)"
                             },
                             style = MaterialTheme.typography.labelLarge,
                             color = MaterialTheme.colorScheme.primary,
@@ -566,15 +765,16 @@ fun AddDeliverySheet(
 
             Button(
                 onClick = {
+                    val isZeroBillMode = paymentType == PaymentType.PICK_UP || paymentType == PaymentType.PAID_WALK_IN
                     val priceToSave = when {
-                        paymentType == PaymentType.PICK_UP -> null
+                        isZeroBillMode -> null
                         isMixedDefaultPrice -> null
                         else -> unitPriceText.toDoubleOrNull()?.takeIf { it >= 0.0 }
                     }
                     when {
                         customerName.isBlank() -> formError = "Please enter the customer name."
                         totalGallons <= 0 -> formError = "Please enter at least 1 gallon."
-                        paymentType != PaymentType.PICK_UP && !isMixedDefaultPrice && priceToSave == null ->
+                        !isZeroBillMode && !isMixedDefaultPrice && priceToSave == null ->
                             formError = "Please enter a valid unit price."
                         else -> {
                             val withChannel = if (paymentType == PaymentType.CASH || paymentType == PaymentType.BANK_DEPOSIT) {
@@ -585,8 +785,16 @@ fun AddDeliverySheet(
                             } else {
                                 PaymentBreakdownHelper.stripChannelTags(notes)
                             }
+                            val withWalkIn = if (paymentType == PaymentType.PAID_WALK_IN) {
+                                PaymentBreakdownHelper.applyPaidWalkInTags(
+                                    notes = withChannel,
+                                    hasCommission = hasPaidWalkInCommission,
+                                )
+                            } else {
+                                PaymentBreakdownHelper.stripPaidWalkInTags(withChannel)
+                            }
                             val withClassification = DeliveryVoiceParser.applyClassificationTag(
-                                notes = withChannel,
+                                notes = withWalkIn,
                                 classification = classification,
                             )
                             val finalNotes = CustomerDirectoryHelper.applyRouteAreaTag(
@@ -600,6 +808,7 @@ fun AddDeliverySheet(
                                 paymentType,
                                 finalNotes,
                                 priceToSave,
+                                if (paymentType == PaymentType.PAID_WALK_IN) hasPaidWalkInCommission else true,
                             )
                             onDismiss()
                         }
@@ -685,11 +894,12 @@ private fun GallonStepperRow(
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun AddExpenseSheet(
+    initialCategory: ExpenseCategory = ExpenseCategory.FOOD,
     onDismiss: () -> Unit,
     onSave: (ExpenseCategory, Int, String) -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var category by remember { mutableStateOf(ExpenseCategory.FOOD) }
+    var category by remember(initialCategory) { mutableStateOf(initialCategory) }
     var amountText by remember { mutableStateOf("") }
     var notes by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
@@ -706,7 +916,7 @@ fun AddExpenseSheet(
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Text(
-                text = "Log Route Expense",
+                text = if (category.isCashAdvance) "Log Cash Advance" else "Log Route Expense",
                 style = MaterialTheme.typography.titleLarge,
             )
 
@@ -720,6 +930,21 @@ fun AddExpenseSheet(
                         onClick = { category = cat },
                         label = { Text(cat.label) },
                         modifier = Modifier.testTag("expense_cat_${cat.name}"),
+                    )
+                }
+            }
+
+            if (category.isCashAdvance) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        text = "Ibebawas ang Cash Advance sa Net Cash to Remit ngayong araw at sa Net Remaining Commission sa Weekly Summary.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier.padding(10.dp),
                     )
                 }
             }
@@ -769,7 +994,10 @@ fun AddExpenseSheet(
                     .height(50.dp)
                     .testTag("save_expense_button"),
             ) {
-                Text("Save Expense", style = MaterialTheme.typography.labelLarge)
+                Text(
+                    text = if (category.isCashAdvance) "Save Cash Advance" else "Save Expense",
+                    style = MaterialTheme.typography.labelLarge,
+                )
             }
         }
     }

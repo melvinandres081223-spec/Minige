@@ -109,6 +109,7 @@ data class MinigeUiState(
         expenses = emptyList(),
     ),
     val bossPickupMessage: String = "",
+    val bossHakotPaidGallons: Int = 0,
     val bossHakotPautangGallons: Int = 0,
     val customers: List<CustomerRecord> = emptyList(),
     val sukiDirectory: List<SukiCustomerProfile> = emptyList(),
@@ -371,6 +372,7 @@ class MinigeViewModel(
             sundayMakeupEnabled = sundayEnabled,
             sundayMakeupDaySummary = sundayMakeupDaySummary,
             bossPickupMessage = hakotReport.message,
+            bossHakotPaidGallons = hakotReport.paidGallons,
             bossHakotPautangGallons = hakotReport.unpaidPautangGallons,
             customers = mergedCustomers,
             sukiDirectory = sukiDirectory,
@@ -470,6 +472,7 @@ class MinigeViewModel(
         paymentType: PaymentType,
         notes: String,
         customUnitPrice: Double? = null,
+        hasCommission: Boolean = true,
     ) {
         val dateKey = MinigeDateUtils.toKey(_selectedDate.value)
         val activeRate = uiState.value.activeCommissionRate
@@ -484,6 +487,7 @@ class MinigeViewModel(
                 notes = notes,
                 customUnitPrice = customUnitPrice,
                 overrideCommissionRate = activeRate,
+                hasCommission = hasCommission,
             )
             val msg = if (result.isSuccess) {
                 "Saved ${customerName.trim()} (${paymentType.label})"
@@ -503,6 +507,7 @@ class MinigeViewModel(
         paymentType: PaymentType,
         notes: String,
         customUnitPrice: Double? = null,
+        hasCommission: Boolean = true,
     ) {
         viewModelScope.launch {
             val previousSnapshot = repository.getDeliverySnapshot(deliveryId)
@@ -515,6 +520,7 @@ class MinigeViewModel(
                 paymentType = paymentType,
                 notes = notes,
                 customUnitPrice = customUnitPrice,
+                hasCommission = hasCommission,
             )
             if (previousSnapshot != null) {
                 val actionMsg = if (previousSnapshot.paymentType != paymentType) {

@@ -73,9 +73,19 @@ object ScreenGuideCatalog {
                     example = "Hal: Cash ₱950 − Gas ₱120 = ₱830 remit",
                 ),
                 GuideItem(
+                    badgeOrButton = "Bank / Online & Paid Walk-in",
+                    taglishExplanation = "Pinagsama na ang Bank Transfer at Bank Deposit sa 'Bank / Online'. Gamitin ang 'Paid Walk-in' kapag nagbayad na sa station/kay Boss ang suki pero ikaw ang nag-deliver (may switch kung may ₱8/gal commission o ₱0).",
+                    example = "Hal: Paid Walk-in • Hindi kasama sa Cash to Remit, pero pasok sa Daily Hakot",
+                ),
+                GuideItem(
+                    badgeOrButton = "+ Cash Advance",
+                    taglishExplanation = "I-log dito ang binawas mong Cash Advance. Awtomatiko itong ibinabawas sa Net Cash to Remit ngayong araw at sa Net Remaining Commission mo sa Weekly tab.",
+                    example = "Hal: + Cash Advance ₱500 → bawas agad sa Weekly Commission",
+                ),
+                GuideItem(
                     badgeOrButton = "Daily Hakot",
-                    taglishExplanation = "1-Tap send kay Boss sa Messenger. Laman nito ang mga bayad at may commission na delivery (Cash, Bank, at bayad na Pautang) ngayong araw—walang presyo (₱), commission, o gastos.",
-                    example = "Hal: Aling Nena — 5 gals • TOTAL: 16 gals",
+                    taglishExplanation = "1-Tap send kay Boss sa Messenger. Laman nito ang bayad na deliveries ngayong araw (Cash, Bank / Online, Paid Walk-in, at bayad na Pautang) pati bagong Pautang ngayong araw—walang presyo (₱), commission, o gastos.",
+                    example = "Hal: DELIVERED PAID TOTAL: 16 gals • PAUTANG TOTAL: 4 gals",
                 ),
                 GuideItem(
                     badgeOrButton = "By Area",
@@ -89,7 +99,7 @@ object ScreenGuideCatalog {
                 ),
                 GuideItem(
                     badgeOrButton = "+ Button & Voice",
-                    taglishExplanation = "1-tap para mag-log ng delivery o pick-up. Pwede ring gamitin ang mic button para magdikta.",
+                    taglishExplanation = "1-tap para mag-log ng delivery, pick-up, o mabilisang Cash Advance. Pwede ring gamitin ang mic button para magdikta.",
                     example = "Hal: Sabihin \"5 outlet pick up Ate Maria\"",
                 ),
             ),
@@ -106,7 +116,7 @@ object ScreenGuideCatalog {
                 ),
                 GuideItem(
                     badgeOrButton = "Partial Pay",
-                    taglishExplanation = "Gamitin kapag ilang galon pa lang ang binabayaran (Cash, Transfer, o Deposit). Agad papasok ang commission para sa mga galong binayaran ngayon.",
+                    taglishExplanation = "Gamitin kapag ilang galon pa lang ang binabayaran (Cash o Bank / Online). Agad papasok ang commission para sa mga galong binayaran ngayon.",
                     example = "Hal: 5 gal utang → 2 gal Partial Pay = +₱16 comm",
                 ),
                 GuideItem(
@@ -131,6 +141,11 @@ object ScreenGuideCatalog {
             screenTitle = "Weekly Screen Guide",
             introTaglish = "Kabuuang lingguhang kita mula Lunes hanggang Sabado (o Linggo).",
             items = listOf(
+                GuideItem(
+                    badgeOrButton = "Net Remaining Commission",
+                    taglishExplanation = "Kinakaltas sa Weekly Total Commission ang kabuuang Cash Advance mo sa linggong ito para kita agad ang natitirang komisyon.",
+                    example = "Hal: ₱2,000 Comm − ₱500 Cash Advance = ₱1,500 Net",
+                ),
                 GuideItem(
                     badgeOrButton = "Outlet vs. Residential",
                     taglishExplanation = "Pinapakita kung ilang galon at commission ang galing sa mga canteen/store (Outlet) kumpara sa bahay (Residential), pati Top Weekly Suki.",

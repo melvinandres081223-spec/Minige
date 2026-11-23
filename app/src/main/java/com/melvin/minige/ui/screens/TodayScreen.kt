@@ -104,6 +104,7 @@ fun TodayScreen(
     onEditDelivery: (DeliveryRecord) -> Unit,
     onDeleteDelivery: (String) -> Unit,
     onAddExpenseClick: () -> Unit,
+    onAddCashAdvanceClick: () -> Unit = {},
     onDeleteExpense: (String) -> Unit,
     onSyncCalendarClick: () -> Unit,
     onBossSendTriggered: (String) -> Unit,
@@ -192,7 +193,7 @@ fun TodayScreen(
             item(key = "boss_pickup_update_card", contentType = "boss_pickup") {
                 BossPickupUpdateCard(
                     pickupMessage = uiState.bossPickupMessage,
-                    totalPaidGallons = uiState.dailySummary.totalPaidGallons,
+                    totalPaidGallons = uiState.bossHakotPaidGallons,
                     totalPautangGallons = uiState.bossHakotPautangGallons,
                     onSendToBoss = {
                         copyAndShareToMessenger(context, uiState.bossPickupMessage)
@@ -209,6 +210,7 @@ fun TodayScreen(
                     isCalendarSyncing = uiState.isCalendarSyncing,
                     onEditSukliClick = onEditSukliClick,
                     onSyncCalendarClick = onSyncCalendarClick,
+                    onAddCashAdvanceClick = onAddCashAdvanceClick,
                 )
             }
 
@@ -360,7 +362,7 @@ fun TodayScreen(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        text = "Route Expenses (${uiState.expensesForDay.size})",
+                        text = "Expenses & Cash Advance (${uiState.expensesForDay.size})",
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier
@@ -388,7 +390,7 @@ fun TodayScreen(
                 item(key = "empty_expenses", contentType = "empty_card") {
                     EmptySectionCard(
                         icon = Icons.AutoMirrored.Rounded.ReceiptLong,
-                        message = "No route expenses logged for this date.",
+                        message = "No route expenses or cash advances logged for this date.",
                     )
                 }
             } else {
@@ -605,8 +607,13 @@ private fun CommissionHeroCard(
             )
 
             val breakdown = uiState.todayPaymentBreakdown
+            val walkInSegment = if (breakdown.paidWalkInGallons > 0) {
+                " • Walk-in: ₱${breakdown.commissionFromPaidWalkIn} (${breakdown.paidWalkInGallons}g)"
+            } else {
+                ""
+            }
             Text(
-                text = "Cash Comm: ₱${breakdown.commissionFromCash} (${breakdown.cashPaidGallons}g) • Bank Comm: ₱${breakdown.commissionFromBank} (${breakdown.bankTransferGallons + breakdown.bankDepositGallons}g)",
+                text = "Cash: ₱${breakdown.commissionFromCash} (${breakdown.cashPaidGallons}g) • Bank / Online: ₱${breakdown.commissionFromBank} (${breakdown.bankOnlineGallons}g)$walkInSegment",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f),
             )
@@ -825,6 +832,11 @@ private fun DeliveryRowCard(
 
                 val subStatus = when (delivery.paymentType) {
                     PaymentType.PICK_UP -> "Pick-up only • ₱0 commission"
+                    PaymentType.PAID_WALK_IN -> if (delivery.hasPaidWalkInCommission) {
+                        "Paid Walk-in • ₱0 cash remit • Comm: ₱${delivery.commissionEarned}"
+                    } else {
+                        "Paid Walk-in • ₱0 cash remit • ₱0 comm"
+                    }
                     PaymentType.PAUTANG -> if (delivery.isUtangFullyPaid) {
                         "Utang Paid • Commission: ₱${delivery.commissionEarned} (${delivery.settledDateKey})"
                     } else {
@@ -869,6 +881,7 @@ private fun ExpenseRowCard(
     expense: ExpenseRecord,
     onDelete: () -> Unit,
 ) {
+    val isCashAdvance = expense.category.isCashAdvance
     OutlinedCard(
         shape = RoundedCornerShape(16.dp),
         modifier = Modifier.fillMaxWidth(),
@@ -879,8 +892,29 @@ private fun ExpenseRowCard(
                 .padding(start = 14.dp, top = 10.dp, bottom = 10.dp, end = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(expense.category.label, style = MaterialTheme.typography.titleMedium)
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(expense.category.label, style = MaterialTheme.typography.titleMedium)
+                    if (isCashAdvance) {
+                        Surface(
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.tertiaryContainer,
+                        ) {
+                            Text(
+                                text = "Deducts Remit & Weekly",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                            )
+                        }
+                    }
+                }
                 if (expense.notes.isNotBlank()) {
                     Text(
                         text = expense.notes,
@@ -898,7 +932,7 @@ private fun ExpenseRowCard(
                 onClick = onDelete,
                 modifier = Modifier.size(48.dp),
             ) {
-                Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete expense")
+                Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete ${expense.category.label}")
             }
         }
     }

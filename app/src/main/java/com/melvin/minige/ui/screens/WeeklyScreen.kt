@@ -102,10 +102,27 @@ fun WeeklyScreen(
                             color = MaterialTheme.colorScheme.onPrimaryContainer,
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.15f))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = "Cash Advance: -₱${weekly.totalCashAdvance}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.9f),
+                            )
+                            Text(
+                                text = "Net Remaining: ₱${weekly.netRemainingCommission}",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.testTag("weekly_net_remaining_commission"),
+                            )
+                        }
                         Text(
-                            text = "Cash: ₱${weekly.totalCashCollected} • Bank: ₱${weekly.totalBankDeposit} • Expenses: ₱${weekly.totalExpenses}",
+                            text = "Cash: ₱${weekly.totalCashCollected} • Bank / Online: ₱${weekly.totalBankDeposit} • Exp: ₱${weekly.totalExpenses}",
                             style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.9f),
                         )
                     }
                 }
@@ -197,8 +214,9 @@ fun WeeklyScreen(
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
+                            val advText = if (day.cashAdvance > 0) " • Adv ₱${day.cashAdvance}" else ""
                             Text(
-                                text = "Cash ₱${day.cashCollected} • Bank ₱${day.bankDeposit} • Exp ₱${day.expenses} • Pick-up ${day.pickupGallons}g",
+                                text = "Cash ₱${day.cashCollected} • Bank ₱${day.bankDeposit} • Exp ₱${day.expenses}$advText • Pick-up ${day.pickupGallons}g",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1,

@@ -24,9 +24,13 @@ import com.melvin.minige.auth.DriveAuthResult
 import com.melvin.minige.auth.GoogleAuthManager
 import com.melvin.minige.domain.BossPickupFormatter
 import com.melvin.minige.domain.DeliveryRecord
+import com.melvin.minige.domain.ExpenseCategory
 import com.melvin.minige.domain.PaymentType
 import com.melvin.minige.domain.UtangMethod
 import com.melvin.minige.domain.UtangPaymentRecord
+import com.melvin.minige.data.remote.FirestoreDelivery
+import com.melvin.minige.data.remote.FirestoreExpense
+import com.melvin.minige.data.remote.toFirestoreCreateMap
 import com.melvin.minige.sync.BackupAppPreferences
 import com.melvin.minige.sync.BackupMetadata
 import com.melvin.minige.sync.DriveBackupManager
@@ -720,7 +724,7 @@ class ExampleRobolectricTest {
         assertTrue(formatted.contains("Kuya Ben Settled"))
         assertTrue(formatted.contains("3 gals"))
         assertTrue(formatted.contains("Mang Tomas Partial"))
-        assertTrue(formatted.contains("PAID TOTAL:"))
+        assertTrue(formatted.contains("DELIVERED PAID TOTAL:"))
         assertTrue(formatted.contains("21 gals"))
 
         assertTrue(formatted.contains("📋 PAUTANG DELIVERED TODAY"))
@@ -1064,6 +1068,132 @@ class ExampleRobolectricTest {
             DriveBackupManager.tokenProviderForTest = null
             DriveBackupManager.openConnectionForTest = null
             DriveBackupManager.clearCachedToken(context, "u_consent")
+            db.close()
+        }
+    }
+
+    @Test
+    fun `repository and firestore models round trip Paid Walk-in and Cash Advance while respecting firestore rules enums`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        if (FirebaseApp.getApps(context).isEmpty()) {
+            FirebaseApp.initializeApp(
+                context,
+                FirebaseOptions.Builder()
+                    .setProjectId("minige-f6338")
+                    .setApplicationId("1:466130893778:android:c5d0d190ec29d4fb2be60b")
+                    .setApiKey("AIzaSyFakeKeyForRobolectricTest")
+                    .build()
+            )
+        }
+        val db = Room.inMemoryDatabaseBuilder(context, MinigeDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        try {
+            val dao = db.minigeDao()
+            val firestore = FirebaseFirestore.getInstance()
+            val remote = MinigeFirestoreDataSource(firestore)
+            val repo = MinigeRepository(
+                dao = dao,
+                remote = remote,
+                pricingRepository = PricingRepository(dao, remote),
+            )
+            dao.upsertSettings(
+                AppSettingsEntity(
+                    id = "default",
+                    userId = "rider_walkin",
+                    purifiedPrice = 30,
+                    alkalinePrice = 40,
+                    commissionRate = 8,
+                    defaultSukli = 0,
+                    pendingSync = false,
+                    updatedAtEpochMs = 1L,
+                )
+            )
+
+            // 1) Add Paid Walk-in WITH commission
+            repo.addDelivery(
+                userId = "rider_walkin",
+                dateKey = "2026-11-24",
+                customerName = "Station Suki",
+                purifiedGallons = 5,
+                alkalineGallons = 0,
+                paymentType = PaymentType.PAID_WALK_IN,
+                notes = "[Paid Walk-in]",
+                hasCommission = true,
+            )
+            // 2) Add Paid Walk-in WITHOUT commission
+            repo.addDelivery(
+                userId = "rider_walkin",
+                dateKey = "2026-11-24",
+                customerName = "Boss Friend",
+                purifiedGallons = 3,
+                alkalineGallons = 0,
+                paymentType = PaymentType.PAID_WALK_IN,
+                notes = "[Paid Walk-in] [No Commission]",
+                hasCommission = false,
+            )
+            // 3) Add Cash Advance expense
+            repo.addExpense(
+                userId = "rider_walkin",
+                dateKey = "2026-11-24",
+                category = ExpenseCategory.CASH_ADVANCE,
+                amount = 250,
+                notes = "Afternoon cash advance",
+            )
+
+            val savedDeliveries = dao.getAllDeliveriesOnce("rider_walkin")
+            assertEquals(2, savedDeliveries.size)
+            val withCommEntity = savedDeliveries.first { it.customerName == "Station Suki" }
+            val noCommEntity = savedDeliveries.first { it.customerName == "Boss Friend" }
+
+            assertEquals(0, withCommEntity.totalAmount)
+            assertEquals(0, withCommEntity.amountPaid)
+            assertEquals(40, withCommEntity.commissionEarned) // 5 * 8
+            assertEquals(0, noCommEntity.commissionEarned)
+            assertTrue(withCommEntity.toDomain().hasPaidWalkInCommission)
+            assertFalse(noCommEntity.toDomain().hasPaidWalkInCommission)
+
+            // Verify Firestore rule enum compliance + round-trip
+            val fsDeliveryMap = withCommEntity.toFirestoreCreateMap(uid = "rider_walkin")
+            assertEquals("BANK_DEPOSIT", fsDeliveryMap["paymentType"])
+            assertTrue((fsDeliveryMap["notes"] as String).contains("[Paid Walk-in]"))
+            val parsedFsDelivery = FirestoreDelivery(
+                id = withCommEntity.id,
+                userId = withCommEntity.userId,
+                dateKey = withCommEntity.dateKey,
+                customerName = withCommEntity.customerName,
+                purifiedGallons = withCommEntity.purifiedGallons.toLong(),
+                alkalineGallons = withCommEntity.alkalineGallons.toLong(),
+                purifiedUnitPrice = withCommEntity.purifiedUnitPrice.toLong(),
+                alkalineUnitPrice = withCommEntity.alkalineUnitPrice.toLong(),
+                totalAmount = withCommEntity.totalAmount.toLong(),
+                amountPaid = withCommEntity.amountPaid.toLong(),
+                paymentType = fsDeliveryMap["paymentType"] as String,
+                commissionRate = withCommEntity.commissionRate.toLong(),
+                commissionEarned = withCommEntity.commissionEarned.toLong(),
+                settledDateKey = withCommEntity.settledDateKey,
+                notes = fsDeliveryMap["notes"] as String,
+                calendarEventId = null,
+            ).toEntity()
+            assertEquals(PaymentType.PAID_WALK_IN, parsedFsDelivery.toDomain().paymentType)
+
+            val savedExpense = dao.getAllExpensesOnce("rider_walkin").single()
+            assertEquals(ExpenseCategory.CASH_ADVANCE, savedExpense.toDomain().category)
+            assertEquals("Afternoon cash advance", savedExpense.toDomain().notes)
+            val fsExpenseMap = savedExpense.toFirestoreCreateMap(uid = "rider_walkin")
+            assertEquals("FOOD", fsExpenseMap["category"])
+            assertTrue((fsExpenseMap["notes"] as String).contains("[Cash Advance]"))
+            val parsedFsExpense = FirestoreExpense(
+                id = savedExpense.id,
+                userId = savedExpense.userId,
+                dateKey = savedExpense.dateKey,
+                category = fsExpenseMap["category"] as String,
+                amount = savedExpense.amount.toLong(),
+                notes = fsExpenseMap["notes"] as String,
+            ).toEntity()
+            assertEquals(ExpenseCategory.CASH_ADVANCE, parsedFsExpense.toDomain().category)
+            assertEquals("Afternoon cash advance", parsedFsExpense.toDomain().notes)
+        } finally {
             db.close()
         }
     }

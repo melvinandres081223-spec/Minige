@@ -10,19 +10,28 @@ import java.util.Locale
 
 enum class PaymentType(val label: String) {
     CASH("Cash"),
-    BANK_DEPOSIT("Bank Deposit"),
+    BANK_DEPOSIT("Bank / Online"),
+    PAID_WALK_IN("Paid Walk-in"),
     PAUTANG("Pautang"),
     PICK_UP("Na-pick up");
 
     companion object {
         fun fromRaw(raw: String): PaymentType =
             entries.firstOrNull { it.name == raw } ?: CASH
+
+        fun fromEntityRaw(raw: String, notes: String): PaymentType {
+            return if (raw == PAID_WALK_IN.name || notes.contains("[Paid Walk-in]", ignoreCase = true)) {
+                PAID_WALK_IN
+            } else {
+                fromRaw(raw)
+            }
+        }
     }
 }
 
 enum class UtangMethod(val label: String) {
     CASH("Cash"),
-    BANK_DEPOSIT("Bank Deposit");
+    BANK_DEPOSIT("Bank / Online");
 
     companion object {
         fun fromRaw(raw: String): UtangMethod =
@@ -34,11 +43,23 @@ enum class ExpenseCategory(val label: String) {
     FOOD("Food"),
     GAS("Gas"),
     VULCANIZING("Vulcanizing"),
-    MOTOR_REPAIR("Motor Repair");
+    MOTOR_REPAIR("Motor Repair"),
+    CASH_ADVANCE("Cash Advance");
+
+    val isCashAdvance: Boolean
+        get() = this == CASH_ADVANCE
 
     companion object {
         fun fromRaw(raw: String): ExpenseCategory =
             entries.firstOrNull { it.name == raw } ?: FOOD
+
+        fun fromEntityRaw(raw: String, notes: String): ExpenseCategory {
+            return if (raw == CASH_ADVANCE.name || notes.contains("[Cash Advance]", ignoreCase = true)) {
+                CASH_ADVANCE
+            } else {
+                fromRaw(raw)
+            }
+        }
     }
 }
 
@@ -76,6 +97,11 @@ data class DeliveryRecord(
 
     val isUtangFullyPaid: Boolean
         get() = paymentType == PaymentType.PAUTANG && remainingBalance == 0
+
+    val hasPaidWalkInCommission: Boolean
+        get() = paymentType == PaymentType.PAID_WALK_IN &&
+            commissionEarned > 0 &&
+            !notes.contains("[No Commission]", ignoreCase = true)
 }
 
 @Immutable
@@ -171,6 +197,7 @@ data class DailySummary(
     val netCashRemit: Int,
     val cashOnHand: Int,
     val effectiveRateDisplay: Int?,
+    val cashAdvanceTotal: Int = 0,
 )
 
 @Immutable
@@ -183,6 +210,7 @@ data class WeeklyDaySummary(
     val bankDeposit: Int,
     val expenses: Int,
     val pickupGallons: Int,
+    val cashAdvance: Int = 0,
 )
 
 @Immutable
@@ -195,7 +223,11 @@ data class WeeklySummary(
     val totalBankDeposit: Int,
     val totalExpenses: Int,
     val days: List<WeeklyDaySummary>,
-)
+    val totalCashAdvance: Int = 0,
+) {
+    val netRemainingCommission: Int
+        get() = totalCommission - totalCashAdvance
+}
 
 object MinigeDateUtils {
     private val keyFormatter = DateTimeFormatter.ISO_LOCAL_DATE
@@ -229,7 +261,9 @@ object MinigeCalculator {
         val deliveriesForDate = deliveries.filter { it.dateKey == dateKey }
 
         val directPaidDeliveries = deliveriesForDate.filter {
-            it.paymentType == PaymentType.CASH || it.paymentType == PaymentType.BANK_DEPOSIT
+            it.paymentType == PaymentType.CASH ||
+                it.paymentType == PaymentType.BANK_DEPOSIT ||
+                it.paymentType == PaymentType.PAID_WALK_IN
         }
         val directPaidGallons = directPaidDeliveries.sumOf { it.totalGallons }
         val directCommission = directPaidDeliveries.sumOf { it.commissionEarned }
@@ -265,6 +299,7 @@ object MinigeCalculator {
             .filter { it.paymentType == PaymentType.PAUTANG && !it.isUtangFullyPaid }
             .sumOf { it.totalGallons }
 
+        // Paid Walk-in NEVER adds to cashCollected or bankDepositTotal (paid directly at station/to boss)
         val directCash = deliveriesForDate
             .filter { it.paymentType == PaymentType.CASH }
             .sumOf { it.amountPaid }
@@ -281,17 +316,25 @@ object MinigeCalculator {
             .sumOf { it.amount }
         val bankDepositTotal = directBank + utangBank
 
-        val expensesTotal = expenses
-            .filter { it.dateKey == dateKey }
+        val entriesForDate = expenses.filter { it.dateKey == dateKey }
+        val expensesTotal = entriesForDate
+            .filter { !it.category.isCashAdvance }
+            .sumOf { it.amount }
+        val cashAdvanceTotal = entriesForDate
+            .filter { it.category.isCashAdvance }
             .sumOf { it.amount }
 
-        val netCashRemit = cashCollected - expensesTotal
+        val netCashRemit = cashCollected - expensesTotal - cashAdvanceTotal
         val cashOnHand = startingSukli + netCashRemit
 
+        val hasZeroCommWalkIn = directPaidDeliveries.any {
+            it.paymentType == PaymentType.PAID_WALK_IN && it.commissionEarned == 0 && it.totalGallons > 0
+        }
         val distinctRates = (directPaidDeliveries + settledUtangToday)
+            .filter { it.commissionEarned > 0 }
             .map { it.commissionRate }
             .distinct()
-        val effectiveRate = if (distinctRates.size == 1) distinctRates.first() else null
+        val effectiveRate = if (!hasZeroCommWalkIn && distinctRates.size == 1) distinctRates.first() else null
 
         return DailySummary(
             dateKey = dateKey,
@@ -308,6 +351,7 @@ object MinigeCalculator {
             netCashRemit = netCashRemit,
             cashOnHand = cashOnHand,
             effectiveRateDisplay = effectiveRate,
+            cashAdvanceTotal = cashAdvanceTotal,
         )
     }
 
@@ -336,6 +380,7 @@ object MinigeCalculator {
                 bankDeposit = daily.bankDepositTotal,
                 expenses = daily.expensesTotal,
                 pickupGallons = daily.pickupGallons,
+                cashAdvance = daily.cashAdvanceTotal,
             )
         }
         return WeeklySummary(
@@ -347,6 +392,7 @@ object MinigeCalculator {
             totalBankDeposit = daySummaries.sumOf { it.bankDeposit },
             totalExpenses = daySummaries.sumOf { it.expenses },
             days = daySummaries,
+            totalCashAdvance = daySummaries.sumOf { it.cashAdvance },
         )
     }
 }
@@ -382,14 +428,14 @@ object BossPickupFormatter {
     /**
      * Generates the Boss-facing Daily Hakot report containing two clearly separated sections
      * for [date]:
-     * 1) Paid / commission-earning delivered gallons (`CASH`, `BANK_DEPOSIT` / Bank Transfer,
-     *    partial-gallon `PAUTANG` payments collected on `dateKey`, and settled `PAUTANG` remainder
-     *    gallons with `settledDateKey == dateKey`).
+     * 1) Paid / Delivered gallons (`CASH`, `BANK_DEPOSIT` / Bank / Online, `PAID_WALK_IN` whether
+     *    commission is ON or OFF, partial-gallon `PAUTANG` payments collected on `dateKey`, and
+     *    settled `PAUTANG` remainder gallons with `settledDateKey == dateKey`).
      * 2) Unpaid `PAUTANG` deliveries created/delivered on `dateKey` (`!isUtangFullyPaid`), showing
      *    remaining unpaid gallons if a partial-gallon payment already happened on `dateKey`.
      *
      * Strictly excludes `PICK_UP` entries, peso signs (`₱`), unit prices, commissions,
-     * cash remittance, and sukli.
+     * cash remittance, cash advances, and sukli.
      */
     fun format(
         date: LocalDate,
@@ -407,11 +453,13 @@ object BossPickupFormatter {
 
         val paidRows = mutableListOf<HakotRow>()
 
-        // 1) Direct paid deliveries on selected date
+        // 1) Direct paid deliveries on selected date (Cash, Bank / Online, Paid Walk-in)
         deliveries
             .filter {
                 it.dateKey == dateKey &&
-                    (it.paymentType == PaymentType.CASH || it.paymentType == PaymentType.BANK_DEPOSIT) &&
+                    (it.paymentType == PaymentType.CASH ||
+                        it.paymentType == PaymentType.BANK_DEPOSIT ||
+                        it.paymentType == PaymentType.PAID_WALK_IN) &&
                     it.totalGallons > 0
             }
             .forEach { entry ->
@@ -494,12 +542,14 @@ object BossPickupFormatter {
         val grandTotalGals = paidTotalGals + pautangTotalGals
 
         val separator = " — "
-        val paidTotalPrefix = "PAID TOTAL:"
+        val paidTotalPrefix = "DELIVERED PAID TOTAL:"
         val pautangTotalPrefix = "PAUTANG TOTAL:"
         val grandTotalPrefix = "GRAND TOTAL:"
 
-        // Ensure minimum name column width accommodates longest total prefix ("PAUTANG TOTAL:" = 14) + 1 space
-        val nameColWidth = (allRows.maxOfOrNull { it.customerName.length } ?: 0).coerceAtLeast(12)
+        // Ensure name column accommodates longest total prefix ("DELIVERED PAID TOTAL:" = 21) + 1 space
+        val minNameColForTotals = (paidTotalPrefix.length - separator.length + 1).coerceAtLeast(12)
+        val nameColWidth = (allRows.maxOfOrNull { it.customerName.length } ?: 0)
+            .coerceAtLeast(minNameColForTotals)
         val countColWidth = maxOf(
             grandTotalGals.toString().length,
             paidTotalGals.toString().length,

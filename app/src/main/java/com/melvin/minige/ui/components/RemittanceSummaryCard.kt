@@ -14,6 +14,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ReceiptLong
 import androidx.compose.material.icons.rounded.AccountBalance
+import androidx.compose.material.icons.rounded.AccountBalanceWallet
+import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.CalendarToday
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Payments
@@ -45,6 +47,7 @@ fun RemittanceSummaryCard(
     isCalendarSyncing: Boolean,
     onEditSukliClick: () -> Unit,
     onSyncCalendarClick: () -> Unit,
+    onAddCashAdvanceClick: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     OutlinedCard(
@@ -105,6 +108,58 @@ fun RemittanceSummaryCard(
                 label = "Route Expenses",
                 value = "-₱${breakdown.cashExpenses}",
             )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.AccountBalanceWallet,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.tertiary,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Text(
+                        text = "Cash Advance",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    FilledTonalButton(
+                        onClick = onAddCashAdvanceClick,
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        modifier = Modifier
+                            .defaultMinSize(minHeight = 48.dp)
+                            .testTag("add_cash_advance_button"),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Add,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Cash Advance",
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1,
+                            softWrap = false,
+                        )
+                    }
+                    Text(
+                        text = "-₱${breakdown.cashAdvanceTotal}",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = if (breakdown.cashAdvanceTotal > 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                    )
+                }
+            }
 
             Surface(
                 shape = RoundedCornerShape(12.dp),
@@ -132,7 +187,7 @@ fun RemittanceSummaryCard(
                                 modifier = Modifier.size(18.dp),
                             )
                             Text(
-                                text = "Bank-Paid (Boss)",
+                                text = "Bank / Online (Boss)",
                                 style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
@@ -147,10 +202,17 @@ fun RemittanceSummaryCard(
                         )
                     }
                     Text(
-                        text = "Transfer: ₱${breakdown.bankTransferAmount} (${breakdown.bankTransferGallons}g) • Deposit: ₱${breakdown.bankDepositAmount} (${breakdown.bankDepositGallons}g) • Comm: ₱${breakdown.commissionFromBank}",
+                        text = "Bank / Online: ₱${breakdown.bankPaidTotal} (${breakdown.bankOnlineGallons}g) • Comm: ₱${breakdown.commissionFromBank}",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    if (breakdown.paidWalkInGallons > 0) {
+                        Text(
+                            text = "Paid Walk-in: ${breakdown.paidWalkInGallons}g (₱0 cash remit) • Comm: ₱${breakdown.commissionFromPaidWalkIn}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
                 }
             }
 

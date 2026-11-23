@@ -12,6 +12,9 @@ import com.melvin.minige.data.local.DailyLedgerEntity
 import com.melvin.minige.data.local.DeliveryEntity
 import com.melvin.minige.data.local.ExpenseEntity
 import com.melvin.minige.data.local.UtangPaymentEntity
+import com.melvin.minige.domain.ExpenseCategory
+import com.melvin.minige.domain.PaymentType
+import com.melvin.minige.util.PaymentBreakdownHelper
 
 @Keep
 @IgnoreExtraProperties
@@ -35,28 +38,42 @@ data class FirestoreDelivery(
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null,
 ) {
-    fun toEntity(pendingSync: Boolean = false): DeliveryEntity = DeliveryEntity(
-        id = id,
-        userId = userId,
-        dateKey = dateKey,
-        customerName = customerName,
-        purifiedGallons = purifiedGallons.toInt(),
-        alkalineGallons = alkalineGallons.toInt(),
-        purifiedUnitPrice = purifiedUnitPrice.toInt(),
-        alkalineUnitPrice = alkalineUnitPrice.toInt(),
-        totalAmount = totalAmount.toInt(),
-        amountPaid = amountPaid.toInt(),
-        paymentType = paymentType,
-        commissionRate = commissionRate.toInt(),
-        commissionEarned = commissionEarned.toInt(),
-        settledDateKey = settledDateKey,
-        notes = notes,
-        calendarEventId = calendarEventId,
-        pendingSync = pendingSync,
-        isDeleted = false,
-        createdAtEpochMs = createdAt?.toDate()?.time ?: System.currentTimeMillis(),
-        updatedAtEpochMs = updatedAt?.toDate()?.time ?: System.currentTimeMillis(),
-    )
+    fun toEntity(pendingSync: Boolean = false): DeliveryEntity {
+        val isWalkIn = paymentType == PaymentType.PAID_WALK_IN.name ||
+            PaymentBreakdownHelper.isPaidWalkInTagged(notes)
+        val cleanNotes = if (isWalkIn) {
+            val hasComm = !PaymentBreakdownHelper.hasNoCommissionTag(notes) && commissionEarned > 0L
+            PaymentBreakdownHelper.applyPaidWalkInTags(
+                notes = notes,
+                hasCommission = hasComm,
+                includeTypeTagForCloud = false,
+            )
+        } else {
+            notes
+        }
+        return DeliveryEntity(
+            id = id,
+            userId = userId,
+            dateKey = dateKey,
+            customerName = customerName,
+            purifiedGallons = purifiedGallons.toInt(),
+            alkalineGallons = alkalineGallons.toInt(),
+            purifiedUnitPrice = purifiedUnitPrice.toInt(),
+            alkalineUnitPrice = alkalineUnitPrice.toInt(),
+            totalAmount = totalAmount.toInt(),
+            amountPaid = amountPaid.toInt(),
+            paymentType = if (isWalkIn) PaymentType.PAID_WALK_IN.name else paymentType,
+            commissionRate = commissionRate.toInt(),
+            commissionEarned = commissionEarned.toInt(),
+            settledDateKey = settledDateKey,
+            notes = cleanNotes,
+            calendarEventId = calendarEventId,
+            pendingSync = pendingSync,
+            isDeleted = false,
+            createdAtEpochMs = createdAt?.toDate()?.time ?: System.currentTimeMillis(),
+            updatedAtEpochMs = updatedAt?.toDate()?.time ?: System.currentTimeMillis(),
+        )
+    }
 }
 
 @Keep
@@ -98,18 +115,22 @@ data class FirestoreExpense(
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null,
 ) {
-    fun toEntity(pendingSync: Boolean = false): ExpenseEntity = ExpenseEntity(
-        id = id,
-        userId = userId,
-        dateKey = dateKey,
-        category = category,
-        amount = amount.toInt(),
-        notes = notes,
-        pendingSync = pendingSync,
-        isDeleted = false,
-        createdAtEpochMs = createdAt?.toDate()?.time ?: System.currentTimeMillis(),
-        updatedAtEpochMs = updatedAt?.toDate()?.time ?: System.currentTimeMillis(),
-    )
+    fun toEntity(pendingSync: Boolean = false): ExpenseEntity {
+        val isAdvance = category == ExpenseCategory.CASH_ADVANCE.name ||
+            PaymentBreakdownHelper.isCashAdvanceTagged(notes)
+        return ExpenseEntity(
+            id = id,
+            userId = userId,
+            dateKey = dateKey,
+            category = if (isAdvance) ExpenseCategory.CASH_ADVANCE.name else category,
+            amount = amount.toInt(),
+            notes = if (isAdvance) PaymentBreakdownHelper.stripCashAdvanceTag(notes) else notes,
+            pendingSync = pendingSync,
+            isDeleted = false,
+            createdAtEpochMs = createdAt?.toDate()?.time ?: System.currentTimeMillis(),
+            updatedAtEpochMs = updatedAt?.toDate()?.time ?: System.currentTimeMillis(),
+        )
+    }
 }
 
 @Keep
@@ -158,6 +179,18 @@ data class FirestoreUserSettings(
 }
 
 internal fun DeliveryEntity.toFirestoreCreateMap(uid: String): Map<String, Any> = buildMap {
+    val isWalkIn = paymentType == PaymentType.PAID_WALK_IN.name
+    val firestorePaymentType = if (isWalkIn) PaymentType.BANK_DEPOSIT.name else paymentType
+    val firestoreNotes = if (isWalkIn) {
+        val hasComm = !PaymentBreakdownHelper.hasNoCommissionTag(notes) && commissionEarned > 0
+        PaymentBreakdownHelper.applyPaidWalkInTags(
+            notes = notes,
+            hasCommission = hasComm,
+            includeTypeTagForCloud = true,
+        )
+    } else {
+        notes.take(300)
+    }
     put("userId", uid)
     put("dateKey", dateKey)
     put("customerName", customerName.take(80))
@@ -167,17 +200,29 @@ internal fun DeliveryEntity.toFirestoreCreateMap(uid: String): Map<String, Any> 
     put("alkalineUnitPrice", alkalineUnitPrice.toLong())
     put("totalAmount", totalAmount.toLong())
     put("amountPaid", amountPaid.toLong())
-    put("paymentType", paymentType)
+    put("paymentType", firestorePaymentType)
     put("commissionRate", commissionRate.toLong())
     put("commissionEarned", commissionEarned.toLong())
     settledDateKey?.let { put("settledDateKey", it) }
-    put("notes", notes.take(300))
+    put("notes", firestoreNotes)
     calendarEventId?.let { put("calendarEventId", it) }
     put("createdAt", FieldValue.serverTimestamp())
     put("updatedAt", FieldValue.serverTimestamp())
 }
 
 internal fun DeliveryEntity.toFirestoreUpdateMap(): Map<String, Any> = buildMap {
+    val isWalkIn = paymentType == PaymentType.PAID_WALK_IN.name
+    val firestorePaymentType = if (isWalkIn) PaymentType.BANK_DEPOSIT.name else paymentType
+    val firestoreNotes = if (isWalkIn) {
+        val hasComm = !PaymentBreakdownHelper.hasNoCommissionTag(notes) && commissionEarned > 0
+        PaymentBreakdownHelper.applyPaidWalkInTags(
+            notes = notes,
+            hasCommission = hasComm,
+            includeTypeTagForCloud = true,
+        )
+    } else {
+        notes.take(300)
+    }
     put("dateKey", dateKey)
     put("customerName", customerName.take(80))
     put("purifiedGallons", purifiedGallons.toLong())
@@ -186,11 +231,11 @@ internal fun DeliveryEntity.toFirestoreUpdateMap(): Map<String, Any> = buildMap 
     put("alkalineUnitPrice", alkalineUnitPrice.toLong())
     put("totalAmount", totalAmount.toLong())
     put("amountPaid", amountPaid.toLong())
-    put("paymentType", paymentType)
+    put("paymentType", firestorePaymentType)
     put("commissionRate", commissionRate.toLong())
     put("commissionEarned", commissionEarned.toLong())
     settledDateKey?.let { put("settledDateKey", it) }
-    put("notes", notes.take(300))
+    put("notes", firestoreNotes)
     calendarEventId?.let { put("calendarEventId", it) }
     put("updatedAt", FieldValue.serverTimestamp())
 }
@@ -214,23 +259,29 @@ internal fun UtangPaymentEntity.toFirestoreUpdateMap(): Map<String, Any> = mapOf
     "updatedAt" to FieldValue.serverTimestamp(),
 )
 
-internal fun ExpenseEntity.toFirestoreCreateMap(uid: String): Map<String, Any> = mapOf(
-    "userId" to uid,
-    "dateKey" to dateKey,
-    "category" to category,
-    "amount" to amount.toLong(),
-    "notes" to notes.take(300),
-    "createdAt" to FieldValue.serverTimestamp(),
-    "updatedAt" to FieldValue.serverTimestamp(),
-)
+internal fun ExpenseEntity.toFirestoreCreateMap(uid: String): Map<String, Any> {
+    val isAdvance = category == ExpenseCategory.CASH_ADVANCE.name
+    return mapOf(
+        "userId" to uid,
+        "dateKey" to dateKey,
+        "category" to if (isAdvance) ExpenseCategory.FOOD.name else category,
+        "amount" to amount.toLong(),
+        "notes" to if (isAdvance) PaymentBreakdownHelper.applyCashAdvanceTag(notes) else notes.take(300),
+        "createdAt" to FieldValue.serverTimestamp(),
+        "updatedAt" to FieldValue.serverTimestamp(),
+    )
+}
 
-internal fun ExpenseEntity.toFirestoreUpdateMap(): Map<String, Any> = mapOf(
-    "dateKey" to dateKey,
-    "category" to category,
-    "amount" to amount.toLong(),
-    "notes" to notes.take(300),
-    "updatedAt" to FieldValue.serverTimestamp(),
-)
+internal fun ExpenseEntity.toFirestoreUpdateMap(): Map<String, Any> {
+    val isAdvance = category == ExpenseCategory.CASH_ADVANCE.name
+    return mapOf(
+        "dateKey" to dateKey,
+        "category" to if (isAdvance) ExpenseCategory.FOOD.name else category,
+        "amount" to amount.toLong(),
+        "notes" to if (isAdvance) PaymentBreakdownHelper.applyCashAdvanceTag(notes) else notes.take(300),
+        "updatedAt" to FieldValue.serverTimestamp(),
+    )
+}
 
 internal fun DailyLedgerEntity.toFirestoreCreateMap(uid: String): Map<String, Any> = mapOf(
     "userId" to uid,

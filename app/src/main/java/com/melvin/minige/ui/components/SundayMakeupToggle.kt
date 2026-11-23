@@ -73,6 +73,7 @@ object SundayMakeupHelper {
             bankDeposit = daily.bankDepositTotal,
             expenses = daily.expensesTotal,
             pickupGallons = daily.pickupGallons,
+            cashAdvance = daily.cashAdvanceTotal,
         )
     }
 
@@ -92,6 +93,7 @@ object SundayMakeupHelper {
             totalBankDeposit = days.sumOf { it.bankDeposit },
             totalExpenses = days.sumOf { it.expenses },
             days = days,
+            totalCashAdvance = days.sumOf { it.cashAdvance },
         )
     }
 }

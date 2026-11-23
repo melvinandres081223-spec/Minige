@@ -22,6 +22,7 @@ import com.melvin.minige.util.BulkUtangSettlementSummary
 import com.melvin.minige.util.CommissionRateHistory
 import com.melvin.minige.util.PaidChannel
 import com.melvin.minige.util.PartialPaymentHelper
+import com.melvin.minige.util.PaymentBreakdownHelper
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
@@ -328,6 +329,7 @@ class MinigeRepository(
         notes: String,
         customUnitPrice: Double? = null,
         overrideCommissionRate: Double? = null,
+        hasCommission: Boolean = true,
     ): Result<Unit> {
         val cleanName = customerName.trim().take(80)
         val totalGals = purifiedGallons + alkalineGallons
@@ -351,14 +353,14 @@ class MinigeRepository(
         }
 
         val totalBill = when {
-            paymentType == PaymentType.PICK_UP -> 0
+            paymentType == PaymentType.PICK_UP || paymentType == PaymentType.PAID_WALK_IN -> 0
             validCustomPrice != null -> (totalGals * validCustomPrice).roundToInt()
             else -> (purifiedGallons * usedPurifiedPrice) + (alkalineGallons * usedAlkalinePrice)
         }
 
         val amountPaid = when (paymentType) {
             PaymentType.CASH, PaymentType.BANK_DEPOSIT -> totalBill
-            PaymentType.PAUTANG, PaymentType.PICK_UP -> 0
+            PaymentType.PAID_WALK_IN, PaymentType.PAUTANG, PaymentType.PICK_UP -> 0
         }
 
         val effectiveRate = overrideCommissionRate ?: settings.commissionRate.toDouble()
@@ -366,12 +368,20 @@ class MinigeRepository(
         val commissionEarned = when (paymentType) {
             PaymentType.CASH, PaymentType.BANK_DEPOSIT ->
                 CommissionRateHistory.calculateCommissionAmount(totalGals, effectiveRate)
+            PaymentType.PAID_WALK_IN ->
+                if (hasCommission) CommissionRateHistory.calculateCommissionAmount(totalGals, effectiveRate) else 0
             PaymentType.PAUTANG, PaymentType.PICK_UP -> 0
         }
 
         val settledDateKey = when (paymentType) {
-            PaymentType.CASH, PaymentType.BANK_DEPOSIT -> dateKey
+            PaymentType.CASH, PaymentType.BANK_DEPOSIT, PaymentType.PAID_WALK_IN -> dateKey
             PaymentType.PAUTANG, PaymentType.PICK_UP -> null
+        }
+
+        val normalizedNotes = if (paymentType == PaymentType.PAID_WALK_IN) {
+            PaymentBreakdownHelper.applyPaidWalkInTags(notes, hasCommission)
+        } else {
+            PaymentBreakdownHelper.stripPaidWalkInTags(notes).trim().take(300)
         }
 
         val entity = DeliveryEntity(
@@ -389,7 +399,7 @@ class MinigeRepository(
             commissionRate = storedRateInt,
             commissionEarned = commissionEarned,
             settledDateKey = settledDateKey,
-            notes = notes.trim().take(300),
+            notes = normalizedNotes,
             calendarEventId = null,
             pendingSync = true,
             isDeleted = false,
@@ -406,7 +416,7 @@ class MinigeRepository(
         pricingRepository.rememberCustomerPrice(
             userId = userId,
             customerName = cleanName,
-            unitPriceToSave = if (paymentType != PaymentType.PICK_UP) {
+            unitPriceToSave = if (paymentType != PaymentType.PICK_UP && paymentType != PaymentType.PAID_WALK_IN) {
                 validCustomPrice
                     ?: if (alkalineGallons > 0 && purifiedGallons == 0) settings.alkalinePrice.toDouble()
                     else settings.purifiedPrice.toDouble()
@@ -429,6 +439,7 @@ class MinigeRepository(
         paymentType: PaymentType,
         notes: String,
         customUnitPrice: Double? = null,
+        hasCommission: Boolean = true,
     ): Result<Unit> {
         val existing = dao.getDeliveryById(deliveryId)
             ?: return Result.failure(IllegalArgumentException("Delivery not found."))
@@ -453,7 +464,7 @@ class MinigeRepository(
         }
 
         val totalBill = when {
-            paymentType == PaymentType.PICK_UP -> 0
+            paymentType == PaymentType.PICK_UP || paymentType == PaymentType.PAID_WALK_IN -> 0
             validCustomPrice != null -> (totalGals * validCustomPrice).roundToInt()
             else -> (purifiedGallons * usedPurifiedPrice) + (alkalineGallons * usedAlkalinePrice)
         }
@@ -461,23 +472,32 @@ class MinigeRepository(
         val amountPaid = when (paymentType) {
             PaymentType.CASH, PaymentType.BANK_DEPOSIT -> totalBill
             PaymentType.PAUTANG -> existing.amountPaid.coerceIn(0, totalBill)
-            PaymentType.PICK_UP -> 0
+            PaymentType.PAID_WALK_IN, PaymentType.PICK_UP -> 0
         }
 
         val isSettled = paymentType == PaymentType.CASH ||
             paymentType == PaymentType.BANK_DEPOSIT ||
+            paymentType == PaymentType.PAID_WALK_IN ||
             (paymentType == PaymentType.PAUTANG && (totalBill - amountPaid) <= 0)
 
+        val effectiveRateInt = if (existing.commissionRate > 0) existing.commissionRate else settings.commissionRate
         val commissionEarned = when (paymentType) {
-            PaymentType.CASH, PaymentType.BANK_DEPOSIT -> totalGals * existing.commissionRate
-            PaymentType.PAUTANG -> if (isSettled) totalGals * existing.commissionRate else 0
+            PaymentType.CASH, PaymentType.BANK_DEPOSIT -> totalGals * effectiveRateInt
+            PaymentType.PAID_WALK_IN -> if (hasCommission) totalGals * effectiveRateInt else 0
+            PaymentType.PAUTANG -> if (isSettled) totalGals * effectiveRateInt else 0
             PaymentType.PICK_UP -> 0
         }
 
         val settledDateKey = when (paymentType) {
-            PaymentType.CASH, PaymentType.BANK_DEPOSIT -> existing.dateKey
+            PaymentType.CASH, PaymentType.BANK_DEPOSIT, PaymentType.PAID_WALK_IN -> existing.dateKey
             PaymentType.PAUTANG -> if (isSettled) (existing.settledDateKey ?: existing.dateKey) else null
             PaymentType.PICK_UP -> null
+        }
+
+        val normalizedNotes = if (paymentType == PaymentType.PAID_WALK_IN) {
+            PaymentBreakdownHelper.applyPaidWalkInTags(notes, hasCommission)
+        } else {
+            PaymentBreakdownHelper.stripPaidWalkInTags(notes).trim().take(300)
         }
 
         val updated = existing.copy(
@@ -489,9 +509,10 @@ class MinigeRepository(
             totalAmount = totalBill,
             amountPaid = amountPaid,
             paymentType = paymentType.name,
+            commissionRate = effectiveRateInt,
             commissionEarned = commissionEarned,
             settledDateKey = settledDateKey,
-            notes = notes.trim().take(300),
+            notes = normalizedNotes,
             pendingSync = true,
             updatedAtEpochMs = now,
         )
@@ -505,7 +526,7 @@ class MinigeRepository(
         pricingRepository.rememberCustomerPrice(
             userId = userId,
             customerName = cleanName,
-            unitPriceToSave = if (paymentType != PaymentType.PICK_UP) {
+            unitPriceToSave = if (paymentType != PaymentType.PICK_UP && paymentType != PaymentType.PAID_WALK_IN) {
                 validCustomPrice
                     ?: if (alkalineGallons > 0 && purifiedGallons == 0) settings.alkalinePrice.toDouble()
                     else settings.purifiedPrice.toDouble()

@@ -116,7 +116,7 @@ object DeliveryVoiceParser {
             else -> null
         }
 
-        // 4. Extract Transaction / Payment Type (Pick up, Pautang, Bank Transfer, Bank Deposit, Cash)
+        // 4. Extract Transaction / Payment Type (Pick up, Pautang, Paid Walk-in, Bank / Online, Cash)
         var paymentType: PaymentType? = null
         var paidChannel: PaidChannel? = null
 
@@ -129,22 +129,26 @@ object DeliveryVoiceParser {
                     " ",
                 )
             }
+            Regex("\\b(?:paid\\s+walk[-\\s]?in|walk[-\\s]?in)\\b", RegexOption.IGNORE_CASE)
+                .containsMatchIn(working) -> {
+                paymentType = PaymentType.PAID_WALK_IN
+                working = working.replace(
+                    Regex("\\b(?:paid\\s+walk[-\\s]?in|walk[-\\s]?in)\\b", RegexOption.IGNORE_CASE),
+                    " ",
+                )
+            }
             Regex("\\b(?:pautang|utang|credit)\\b", RegexOption.IGNORE_CASE).containsMatchIn(working) -> {
                 paymentType = PaymentType.PAUTANG
                 working = working.replace(Regex("\\b(?:pautang|utang|credit)\\b", RegexOption.IGNORE_CASE), " ")
             }
-            Regex("\\b(?:bank\\s+transfer|transfer|gcash)\\b", RegexOption.IGNORE_CASE).containsMatchIn(working) -> {
+            Regex("\\b(?:bank\\s*/\\s*online|bank\\s+transfer|bank\\s+deposit|bank\\s+online|online|transfer|deposit|gcash)\\b", RegexOption.IGNORE_CASE)
+                .containsMatchIn(working) -> {
                 paymentType = PaymentType.BANK_DEPOSIT
-                paidChannel = PaidChannel.BANK_TRANSFER
+                paidChannel = PaidChannel.BANK_ONLINE
                 working = working.replace(
-                    Regex("\\b(?:bank\\s+transfer|transfer|gcash)\\b", RegexOption.IGNORE_CASE),
+                    Regex("\\b(?:bank\\s*/\\s*online|bank\\s+transfer|bank\\s+deposit|bank\\s+online|online|transfer|deposit|gcash)\\b", RegexOption.IGNORE_CASE),
                     " ",
                 )
-            }
-            Regex("\\b(?:bank\\s+deposit|deposit)\\b", RegexOption.IGNORE_CASE).containsMatchIn(working) -> {
-                paymentType = PaymentType.BANK_DEPOSIT
-                paidChannel = PaidChannel.BANK_DEPOSIT
-                working = working.replace(Regex("\\b(?:bank\\s+deposit|deposit)\\b", RegexOption.IGNORE_CASE), " ")
             }
             Regex("\\bcash\\b", RegexOption.IGNORE_CASE).containsMatchIn(working) -> {
                 paymentType = PaymentType.CASH
