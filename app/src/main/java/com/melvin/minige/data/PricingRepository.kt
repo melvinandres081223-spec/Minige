@@ -59,18 +59,15 @@ class PricingRepository(
     }
 
     suspend fun syncPendingCustomers(userId: String): Pair<Int, Throwable?> {
-        var synced = 0
-        var lastError: Throwable? = null
-        dao.getPendingCustomers(userId).forEach { customer ->
-            val result = remote.upsertCustomer(userId, customer)
-            if (result.isSuccess) {
-                dao.markCustomerSynced(customer.id)
-                synced++
-            } else {
-                lastError = result.exceptionOrNull()
+        val pending = dao.getPendingCustomers(userId)
+        val outcome = remote.flushInChunks(pending) { customer ->
+            remote.upsertCustomer(userId, customer).also { res ->
+                if (res.isSuccess) {
+                    dao.markCustomerSynced(customer.id)
+                }
             }
         }
-        return synced to lastError
+        return outcome.syncedCount to outcome.lastError
     }
 
     fun mergeWithHistoricalDeliveries(

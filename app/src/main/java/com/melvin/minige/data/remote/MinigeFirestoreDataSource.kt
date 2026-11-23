@@ -19,6 +19,9 @@ import com.melvin.minige.data.local.DeliveryEntity
 import com.melvin.minige.data.local.ExpenseEntity
 import com.melvin.minige.data.local.UtangPaymentEntity
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.emitAll
@@ -27,15 +30,23 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.ConcurrentHashMap
+
+data class ChunkSyncOutcome(
+    val syncedCount: Int,
+    val lastError: Throwable?,
+)
 
 class MinigeFirestoreDataSource(
     private val db: FirebaseFirestore,
     private val auth: FirebaseAuth = Firebase.auth,
+    private val appContext: Context? = null,
 ) {
     constructor(context: Context) : this(
-        FirebaseFirestore.getInstance(
+        db = FirebaseFirestore.getInstance(
             context.applicationContext.getString(R.string.firestore_database_id)
-        )
+        ),
+        appContext = context.applicationContext,
     )
 
     init {
@@ -84,20 +95,62 @@ class MinigeFirestoreDataSource(
         }
     }
 
+    suspend fun <T> flushInChunks(
+        items: List<T>,
+        chunkSize: Int = DEFAULT_SYNC_CHUNK_SIZE,
+        syncAction: suspend (T) -> Result<Unit>,
+    ): ChunkSyncOutcome {
+        if (items.isEmpty()) return ChunkSyncOutcome(syncedCount = 0, lastError = null)
+        var syncedCount = 0
+        var lastError: Throwable? = null
+        val boundedChunkSize = chunkSize.coerceIn(1, MAX_SYNC_CHUNK_SIZE)
+
+        items.chunked(boundedChunkSize).forEach { chunk ->
+            val results = coroutineScope {
+                chunk.map { item ->
+                    async { syncAction(item) }
+                }.awaitAll()
+            }
+            results.forEach { res ->
+                if (res.isSuccess) {
+                    syncedCount++
+                } else {
+                    lastError = res.exceptionOrNull()
+                }
+            }
+        }
+        return ChunkSyncOutcome(syncedCount = syncedCount, lastError = lastError)
+    }
+
     suspend fun forceCloudSync(
+        userId: String? = null,
         onSyncStart: () -> Unit = {},
         onSyncSuccess: (Int) -> Unit = {},
         onSyncFailure: (String) -> Unit = {},
         syncPendingItems: suspend () -> Result<Int>,
     ) {
         var syncedItemsCount = 0
+        var capturedError: Throwable? = null
         FirestoreSyncHelper.forceCloudSync(
             firestore = db,
             onSyncStart = onSyncStart,
-            onSyncSuccess = { onSyncSuccess(syncedItemsCount) },
-            onSyncFailure = onSyncFailure,
+            onSyncSuccess = {
+                clearLastSyncError(appContext, userId ?: auth.currentUser?.uid)
+                onSyncSuccess(syncedItemsCount)
+            },
+            onSyncFailure = { message ->
+                val detailMessage = capturedError?.let(::formatDetailedSyncError) ?: message
+                recordLastSyncError(appContext, userId ?: auth.currentUser?.uid, detailMessage)
+                onSyncFailure(message)
+            },
             extraPendingUpload = {
-                syncPendingItems().onSuccess { count -> syncedItemsCount = count }
+                val uploadRes = syncPendingItems()
+                uploadRes.onSuccess { count -> syncedItemsCount = count }
+                uploadRes.onFailure { err ->
+                    capturedError = err
+                    recordLastSyncError(appContext, userId ?: auth.currentUser?.uid, formatDetailedSyncError(err))
+                }
+                uploadRes
             },
         )
     }
@@ -230,6 +283,7 @@ class MinigeFirestoreDataSource(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            recordLastSyncError(appContext, userId, formatDetailedSyncError(e, path))
             handleFirestoreError(e, OperationType.WRITE, path)
             Result.failure(e)
         }
@@ -259,6 +313,7 @@ class MinigeFirestoreDataSource(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            recordLastSyncError(appContext, userId, formatDetailedSyncError(e, path))
             handleFirestoreError(e, OperationType.CREATE, path)
             Result.failure(e)
         }
@@ -288,6 +343,7 @@ class MinigeFirestoreDataSource(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            recordLastSyncError(appContext, userId, formatDetailedSyncError(e, path))
             handleFirestoreError(e, OperationType.CREATE, path)
             Result.failure(e)
         }
@@ -317,6 +373,7 @@ class MinigeFirestoreDataSource(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            recordLastSyncError(appContext, userId, formatDetailedSyncError(e, path))
             handleFirestoreError(e, OperationType.WRITE, path)
             Result.failure(e)
         }
@@ -336,6 +393,7 @@ class MinigeFirestoreDataSource(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            recordLastSyncError(appContext, userId, formatDetailedSyncError(e, path))
             handleFirestoreError(e, OperationType.WRITE, path)
             Result.failure(e)
         }
@@ -374,6 +432,7 @@ class MinigeFirestoreDataSource(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            recordLastSyncError(appContext, userId, formatDetailedSyncError(e, path))
             handleFirestoreError(e, OperationType.WRITE, path)
             Result.failure(e)
         }
@@ -486,6 +545,7 @@ class MinigeFirestoreDataSource(
                         if (FirestoreSyncHelper.isOfflineFirestoreError(uErr)) {
                             Result.failure(FirestoreOfflineQueuedException(FirestoreSyncHelper.MSG_SAVED_OFFLINE, uErr))
                         } else {
+                            recordLastSyncError(appContext, null, formatDetailedSyncError(uErr, path))
                             handleFirestoreError(uErr, OperationType.WRITE, path)
                             Result.failure(uErr)
                         }
@@ -494,8 +554,10 @@ class MinigeFirestoreDataSource(
             }
 
             if (FirestoreSyncHelper.isOfflineFirestoreError(e)) {
+                recordLastSyncError(appContext, null, formatDetailedSyncError(e, path))
                 Result.failure(FirestoreOfflineQueuedException(FirestoreSyncHelper.MSG_SAVED_OFFLINE, e))
             } else {
+                recordLastSyncError(appContext, null, formatDetailedSyncError(e, path))
                 handleFirestoreError(e, OperationType.WRITE, path)
                 Result.failure(e)
             }
@@ -518,11 +580,14 @@ class MinigeFirestoreDataSource(
             if (confirmed == true) {
                 Result.success(Unit)
             } else {
-                Result.failure(FirestoreOfflineQueuedException(FirestoreSyncHelper.MSG_SAVED_OFFLINE))
+                val offlineErr = FirestoreOfflineQueuedException(FirestoreSyncHelper.MSG_SAVED_OFFLINE)
+                recordLastSyncError(appContext, userId, formatDetailedSyncError(offlineErr, path))
+                Result.failure(offlineErr)
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            recordLastSyncError(appContext, userId, formatDetailedSyncError(e, path))
             if (FirestoreSyncHelper.isOfflineFirestoreError(e)) {
                 Result.failure(FirestoreOfflineQueuedException(FirestoreSyncHelper.MSG_SAVED_OFFLINE, e))
             } else {
@@ -539,6 +604,7 @@ class MinigeFirestoreDataSource(
         if (firestoreError == null && error is CancellationException) throw error
         val exceptionToLog = firestoreError ?: (error as? Exception)
         if (exceptionToLog != null && auth.currentUser?.uid == uid) {
+            recordLastSyncError(appContext, uid, formatDetailedSyncError(exceptionToLog, path))
             handleFirestoreError(exceptionToLog, OperationType.LIST, path)
         }
     }
@@ -548,5 +614,65 @@ class MinigeFirestoreDataSource(
         private const val DOC_GET_TIMEOUT_MS = 5_000L
         private const val DOC_RETRY_TIMEOUT_MS = 3_000L
         private const val WRITE_ACK_TIMEOUT_MS = 8_000L
+        private const val DEFAULT_SYNC_CHUNK_SIZE = 10
+        private const val MAX_SYNC_CHUNK_SIZE = 25
+        private const val SYNC_ERROR_PREFS = "minige_firestore_sync_prefs"
+        private const val KEY_LAST_SYNC_ERROR = "last_sync_error_"
+        private const val GLOBAL_KEY = "_global"
+
+        private val lastSyncErrorsByUser = ConcurrentHashMap<String, String>()
+
+        fun formatDetailedSyncError(error: Throwable, path: String? = null): String {
+            val causes = generateSequence(error) { it.cause }
+            val fsError = causes.firstOrNull { it is FirebaseFirestoreException } as? FirebaseFirestoreException
+            val root = fsError ?: causes.firstOrNull { it !is CancellationException } ?: error
+            val baseMessage = if (fsError != null) {
+                "${fsError.code.name}: ${fsError.localizedMessage ?: fsError.message ?: "Firestore error"}"
+            } else {
+                "${root::class.java.simpleName}: ${root.localizedMessage ?: root.message ?: "Unknown sync error"}"
+            }
+            val cleanBase = baseMessage.replace(Regex("\\s+"), " ").trim().take(240)
+            return if (!path.isNullOrBlank()) {
+                "$cleanBase ($path)"
+            } else {
+                cleanBase
+            }
+        }
+
+        fun recordLastSyncError(context: Context?, userId: String?, message: String) {
+            val cleanMsg = message.trim().take(280)
+            if (cleanMsg.isEmpty()) return
+            val key = userId?.takeIf { it.isNotBlank() } ?: GLOBAL_KEY
+            lastSyncErrorsByUser[key] = cleanMsg
+            lastSyncErrorsByUser[GLOBAL_KEY] = cleanMsg
+            context?.applicationContext
+                ?.getSharedPreferences(SYNC_ERROR_PREFS, Context.MODE_PRIVATE)
+                ?.edit()
+                ?.putString("$KEY_LAST_SYNC_ERROR$key", cleanMsg)
+                ?.putString("$KEY_LAST_SYNC_ERROR$GLOBAL_KEY", cleanMsg)
+                ?.apply()
+        }
+
+        fun clearLastSyncError(context: Context?, userId: String?) {
+            val key = userId?.takeIf { it.isNotBlank() } ?: GLOBAL_KEY
+            lastSyncErrorsByUser.remove(key)
+            lastSyncErrorsByUser.remove(GLOBAL_KEY)
+            context?.applicationContext
+                ?.getSharedPreferences(SYNC_ERROR_PREFS, Context.MODE_PRIVATE)
+                ?.edit()
+                ?.remove("$KEY_LAST_SYNC_ERROR$key")
+                ?.remove("$KEY_LAST_SYNC_ERROR$GLOBAL_KEY")
+                ?.apply()
+        }
+
+        fun getLastSyncError(context: Context?, userId: String?): String? {
+            val key = userId?.takeIf { it.isNotBlank() } ?: GLOBAL_KEY
+            lastSyncErrorsByUser[key]?.let { return it }
+            val prefs = context?.applicationContext
+                ?.getSharedPreferences(SYNC_ERROR_PREFS, Context.MODE_PRIVATE)
+            return prefs?.getString("$KEY_LAST_SYNC_ERROR$key", null)?.takeIf { it.isNotBlank() }
+                ?: lastSyncErrorsByUser[GLOBAL_KEY]
+                ?: prefs?.getString("$KEY_LAST_SYNC_ERROR$GLOBAL_KEY", null)?.takeIf { it.isNotBlank() }
+        }
     }
 }

@@ -1551,6 +1551,124 @@ class ExampleRobolectricTest {
             db.close()
         }
     }
+
+    @Test
+    fun `diagnostics marks Calendar On-demand as PASS, persists Drive auth, and surfaces Firestore sync errors`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val userId = "diag_user_persist"
+        if (FirebaseApp.getApps(context).isEmpty()) {
+            FirebaseApp.initializeApp(
+                context,
+                FirebaseOptions.Builder()
+                    .setProjectId("minige-f6338")
+                    .setApplicationId("1:466130893778:android:c5d0d190ec29d4fb2be60b")
+                    .setApiKey("AIzaSyFakeKeyForRobolectricTest")
+                    .build()
+            )
+        }
+        try {
+            // 1) Healthy environment with Calendar = On-demand (hasCalendarPermission = false)
+            // and silent Drive refresh verified -> Overall Health MUST be PASS
+            val healthyOnDemandEnv = DiagnosticEnvironmentSnapshot(
+                isFirebaseSignedIn = true,
+                accountLabelMasked = "me***@gmail.com",
+                pendingSyncCount = 0,
+                hasDrivePermission = false,
+                hasDriveCachedToken = false,
+                driveBackupStatus = DriveBackupStatus.NEEDS_PERMISSION,
+                lastDriveBackupTimestamp = 0L,
+                backupMetadataSummary = null,
+                hasMicPermission = true,
+                hasCalendarPermission = false,
+                canRequestPackageInstalls = true,
+                versionName = "1.0.99",
+                versionCode = 99,
+                silentDriveRefreshSucceeded = true,
+            )
+            val passReport = AppDiagnosticsRunner.evaluate(
+                env = healthyOnDemandEnv,
+                selectedDateKey = "2026-11-25",
+                deliveries = emptyList(),
+                utangPayments = emptyList(),
+                expenses = emptyList(),
+                dailyLedgers = emptyList(),
+                customers = emptyList(),
+                defaultSukli = 0,
+            )
+            assertEquals(DiagnosticStatus.PASS, passReport.overallStatus)
+            assertTrue(passReport.formattedReportText.contains("Overall Health: PASS"))
+            assertEquals(
+                DiagnosticStatus.PASS,
+                passReport.items.first { it.id == "device_permissions" }.status,
+            )
+            assertEquals(
+                DiagnosticStatus.PASS,
+                passReport.items.first { it.id == "google_drive_backup" }.status,
+            )
+            assertTrue(
+                passReport.items.first { it.id == "device_permissions" }.detail.contains("Google Calendar: On-demand")
+            )
+
+            // 2) Persisted Drive auth timestamp prevents false-positive Needs Drive Permission across restarts
+            GoogleAuthManager.clearDriveAuthRecord(context)
+            DriveBackupManager.clearLastSuccessfulDriveAuthEpochMs(context, userId)
+            assertFalse(GoogleAuthManager.hasDrivePermission(context))
+
+            GoogleAuthManager.recordSuccessfulDriveAuth(context, 1_750_000_000_000L)
+            DriveBackupManager.saveLastSuccessfulDriveAuthEpochMs(context, userId, 1_750_000_000_000L)
+            assertTrue(GoogleAuthManager.hasDrivePermission(context))
+            assertEquals(1_750_000_000_000L, GoogleAuthManager.getLastSuccessfulDriveAuthEpochMs(context))
+
+            // 3) Firestore sync error is surfaced in item #1 when pending items remain, and cleared on success
+            MinigeFirestoreDataSource.recordLastSyncError(
+                context = context,
+                userId = userId,
+                message = "PERMISSION_DENIED: Missing or insufficient permissions (users/$userId/deliveries/d1)",
+            )
+            val syncErrorEnv = healthyOnDemandEnv.copy(
+                pendingSyncCount = 2,
+                hasDrivePermission = true,
+                driveBackupStatus = DriveBackupStatus.ACTIVE,
+                lastFirestoreSyncError = MinigeFirestoreDataSource.getLastSyncError(context, userId),
+            )
+            val warnReport = AppDiagnosticsRunner.evaluate(
+                env = syncErrorEnv,
+                selectedDateKey = "2026-11-25",
+                deliveries = emptyList(),
+                utangPayments = emptyList(),
+                expenses = emptyList(),
+                dailyLedgers = emptyList(),
+                customers = emptyList(),
+                defaultSukli = 0,
+            )
+            val syncItem = warnReport.items.first { it.id == "firebase_auth_sync" }
+            assertEquals(DiagnosticStatus.WARN, syncItem.status)
+            assertTrue(syncItem.summary.contains("PERMISSION_DENIED"))
+            assertTrue(syncItem.detail.contains("Last sync error: PERMISSION_DENIED"))
+
+            MinigeFirestoreDataSource.clearLastSyncError(context, userId)
+            assertNull(MinigeFirestoreDataSource.getLastSyncError(context, userId))
+
+            // 4) Chunked flush helper processes batches and reports synced count & errors accurately
+            val remote = MinigeFirestoreDataSource(FirebaseFirestore.getInstance(), appContext = context)
+            val chunkOutcome = remote.flushInChunks(
+                items = (1..12).toList(),
+                chunkSize = 5,
+            ) { item ->
+                if (item == 12) {
+                    Result.failure(IllegalStateException("Simulated transient error"))
+                } else {
+                    Result.success(Unit)
+                }
+            }
+            assertEquals(11, chunkOutcome.syncedCount)
+            assertEquals("Simulated transient error", chunkOutcome.lastError?.message)
+        } finally {
+            GoogleAuthManager.clearDriveAuthRecord(context)
+            DriveBackupManager.clearLastSuccessfulDriveAuthEpochMs(context, userId)
+            MinigeFirestoreDataSource.clearLastSyncError(context, userId)
+        }
+    }
 }
 
 

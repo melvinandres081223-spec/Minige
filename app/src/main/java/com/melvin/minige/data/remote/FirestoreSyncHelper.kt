@@ -82,7 +82,7 @@ object FirestoreSyncHelper {
             val failureMessage = if (isOfflineFirestoreError(e)) {
                 MSG_SAVED_OFFLINE
             } else {
-                "Sync failed: ${e.localizedMessage ?: "Hindi makakonekta sa server."}"
+                formatSyncErrorMessage(e)
             }
             onSyncFailure(failureMessage)
         }

@@ -148,6 +148,7 @@ object DriveBackupManager {
     private const val KEY_LAST_BACKUP_META = "last_backup_meta_summary_"
     private const val KEY_AUTO_BACKUP_ON_UPDATE = "auto_backup_on_update_"
     private const val KEY_LAST_LOCAL_BACKUP_PATH = "last_local_backup_path_"
+    private const val KEY_LAST_DRIVE_AUTH_EPOCH = "last_successful_drive_auth_epoch_ms_"
     private const val BOUNDARY = "MINIGE_DRIVE_BACKUP_BOUNDARY_7788"
 
     private const val DRIVE_FILES_ROOT_URL = "https://www.googleapis.com/drive/v3/files"
@@ -379,10 +380,17 @@ object DriveBackupManager {
             saveLastBackupTimestamp(context, userId, now)
             saveCachedToken(context, userId, activeToken)
             saveBackupMetadataSummary(context, userId, backupMetadata)
+            saveLastSuccessfulDriveAuthEpochMs(context, userId, now)
+            GoogleAuthManager.recordSuccessfulDriveAuth(context, now)
             Log.i(TAG, "Successfully backed up Minige to Google Drive folder '$BACKUP_FOLDER_NAME' at $now")
             Result.success(now)
         } catch (e: CancellationException) {
             throw e
+        } catch (e: DriveConsentRequiredException) {
+            clearLastSuccessfulDriveAuthEpochMs(context, userId)
+            GoogleAuthManager.clearDriveAuthRecord(context)
+            Log.w(TAG, "Google Drive consent required during backup: ${e.message}", e)
+            Result.failure(e)
         } catch (e: Exception) {
             Log.w(TAG, "Google Drive backup failed: ${e.message}", e)
             Result.failure(e)
@@ -408,7 +416,10 @@ object DriveBackupManager {
                 downloadDriveFile(token, fileId)
             }
 
+            val authNow = System.currentTimeMillis()
             saveCachedToken(context, userId, activeToken)
+            saveLastSuccessfulDriveAuthEpochMs(context, userId, authNow)
+            GoogleAuthManager.recordSuccessfulDriveAuth(context, authNow)
             val backupData = deserializeBackupPayload(jsonPayload)
             Result.success(
                 DriveBackupPreview(
@@ -424,6 +435,10 @@ object DriveBackupManager {
             )
         } catch (e: CancellationException) {
             throw e
+        } catch (e: DriveConsentRequiredException) {
+            clearLastSuccessfulDriveAuthEpochMs(context, userId)
+            GoogleAuthManager.clearDriveAuthRecord(context)
+            Result.failure(e)
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -508,9 +523,12 @@ object DriveBackupManager {
                 SundayMakeupPrefs.setEnabled(context, userId, p.sundayMakeupEnabled)
             }
 
+            val authNow = System.currentTimeMillis()
             saveLastBackupTimestamp(context, userId, backupData.backupTimestamp)
             saveCachedToken(context, userId, activeToken)
             saveBackupMetadataSummary(context, userId, backupData.metadata)
+            saveLastSuccessfulDriveAuthEpochMs(context, userId, authNow)
+            GoogleAuthManager.recordSuccessfulDriveAuth(context, authNow)
 
             val summary = DriveRestoreSummary(
                 deliveryCount = restoredDeliveries.size,
@@ -525,6 +543,10 @@ object DriveBackupManager {
             Result.success(summary)
         } catch (e: CancellationException) {
             throw e
+        } catch (e: DriveConsentRequiredException) {
+            clearLastSuccessfulDriveAuthEpochMs(context, userId)
+            GoogleAuthManager.clearDriveAuthRecord(context)
+            Result.failure(e)
         } catch (e: Exception) {
             Log.e(TAG, "Restore from Google Drive failed: ${e.message}", e)
             Result.failure(e)
@@ -1186,6 +1208,21 @@ object DriveBackupManager {
     fun saveLastLocalBackupPath(context: Context, userId: String, path: String) {
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().putString("$KEY_LAST_LOCAL_BACKUP_PATH$userId", path).apply()
+    }
+
+    fun saveLastSuccessfulDriveAuthEpochMs(context: Context, userId: String, epochMs: Long) {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putLong("$KEY_LAST_DRIVE_AUTH_EPOCH$userId", epochMs).apply()
+    }
+
+    fun getLastSuccessfulDriveAuthEpochMs(context: Context, userId: String): Long {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getLong("$KEY_LAST_DRIVE_AUTH_EPOCH$userId", 0L)
+    }
+
+    fun clearLastSuccessfulDriveAuthEpochMs(context: Context, userId: String) {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().remove("$KEY_LAST_DRIVE_AUTH_EPOCH$userId").apply()
     }
 
     fun formatBackupTimestamp(epochMs: Long): String {

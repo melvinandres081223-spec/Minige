@@ -11,6 +11,7 @@ import com.google.android.gms.common.api.Scope
 import com.google.api.services.calendar.CalendarScopes
 import com.melvin.minige.BuildConfig
 import com.melvin.minige.auth.GoogleAuthManager
+import com.melvin.minige.data.remote.MinigeFirestoreDataSource
 import com.melvin.minige.domain.CustomerRecord
 import com.melvin.minige.domain.DailyLedgerRecord
 import com.melvin.minige.domain.DeliveryRecord
@@ -64,6 +65,8 @@ data class DiagnosticEnvironmentSnapshot(
     val canRequestPackageInstalls: Boolean,
     val versionName: String,
     val versionCode: Int,
+    val lastFirestoreSyncError: String? = null,
+    val silentDriveRefreshSucceeded: Boolean = false,
 )
 
 /**
@@ -86,6 +89,8 @@ object AppDiagnosticsRunner {
         driveBackupStatus: DriveBackupStatus,
         lastDriveBackupTimestamp: Long,
         backupMetadataSummary: BackupMetadataSummary?,
+        silentDriveRefreshSucceeded: Boolean = false,
+        lastFirestoreSyncError: String? = null,
         nowEpochMs: Long = System.currentTimeMillis(),
     ): AppDiagnosticReport {
         val appContext = context.applicationContext
@@ -96,7 +101,11 @@ object AppDiagnosticsRunner {
         ) == PackageManager.PERMISSION_GRANTED
 
         val signedInAccount = runCatching { GoogleSignIn.getLastSignedInAccount(appContext) }.getOrNull()
-        val hasDrive = runCatching { GoogleAuthManager.hasDrivePermission(appContext) }.getOrDefault(false)
+        val hasPersistedDriveAuth = runCatching {
+            GoogleAuthManager.hasDrivePermission(appContext) ||
+                DriveBackupManager.getLastSuccessfulDriveAuthEpochMs(appContext, userId) > 0L
+        }.getOrDefault(false)
+        val hasDrive = hasPersistedDriveAuth || silentDriveRefreshSucceeded
         val hasCachedDriveToken = runCatching {
             !DriveBackupManager.getCachedToken(appContext, userId).isNullOrBlank()
         }.getOrDefault(false)
@@ -109,6 +118,8 @@ object AppDiagnosticsRunner {
         } else {
             true
         }
+        val recordedSyncError = lastFirestoreSyncError
+            ?: runCatching { MinigeFirestoreDataSource.getLastSyncError(appContext, userId) }.getOrNull()
 
         val env = DiagnosticEnvironmentSnapshot(
             isFirebaseSignedIn = firebaseUser != null,
@@ -116,7 +127,11 @@ object AppDiagnosticsRunner {
             pendingSyncCount = pendingSyncCount,
             hasDrivePermission = hasDrive,
             hasDriveCachedToken = hasCachedDriveToken,
-            driveBackupStatus = driveBackupStatus,
+            driveBackupStatus = if (silentDriveRefreshSucceeded && driveBackupStatus == DriveBackupStatus.NEEDS_PERMISSION) {
+                DriveBackupStatus.ACTIVE
+            } else {
+                driveBackupStatus
+            },
             lastDriveBackupTimestamp = lastDriveBackupTimestamp,
             backupMetadataSummary = backupMetadataSummary,
             hasMicPermission = hasMic,
@@ -124,6 +139,8 @@ object AppDiagnosticsRunner {
             canRequestPackageInstalls = canInstallPackages,
             versionName = BuildConfig.VERSION_NAME,
             versionCode = BuildConfig.VERSION_CODE,
+            lastFirestoreSyncError = recordedSyncError,
+            silentDriveRefreshSucceeded = silentDriveRefreshSucceeded,
         )
 
         return evaluate(
@@ -211,6 +228,7 @@ object AppDiagnosticsRunner {
     }
 
     private fun checkFirebaseAuthAndSync(env: DiagnosticEnvironmentSnapshot): DiagnosticCheckItem {
+        val lastError = env.lastFirestoreSyncError?.trim()?.takeIf { it.isNotEmpty() }
         val status = when {
             !env.isFirebaseSignedIn -> DiagnosticStatus.FAIL
             env.pendingSyncCount > 0 -> DiagnosticStatus.WARN
@@ -218,38 +236,49 @@ object AppDiagnosticsRunner {
         }
         val summary = when {
             !env.isFirebaseSignedIn -> "Firebase Auth is not signed in."
-            env.pendingSyncCount > 0 -> "Signed in (${env.accountLabelMasked}) • ${env.pendingSyncCount} item(s) waiting for cloud sync."
+            env.pendingSyncCount > 0 && lastError != null ->
+                "Signed in (${env.accountLabelMasked}) • ${env.pendingSyncCount} item(s) waiting for cloud sync ($lastError)"
+            env.pendingSyncCount > 0 ->
+                "Signed in (${env.accountLabelMasked}) • ${env.pendingSyncCount} item(s) waiting for cloud sync."
             else -> "Signed in (${env.accountLabelMasked}) • 0 pending sync items."
+        }
+        val detail = if (lastError != null) {
+            "Offline-first Room queue pending count: ${env.pendingSyncCount} | Last sync error: $lastError"
+        } else {
+            "Offline-first Room queue pending count: ${env.pendingSyncCount}"
         }
         return DiagnosticCheckItem(
             id = "firebase_auth_sync",
             title = "Firebase Auth & Sync Queue",
             status = status,
             summary = summary,
-            detail = "Offline-first Room queue pending count: ${env.pendingSyncCount}",
+            detail = detail,
         )
     }
 
     private fun checkDriveBackup(env: DiagnosticEnvironmentSnapshot): DiagnosticCheckItem {
+        val driveAuthorized = env.hasDrivePermission || env.silentDriveRefreshSucceeded
+        val needsConsent = !driveAuthorized ||
+            (!env.silentDriveRefreshSucceeded && env.driveBackupStatus == DriveBackupStatus.NEEDS_PERMISSION)
+
         val status = when {
             env.driveBackupStatus == DriveBackupStatus.ERROR -> DiagnosticStatus.FAIL
-            !env.hasDrivePermission || env.driveBackupStatus == DriveBackupStatus.NEEDS_PERMISSION -> DiagnosticStatus.WARN
-            env.lastDriveBackupTimestamp <= 0L -> DiagnosticStatus.WARN
+            needsConsent -> DiagnosticStatus.WARN
             else -> DiagnosticStatus.PASS
         }
         val backupTimeText = if (env.lastDriveBackupTimestamp > 0L) {
             DriveBackupManager.formatBackupTimestamp(env.lastDriveBackupTimestamp)
         } else {
-            "Never"
+            "Ready (no manual backup yet)"
         }
-        val tokenPresence = if (env.hasDriveCachedToken) "cached (redacted)" else "on-demand"
+        val tokenPresence = when {
+            env.silentDriveRefreshSucceeded -> "verified (redacted)"
+            env.hasDriveCachedToken -> "cached (redacted)"
+            else -> "on-demand"
+        }
         val summary = when (status) {
             DiagnosticStatus.FAIL -> "Google Drive backup status is ERROR; auto-retry will run."
-            DiagnosticStatus.WARN -> if (!env.hasDrivePermission) {
-                "Google Drive drive.file permission is not granted yet."
-            } else {
-                "Drive drive.file authorized (token: $tokenPresence), awaiting first backup."
-            }
+            DiagnosticStatus.WARN -> "Google Drive drive.file permission is not granted yet."
             DiagnosticStatus.PASS -> "Drive drive.file active (token: $tokenPresence) • Last backup: $backupTimeText"
         }
         val summaryMeta = env.backupMetadataSummary?.let {
@@ -359,7 +388,9 @@ object AppDiagnosticsRunner {
             if (!env.hasMicPermission) add("Microphone")
             if (!env.canRequestPackageInstalls) add("Install Unknown Apps")
         }
-        val status = if (missingRequiredForFeatures.isEmpty() && env.hasCalendarPermission) {
+        // Google Calendar uses on-demand OAuth scope rather than a runtime permission,
+        // so Mic: Granted + Installer: Allowed + Calendar: On-demand is healthy [PASS].
+        val status = if (missingRequiredForFeatures.isEmpty()) {
             DiagnosticStatus.PASS
         } else {
             DiagnosticStatus.WARN

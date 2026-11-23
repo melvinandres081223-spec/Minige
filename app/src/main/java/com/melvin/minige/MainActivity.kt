@@ -377,6 +377,7 @@ fun MinigeMainShell(
                         GoogleAuthManager.signOut(
                             credentialManager = credentialManager,
                             scope = scope,
+                            context = context,
                         )
                     },
                 )

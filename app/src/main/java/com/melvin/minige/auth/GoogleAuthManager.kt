@@ -52,6 +52,8 @@ object GoogleAuthManager {
     const val DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"
     const val DRIVE_APPDATA_SCOPE = DRIVE_FILE_SCOPE
     val DRIVE_SCOPE = Scope(DRIVE_FILE_SCOPE)
+    private const val DRIVE_AUTH_PREFS = "minige_drive_auth_prefs"
+    private const val KEY_LAST_SUCCESSFUL_DRIVE_AUTH_MS = "last_successful_drive_auth_epoch_ms"
 
     fun createGoogleSignInOptions(clientId: String): GoogleSignInOptions {
         return GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
@@ -61,9 +63,50 @@ object GoogleAuthManager {
             .build()
     }
 
+    fun recordSuccessfulDriveAuth(
+        context: Context,
+        epochMs: Long = System.currentTimeMillis(),
+    ) {
+        context.applicationContext
+            .getSharedPreferences(DRIVE_AUTH_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(KEY_LAST_SUCCESSFUL_DRIVE_AUTH_MS, epochMs)
+            .apply()
+    }
+
+    fun getLastSuccessfulDriveAuthEpochMs(context: Context): Long {
+        return context.applicationContext
+            .getSharedPreferences(DRIVE_AUTH_PREFS, Context.MODE_PRIVATE)
+            .getLong(KEY_LAST_SUCCESSFUL_DRIVE_AUTH_MS, 0L)
+    }
+
+    fun clearDriveAuthRecord(context: Context) {
+        context.applicationContext
+            .getSharedPreferences(DRIVE_AUTH_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .remove(KEY_LAST_SUCCESSFUL_DRIVE_AUTH_MS)
+            .apply()
+    }
+
     fun hasDrivePermission(context: Context): Boolean {
-        val account = GoogleSignIn.getLastSignedInAccount(context)
-        return account != null && GoogleSignIn.hasPermissions(account, DRIVE_SCOPE)
+        val account = runCatching { GoogleSignIn.getLastSignedInAccount(context) }.getOrNull()
+        val hasGsaScope = account != null && runCatching {
+            GoogleSignIn.hasPermissions(account, DRIVE_SCOPE)
+        }.getOrDefault(false)
+        return hasGsaScope || getLastSuccessfulDriveAuthEpochMs(context) > 0L
+    }
+
+    /**
+     * Silently verifies or refreshes `drive.file` authorization using Google Play Services
+     * [Identity.getAuthorizationClient] / [GoogleAuthUtil.getToken] without prompting UI.
+     */
+    suspend fun refreshDriveAuthorizationSilently(context: Context): Boolean {
+        return when (fetchFreshDriveAccessToken(context)) {
+            is DriveAuthResult.Authorized -> true
+            is DriveAuthResult.NeedsConsent,
+            is DriveAuthResult.NeedsConsentIntent -> false
+            is DriveAuthResult.Failure -> hasDrivePermission(context)
+        }
     }
 
     suspend fun checkOrRequestDriveAuthorization(context: Context): DriveAuthResult =
@@ -107,9 +150,11 @@ object GoogleAuthManager {
             val token = result.accessToken
             when {
                 result.hasResolution() && pendingIntent != null -> {
+                    clearDriveAuthRecord(appContext)
                     return@withContext DriveAuthResult.NeedsConsent(pendingIntent.intentSender)
                 }
                 !token.isNullOrBlank() -> {
+                    recordSuccessfulDriveAuth(appContext)
                     return@withContext DriveAuthResult.Authorized(token)
                 }
                 else -> null
@@ -127,9 +172,11 @@ object GoogleAuthManager {
                 val scopeString = "oauth2:$DRIVE_FILE_SCOPE"
                 val token = GoogleAuthUtil.getToken(appContext, account, scopeString)
                 if (!token.isNullOrBlank()) {
+                    recordSuccessfulDriveAuth(appContext)
                     return@withContext DriveAuthResult.Authorized(token)
                 }
             } catch (e: UserRecoverableAuthException) {
+                clearDriveAuthRecord(appContext)
                 val recoveryIntent = e.intent
                 return@withContext if (recoveryIntent != null) {
                     DriveAuthResult.NeedsConsentIntent(recoveryIntent)
@@ -264,11 +311,13 @@ object GoogleAuthManager {
     fun signOut(
         credentialManager: CredentialManager,
         scope: CoroutineScope,
+        context: Context? = null,
         onSignOutComplete: () -> Unit = {},
     ) {
         scope.launch {
             withContext(NonCancellable) {
                 try {
+                    context?.let { clearDriveAuthRecord(it) }
                     credentialManager.clearCredentialState(ClearCredentialStateRequest())
                 } catch (e: Exception) {
                     Log.w(TAG, "Failed to clear credential state: ${e.message}")

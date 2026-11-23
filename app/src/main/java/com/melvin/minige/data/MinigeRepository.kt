@@ -231,6 +231,7 @@ class MinigeRepository(
         onSyncFailure: (String) -> Unit,
     ) {
         remote.forceCloudSync(
+            userId = userId,
             onSyncStart = onSyncStart,
             onSyncSuccess = onSyncSuccess,
             onSyncFailure = onSyncFailure,
@@ -247,6 +248,7 @@ class MinigeRepository(
         return if (flushRes.isFailure) {
             Result.failure(flushRes.exceptionOrNull()!!)
         } else {
+            MinigeFirestoreDataSource.clearLastSyncError(null, userId)
             uploadRes
         }
     }
@@ -255,8 +257,8 @@ class MinigeRepository(
         var syncedCount = 0
         var lastError: Throwable? = null
 
-        dao.getPendingDeliveries(userId).forEach { entity ->
-            val result = if (entity.isDeleted) {
+        val deliveriesOutcome = remote.flushInChunks(dao.getPendingDeliveries(userId)) { entity ->
+            if (entity.isDeleted) {
                 remote.deleteDelivery(userId, entity.id).also { res ->
                     if (res.isSuccess) dao.hardDeleteDelivery(entity.id)
                 }
@@ -265,11 +267,12 @@ class MinigeRepository(
                     if (res.isSuccess) dao.markDeliverySynced(entity.id)
                 }
             }
-            if (result.isSuccess) syncedCount++ else lastError = result.exceptionOrNull()
         }
+        syncedCount += deliveriesOutcome.syncedCount
+        if (deliveriesOutcome.lastError != null) lastError = deliveriesOutcome.lastError
 
-        dao.getPendingUtangPayments(userId).forEach { entity ->
-            val result = if (entity.isDeleted) {
+        val paymentsOutcome = remote.flushInChunks(dao.getPendingUtangPayments(userId)) { entity ->
+            if (entity.isDeleted) {
                 remote.deleteUtangPayment(userId, entity.id).also { res ->
                     if (res.isSuccess) dao.hardDeleteUtangPayment(entity.id)
                 }
@@ -278,11 +281,12 @@ class MinigeRepository(
                     if (res.isSuccess) dao.markUtangPaymentSynced(entity.id)
                 }
             }
-            if (result.isSuccess) syncedCount++ else lastError = result.exceptionOrNull()
         }
+        syncedCount += paymentsOutcome.syncedCount
+        if (paymentsOutcome.lastError != null) lastError = paymentsOutcome.lastError
 
-        dao.getPendingExpenses(userId).forEach { entity ->
-            val result = if (entity.isDeleted) {
+        val expensesOutcome = remote.flushInChunks(dao.getPendingExpenses(userId)) { entity ->
+            if (entity.isDeleted) {
                 remote.deleteExpense(userId, entity.id).also { res ->
                     if (res.isSuccess) dao.hardDeleteExpense(entity.id)
                 }
@@ -291,18 +295,17 @@ class MinigeRepository(
                     if (res.isSuccess) dao.markExpenseSynced(entity.id)
                 }
             }
-            if (result.isSuccess) syncedCount++ else lastError = result.exceptionOrNull()
         }
+        syncedCount += expensesOutcome.syncedCount
+        if (expensesOutcome.lastError != null) lastError = expensesOutcome.lastError
 
-        dao.getPendingDailyLedgers(userId).forEach { entity ->
-            val result = remote.upsertDailyLedger(userId, entity)
-            if (result.isSuccess) {
-                dao.markDailyLedgerSynced(entity.dateKey)
-                syncedCount++
-            } else {
-                lastError = result.exceptionOrNull()
+        val ledgersOutcome = remote.flushInChunks(dao.getPendingDailyLedgers(userId)) { entity ->
+            remote.upsertDailyLedger(userId, entity).also { res ->
+                if (res.isSuccess) dao.markDailyLedgerSynced(entity.dateKey)
             }
         }
+        syncedCount += ledgersOutcome.syncedCount
+        if (ledgersOutcome.lastError != null) lastError = ledgersOutcome.lastError
 
         val settings = dao.getSettingsOnce()
         if (settings != null && settings.pendingSync && settings.userId == userId) {

@@ -173,8 +173,13 @@ class MinigeViewModel(
     private val _statusMessage = MutableStateFlow<String?>(null)
     private val _driveBackupStatus = MutableStateFlow(
         appContext?.let {
-            if (GoogleAuthManager.hasDrivePermission(it)) DriveBackupStatus.ACTIVE
-            else DriveBackupStatus.NEEDS_PERMISSION
+            if (GoogleAuthManager.hasDrivePermission(it) ||
+                DriveBackupManager.getLastSuccessfulDriveAuthEpochMs(it, currentUserId) > 0L
+            ) {
+                DriveBackupStatus.ACTIVE
+            } else {
+                DriveBackupStatus.NEEDS_PERMISSION
+            }
         } ?: DriveBackupStatus.NEEDS_PERMISSION
     )
     private val _driveLastBackupTimestamp = MutableStateFlow(
@@ -214,6 +219,19 @@ class MinigeViewModel(
     val events: SharedFlow<MinigeEvent> = _events.asSharedFlow()
 
     init {
+        appContext?.let { ctx ->
+            viewModelScope.launch(Dispatchers.IO) {
+                val authorized = GoogleAuthManager.refreshDriveAuthorizationSilently(ctx)
+                if (authorized) {
+                    DriveBackupManager.saveLastSuccessfulDriveAuthEpochMs(ctx, currentUserId, System.currentTimeMillis())
+                    _driveBackupStatus.value = DriveBackupStatus.ACTIVE
+                } else if (!GoogleAuthManager.hasDrivePermission(ctx) &&
+                    DriveBackupManager.getLastSuccessfulDriveAuthEpochMs(ctx, currentUserId) <= 0L
+                ) {
+                    _driveBackupStatus.value = DriveBackupStatus.NEEDS_PERMISSION
+                }
+            }
+        }
         viewModelScope.launch {
             repository.localDataChangeEvents.collect {
                 scheduleAutoBackup()
@@ -1338,9 +1356,16 @@ class MinigeViewModel(
         if (_isRunningDiagnostics.value) return
         val snapshot = uiState.value
         val bundle = latestBundle
-        viewModelScope.launch(Dispatchers.Default) {
+        viewModelScope.launch(Dispatchers.IO) {
             _isRunningDiagnostics.value = true
             try {
+                val silentDriveOk = GoogleAuthManager.refreshDriveAuthorizationSilently(context)
+                val effectiveDriveStatus = if (silentDriveOk && snapshot.driveBackupStatus == DriveBackupStatus.NEEDS_PERMISSION) {
+                    _driveBackupStatus.value = DriveBackupStatus.ACTIVE
+                    DriveBackupStatus.ACTIVE
+                } else {
+                    snapshot.driveBackupStatus
+                }
                 val report = AppDiagnosticsRunner.run(
                     context = context,
                     userId = currentUserId,
@@ -1352,9 +1377,11 @@ class MinigeViewModel(
                     customers = bundle?.customers ?: snapshot.customers,
                     defaultSukli = bundle?.settings?.defaultSukli ?: snapshot.settings.defaultSukli,
                     pendingSyncCount = bundle?.pendingCount ?: snapshot.pendingSyncCount,
-                    driveBackupStatus = snapshot.driveBackupStatus,
+                    driveBackupStatus = effectiveDriveStatus,
                     lastDriveBackupTimestamp = snapshot.driveLastBackupTimestamp,
                     backupMetadataSummary = snapshot.driveBackupSummary,
+                    silentDriveRefreshSucceeded = silentDriveOk,
+                    lastFirestoreSyncError = MinigeFirestoreDataSource.getLastSyncError(context, currentUserId),
                 )
                 _diagnosticReport.value = report
             } finally {
@@ -1393,7 +1420,10 @@ class MinigeViewModel(
                 }
                 val roomDb = MinigeDatabase.getInstance(app)
                 val dao = roomDb.minigeDao()
-                val remote = MinigeFirestoreDataSource(firestore)
+                val remote = MinigeFirestoreDataSource(
+                    db = firestore,
+                    appContext = app.applicationContext,
+                )
                 val pricingRepo = PricingRepository(dao = dao, remote = remote)
                 val repo = MinigeRepository(
                     dao = dao,
