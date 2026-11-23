@@ -352,93 +352,132 @@ object MinigeCalculator {
 }
 
 object BossPickupFormatter {
-    private val headerDateFormatter = DateTimeFormatter.ofPattern("MMM dd, yyyy (EEEE)", Locale.ENGLISH)
+    private val headerDateFormatter = DateTimeFormatter.ofPattern("MMM dd, yyyy", Locale.ENGLISH)
+    private const val DIVIDER = "━━━━━━━━━━━━━━━━━━━━"
+
+    fun tagalogDayName(dayOfWeek: DayOfWeek): String = when (dayOfWeek) {
+        DayOfWeek.MONDAY -> "Lunes"
+        DayOfWeek.TUESDAY -> "Martes"
+        DayOfWeek.WEDNESDAY -> "Miyerkules"
+        DayOfWeek.THURSDAY -> "Huwebes"
+        DayOfWeek.FRIDAY -> "Biyernes"
+        DayOfWeek.SATURDAY -> "Sabado"
+        DayOfWeek.SUNDAY -> "Linggo"
+    }
+
+    private data class HakotRow(
+        val customerName: String,
+        val gallons: Int,
+        val sortTimestamp: Long,
+    )
 
     /**
-     * Generates the strict Boss-facing Daily Hakot report containing ONLY:
-     * 1) Picked-up gallon counts (`PaymentType.PICK_UP`)
-     * 2) Delivered gallon counts by channel (`Cash / Paid`, `Bank Transfer/Deposit`, `Pautang`)
-     * Never includes peso signs (`₱`), prices, commissions, cash remit, expenses, or sukli.
+     * Generates the Boss-facing Daily Hakot report containing ONLY commission-earning (paid)
+     * delivered gallons for [date]:
+     * - Direct paid deliveries (`CASH` and `BANK_DEPOSIT` / Bank Transfer) on `dateKey`
+     * - Partial-gallon `PAUTANG` payments paid on `dateKey` (tagged via `UtangPaymentRecord`)
+     * - Fully settled `PAUTANG` remainder gallons with `settledDateKey == dateKey`
+     *
+     * Strictly excludes unpaid `PAUTANG` entries, `PICK_UP` entries, peso signs (`₱`),
+     * unit prices, commissions, cash remittance, and sukli.
      */
-    fun format(date: LocalDate, entries: List<DeliveryRecord>): String {
-        val onlyPickups = entries.filter { it.paymentType == PaymentType.PICK_UP && it.totalGallons > 0 }
-        val totalPickupGals = onlyPickups.sumOf { it.totalGallons }
-        val separator = " — "
+    fun format(
+        date: LocalDate,
+        deliveries: List<DeliveryRecord>,
+        utangPayments: List<UtangPaymentRecord> = emptyList(),
+    ): String {
+        val dateKey = MinigeDateUtils.toKey(date)
+        val deliveryById = deliveries.associateBy { it.id }
 
-        val pickupNameColWidth = (onlyPickups.maxOfOrNull { it.customerName.trim().length } ?: 0).coerceAtLeast(9)
-        val pickupCountColWidth = maxOf(
-            totalPickupGals.toString().length,
-            onlyPickups.maxOfOrNull { it.totalGallons.toString().length } ?: 1,
+        val rows = mutableListOf<HakotRow>()
+
+        // 1) Direct paid deliveries on selected date
+        deliveries
+            .filter {
+                it.dateKey == dateKey &&
+                    (it.paymentType == PaymentType.CASH || it.paymentType == PaymentType.BANK_DEPOSIT) &&
+                    it.totalGallons > 0
+            }
+            .forEach { entry ->
+                rows += HakotRow(
+                    customerName = entry.customerName.trim().ifEmpty { "Customer" },
+                    gallons = entry.totalGallons,
+                    sortTimestamp = entry.createdAtEpochMs,
+                )
+            }
+
+        // 2) Gallon-tagged partial Pautang payments collected on selected date
+        utangPayments
+            .filter { it.dateKey == dateKey }
+            .forEach { payment ->
+                val paidGals = PartialPaymentHelper.extractPaidGallons(payment)
+                if (paidGals > 0) {
+                    val parent = deliveryById[payment.deliveryId]
+                    if (parent == null || parent.paymentType == PaymentType.PAUTANG) {
+                        val name = parent?.customerName?.trim()?.ifEmpty { "Customer" } ?: "Customer"
+                        rows += HakotRow(
+                            customerName = name,
+                            gallons = paidGals,
+                            sortTimestamp = payment.createdAtEpochMs,
+                        )
+                    }
+                }
+            }
+
+        // 3) Settled Pautang untagged remainder gallons whose settlement date is selected date
+        deliveries
+            .filter {
+                it.paymentType == PaymentType.PAUTANG &&
+                    it.isUtangFullyPaid &&
+                    it.settledDateKey == dateKey
+            }
+            .forEach { utang ->
+                val remGallons = PartialPaymentHelper.untaggedSettledRemainderGallons(utang, utangPayments)
+                if (remGallons > 0) {
+                    val lastPaymentTs = utangPayments
+                        .filter { it.deliveryId == utang.id && it.dateKey == dateKey }
+                        .maxOfOrNull { it.createdAtEpochMs }
+                        ?: utang.updatedAtEpochMs
+                    rows += HakotRow(
+                        customerName = utang.customerName.trim().ifEmpty { "Customer" },
+                        gallons = remGallons,
+                        sortTimestamp = lastPaymentTs,
+                    )
+                }
+            }
+
+        val orderedRows = rows.sortedBy { it.sortTimestamp }
+        val totalGals = orderedRows.sumOf { it.gallons }
+        val separator = " — "
+        val totalPrefix = "TOTAL:"
+        val nameColWidth = (orderedRows.maxOfOrNull { it.customerName.length } ?: 0).coerceAtLeast(9)
+        val countColWidth = maxOf(
+            totalGals.toString().length,
+            orderedRows.maxOfOrNull { it.gallons.toString().length } ?: 1,
         ).coerceAtLeast(2)
-        val pickupTotalPrefix = "TOTAL:"
-        val pickupTotalPad = (pickupNameColWidth + separator.length + pickupCountColWidth - pickupTotalPrefix.length)
-            .coerceAtLeast(pickupCountColWidth + 1)
+        val totalNumberPad = (nameColWidth + separator.length + countColWidth - totalPrefix.length)
+            .coerceAtLeast(countColWidth + 1)
 
         val sb = StringBuilder()
-        sb.appendLine("📦 NA-PICK UP NA GALLON")
-        sb.appendLine("📅 Petsa: ${date.format(headerDateFormatter)}")
-        sb.appendLine("━━━━━━━━━━━━━━━")
+        sb.appendLine("🚚 DAILY HAKOT (DELIVERED)")
+        sb.appendLine("📅 Petsa: ${date.format(headerDateFormatter)} (${tagalogDayName(date.dayOfWeek)})")
+        sb.appendLine(DIVIDER)
 
-        if (onlyPickups.isEmpty()) {
-            sb.appendLine("(Walang pick-up ngayon)")
+        if (orderedRows.isEmpty()) {
+            sb.appendLine("(Wala pang paid delivery ngayon)")
         } else {
-            onlyPickups.forEach { entry ->
-                val name = entry.customerName.trim().padEnd(pickupNameColWidth, ' ')
-                val count = entry.totalGallons
+            orderedRows.forEach { row ->
+                val name = row.customerName.padEnd(nameColWidth, ' ')
+                val count = row.gallons
                 val unit = if (count == 1) "gal" else "gals"
-                val countStr = count.toString().padStart(pickupCountColWidth, ' ')
+                val countStr = count.toString().padStart(countColWidth, ' ')
                 sb.appendLine("$name$separator$countStr $unit")
             }
         }
 
-        sb.appendLine("━━━━━━━━━━━━━━━")
-        val pickupTotalUnit = if (totalPickupGals == 1) "gal" else "gals"
-        sb.appendLine("$pickupTotalPrefix${totalPickupGals.toString().padStart(pickupTotalPad, ' ')} $pickupTotalUnit")
-
-        val onlyDeliveries = entries.filter { it.paymentType != PaymentType.PICK_UP && it.totalGallons > 0 }
-        val cashDeliveredGals = onlyDeliveries
-            .filter { it.paymentType == PaymentType.CASH }
-            .sumOf { it.totalGallons }
-        val bankDeliveredGals = onlyDeliveries
-            .filter { it.paymentType == PaymentType.BANK_DEPOSIT }
-            .sumOf { it.totalGallons }
-        val pautangDeliveredGals = onlyDeliveries
-            .filter { it.paymentType == PaymentType.PAUTANG }
-            .sumOf { it.totalGallons }
-        val totalDeliveredGals = cashDeliveredGals + bankDeliveredGals + pautangDeliveredGals
-
-        val delivRows = listOf(
-            "Cash / Paid" to cashDeliveredGals,
-            "Bank Transfer/Deposit" to bankDeliveredGals,
-            "Pautang" to pautangDeliveredGals,
-        )
-        val delivTotalPrefix = "TOTAL DELIVERED:"
-        val delivLabelColWidth = maxOf(
-            delivRows.maxOf { it.first.length },
-            delivTotalPrefix.length,
-        )
-        val delivCountColWidth = maxOf(
-            totalDeliveredGals.toString().length,
-            delivRows.maxOf { it.second.toString().length },
-        ).coerceAtLeast(2)
-        val delivTotalPad = (delivLabelColWidth + separator.length + delivCountColWidth - delivTotalPrefix.length)
-            .coerceAtLeast(delivCountColWidth + 1)
-
-        sb.appendLine()
-        sb.appendLine("🚚 NA-DELIVER NA GALLON")
-        sb.appendLine("━━━━━━━━━━━━━━━")
-        if (onlyDeliveries.isEmpty()) {
-            sb.appendLine("(Walang delivery ngayon)")
-        } else {
-            delivRows.forEach { (label, count) ->
-                val unit = if (count == 1) "gal" else "gals"
-                val countStr = count.toString().padStart(delivCountColWidth, ' ')
-                sb.appendLine("${label.padEnd(delivLabelColWidth, ' ')}$separator$countStr $unit")
-            }
-        }
-        sb.appendLine("━━━━━━━━━━━━━━━")
-        val delivTotalUnit = if (totalDeliveredGals == 1) "gal" else "gals"
-        sb.append("$delivTotalPrefix${totalDeliveredGals.toString().padStart(delivTotalPad, ' ')} $delivTotalUnit")
+        sb.appendLine(DIVIDER)
+        val totalUnit = if (totalGals == 1) "gal" else "gals"
+        sb.append("$totalPrefix${totalGals.toString().padStart(totalNumberPad, ' ')} $totalUnit")
         return sb.toString()
     }
 }

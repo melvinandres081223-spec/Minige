@@ -74,8 +74,8 @@ object ScreenGuideCatalog {
                 ),
                 GuideItem(
                     badgeOrButton = "Daily Hakot",
-                    taglishExplanation = "1-Tap send kay Boss sa Messenger. Laman nito ang na-pick up at na-deliver na bilang ng galon lang—walang presyo (₱), commission, o gastos.",
-                    example = "Hal: Pick-up: 45 gals • Delivered: 18 gals",
+                    taglishExplanation = "1-Tap send kay Boss sa Messenger. Laman nito ang mga bayad at may commission na delivery (Cash, Bank, at bayad na Pautang) ngayong araw—walang presyo (₱), commission, o gastos.",
+                    example = "Hal: Aling Nena — 5 gals • TOTAL: 16 gals",
                 ),
                 GuideItem(
                     badgeOrButton = "By Area",

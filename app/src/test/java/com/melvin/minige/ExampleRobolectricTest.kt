@@ -24,6 +24,7 @@ import com.melvin.minige.domain.BossPickupFormatter
 import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.PaymentType
 import com.melvin.minige.domain.UtangMethod
+import com.melvin.minige.domain.UtangPaymentRecord
 import com.melvin.minige.sync.BackupAppPreferences
 import com.melvin.minige.sync.BackupMetadata
 import com.melvin.minige.sync.DriveBackupManager
@@ -495,14 +496,14 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `boss pickup formatter includes picked up and delivered gallon counts with zero peso amounts`() {
-        val date = LocalDate.of(2026, 11, 22)
+    fun `boss pickup formatter lists paid deliveries with tagalog day and excludes unpaid pautang and pickup`() {
+        val date = LocalDate.of(2026, 11, 23) // Monday -> Lunes
         val entries = listOf(
             DeliveryRecord(
                 id = "pk1",
                 userId = "u1",
-                dateKey = "2026-11-22",
-                customerName = "Nene",
+                dateKey = "2026-11-23",
+                customerName = "Nene Pickup",
                 purifiedGallons = 12,
                 alkalineGallons = 0,
                 purifiedUnitPrice = 30,
@@ -522,7 +523,7 @@ class ExampleRobolectricTest {
             DeliveryRecord(
                 id = "c1",
                 userId = "u1",
-                dateKey = "2026-11-22",
+                dateKey = "2026-11-23",
                 customerName = "Store Alpha",
                 purifiedGallons = 8,
                 alkalineGallons = 2,
@@ -533,7 +534,7 @@ class ExampleRobolectricTest {
                 paymentType = PaymentType.CASH,
                 commissionRate = 8,
                 commissionEarned = 80,
-                settledDateKey = "2026-11-22",
+                settledDateKey = "2026-11-23",
                 notes = "",
                 calendarEventId = null,
                 pendingSync = false,
@@ -543,7 +544,7 @@ class ExampleRobolectricTest {
             DeliveryRecord(
                 id = "b1",
                 userId = "u1",
-                dateKey = "2026-11-22",
+                dateKey = "2026-11-23",
                 customerName = "Store Beta",
                 purifiedGallons = 5,
                 alkalineGallons = 0,
@@ -554,7 +555,7 @@ class ExampleRobolectricTest {
                 paymentType = PaymentType.BANK_DEPOSIT,
                 commissionRate = 8,
                 commissionEarned = 40,
-                settledDateKey = "2026-11-22",
+                settledDateKey = "2026-11-23",
                 notes = "[Bank Transfer]",
                 calendarEventId = null,
                 pendingSync = false,
@@ -562,10 +563,10 @@ class ExampleRobolectricTest {
                 updatedAtEpochMs = 3L,
             ),
             DeliveryRecord(
-                id = "u1",
+                id = "u_unpaid",
                 userId = "u1",
-                dateKey = "2026-11-22",
-                customerName = "Ate Rosa",
+                dateKey = "2026-11-23",
+                customerName = "Ate Rosa Unpaid",
                 purifiedGallons = 4,
                 alkalineGallons = 0,
                 purifiedUnitPrice = 30,
@@ -582,25 +583,82 @@ class ExampleRobolectricTest {
                 createdAtEpochMs = 4L,
                 updatedAtEpochMs = 4L,
             ),
+            DeliveryRecord(
+                id = "u_settled",
+                userId = "u1",
+                dateKey = "2026-11-19",
+                customerName = "Kuya Ben Settled",
+                purifiedGallons = 3,
+                alkalineGallons = 0,
+                purifiedUnitPrice = 30,
+                alkalineUnitPrice = 40,
+                totalAmount = 90,
+                amountPaid = 90,
+                paymentType = PaymentType.PAUTANG,
+                commissionRate = 8,
+                commissionEarned = 24,
+                settledDateKey = "2026-11-23",
+                notes = "",
+                calendarEventId = null,
+                pendingSync = false,
+                createdAtEpochMs = 5L,
+                updatedAtEpochMs = 50L,
+            ),
+            DeliveryRecord(
+                id = "u_partial",
+                userId = "u1",
+                dateKey = "2026-11-20",
+                customerName = "Mang Tomas Partial",
+                purifiedGallons = 5,
+                alkalineGallons = 0,
+                purifiedUnitPrice = 30,
+                alkalineUnitPrice = 40,
+                totalAmount = 150,
+                amountPaid = 60,
+                paymentType = PaymentType.PAUTANG,
+                commissionRate = 8,
+                commissionEarned = 0,
+                settledDateKey = null,
+                notes = "",
+                calendarEventId = null,
+                pendingSync = false,
+                createdAtEpochMs = 6L,
+                updatedAtEpochMs = 60L,
+            ),
+        )
+        val payments = listOf(
+            UtangPaymentRecord(
+                id = "pay_1",
+                deliveryId = "u_partial",
+                userId = "u1",
+                dateKey = "2026-11-23",
+                amount = 60,
+                method = UtangMethod.CASH,
+                notes = "[Gallons:2 Comm:16]",
+                pendingSync = false,
+                createdAtEpochMs = 70L,
+            )
         )
 
-        val report = BossPickupFormatter.format(date, entries)
-        assertTrue(report.contains("NA-PICK UP NA GALLON"))
-        assertTrue(report.contains("Nene"))
-        assertTrue(report.contains("12 gals"))
-        assertTrue(report.contains("NA-DELIVER NA GALLON"))
-        assertTrue(report.contains("Cash / Paid"))
-        assertTrue(report.contains("10 gals"))
-        assertTrue(report.contains("Bank Transfer/Deposit"))
-        assertTrue(report.contains("5 gals"))
-        assertTrue(report.contains("Pautang"))
-        assertTrue(report.contains("4 gals"))
-        assertTrue(report.contains("TOTAL DELIVERED:"))
-        assertTrue(report.contains("19 gals"))
-        assertFalse(report.contains("₱"))
-        assertFalse(report.contains("320"))
-        assertFalse(report.contains("Commission", ignoreCase = true))
-        assertFalse(report.contains("Remit", ignoreCase = true))
+        val formatted = BossPickupFormatter.format(date, entries, payments)
+        assertTrue(formatted.contains("🚚 DAILY HAKOT (DELIVERED)"))
+        assertTrue(formatted.contains("📅 Petsa: Nov 23, 2026 (Lunes)"))
+        assertTrue(formatted.contains("Store Alpha"))
+        assertTrue(formatted.contains("10 gals"))
+        assertTrue(formatted.contains("Store Beta"))
+        assertTrue(formatted.contains("5 gals"))
+        assertTrue(formatted.contains("Kuya Ben Settled"))
+        assertTrue(formatted.contains("3 gals"))
+        assertTrue(formatted.contains("Mang Tomas Partial"))
+        assertTrue(formatted.contains("2 gals"))
+        assertTrue(formatted.contains("TOTAL:"))
+        assertTrue(formatted.contains("20 gals"))
+        assertFalse(formatted.contains("Nene Pickup"))
+        assertFalse(formatted.contains("Ate Rosa Unpaid"))
+        assertFalse(formatted.contains("₱"))
+        assertFalse(formatted.contains("320"))
+        assertFalse(formatted.contains("Commission", ignoreCase = true))
+        assertFalse(formatted.contains("Remit", ignoreCase = true))
     }
 
     @Test

@@ -354,7 +354,11 @@ class MinigeViewModel(
             todayPaymentBreakdown = todayPaymentBreakdown,
             sundayMakeupEnabled = sundayEnabled,
             sundayMakeupDaySummary = sundayMakeupDaySummary,
-            bossPickupMessage = BossPickupFormatter.format(date, deliveriesForDay),
+            bossPickupMessage = BossPickupFormatter.format(
+                date = date,
+                deliveries = bundle.deliveries,
+                utangPayments = bundle.payments,
+            ),
             customers = mergedCustomers,
             sukiDirectory = sukiDirectory,
             commissionRateHistory = rateHist,

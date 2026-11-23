@@ -132,55 +132,72 @@ class ExampleUnitTest {
 
     @Test
     fun `boss pickup formatter produces exact monospace format without sensitive totals`() {
-        val date = LocalDate.of(2026, 11, 20)
+        val date = LocalDate.of(2026, 11, 23) // Monday -> Lunes
         val entries = listOf(
-            delivery("p1", "2026-11-20", "Nene", 45, 0, PaymentType.PICK_UP, 0),
-            delivery("p2", "2026-11-20", "Jhon", 1, 0, PaymentType.PICK_UP, 0),
-            delivery("p3", "2026-11-20", "Melvin", 2, 0, PaymentType.PICK_UP, 0),
-            // Delivered entries: customer name, peso total, and commission must NEVER appear,
-            // only gallon breakdown by channel in NA-DELIVER NA GALLON
-            delivery("c1", "2026-11-20", "Secret Cash", 10, 0, PaymentType.CASH, 300, 8, 80, "2026-11-20"),
-            delivery("b1", "2026-11-20", "Secret Bank", 5, 0, PaymentType.BANK_DEPOSIT, 150, 8, 40, "2026-11-20"),
-            delivery("u1", "2026-11-20", "Secret Utang", 1, 0, PaymentType.PAUTANG, 0),
+            // Excluded: PICK_UP and Unpaid PAUTANG
+            delivery("p1", "2026-11-23", "Nene Pickup", 45, 0, PaymentType.PICK_UP, 0),
+            delivery("u_unpaid", "2026-11-23", "Unpaid Juan", 4, 0, PaymentType.PAUTANG, 0),
+            // Included: Direct CASH and BANK_DEPOSIT on 2026-11-23
+            delivery("c1", "2026-11-23", "Aling Nena", 10, 0, PaymentType.CASH, 300, 8, 80, "2026-11-23")
+                .copy(createdAtEpochMs = 100L),
+            delivery("b1", "2026-11-23", "Kuya Jun", 1, 0, PaymentType.BANK_DEPOSIT, 30, 8, 8, "2026-11-23")
+                .copy(createdAtEpochMs = 200L),
+            // Included: Earlier Pautang settled on 2026-11-23
+            delivery("u_settled", "2026-11-20", "Ate Rosa", 5, 0, PaymentType.PAUTANG, 150, 8, 40, "2026-11-23")
+                .copy(updatedAtEpochMs = 300L),
+            // Included (partially): Open Pautang with 2-gal partial pay on 2026-11-23
+            delivery("u_partial", "2026-11-21", "Mang Ben", 5, 0, PaymentType.PAUTANG, 60),
+        )
+        val payments = listOf(
+            com.melvin.minige.domain.UtangPaymentRecord(
+                id = "pay_partial",
+                deliveryId = "u_partial",
+                userId = "u1",
+                dateKey = "2026-11-23",
+                amount = 60,
+                method = com.melvin.minige.domain.UtangMethod.CASH,
+                notes = "[Gallons:2 Comm:16]",
+                pendingSync = false,
+                createdAtEpochMs = 400L,
+            )
         )
 
-        val formatted = BossPickupFormatter.format(date, entries)
+        val formatted = BossPickupFormatter.format(date, entries, payments)
         val expected = """
-            📦 NA-PICK UP NA GALLON
-            📅 Petsa: Nov 20, 2026 (Friday)
-            ━━━━━━━━━━━━━━━
-            Nene      — 45 gals
-            Jhon      —  1 gal
-            Melvin    —  2 gals
-            ━━━━━━━━━━━━━━━
-            TOTAL:      48 gals
-
-            🚚 NA-DELIVER NA GALLON
-            ━━━━━━━━━━━━━━━
-            Cash / Paid           — 10 gals
-            Bank Transfer/Deposit —  5 gals
-            Pautang               —  1 gal
-            ━━━━━━━━━━━━━━━
-            TOTAL DELIVERED:        16 gals
+            🚚 DAILY HAKOT (DELIVERED)
+            📅 Petsa: Nov 23, 2026 (Lunes)
+            ━━━━━━━━━━━━━━━━━━━━
+            Aling Nena — 10 gals
+            Kuya Jun   —  1 gal
+            Ate Rosa   —  5 gals
+            Mang Ben   —  2 gals
+            ━━━━━━━━━━━━━━━━━━━━
+            TOTAL:       18 gals
         """.trimIndent()
 
         assertEquals(expected, formatted)
         val lines = formatted.lines()
-        // Verify pick-up numbers end at the exact same character index in monospace
-        assertEquals(lines[3].indexOf(" gals"), lines[5].indexOf(" gals"))
-        assertEquals(lines[3].indexOf(" gals"), lines[7].indexOf(" gals"))
+        // Verify numbers end at the exact same character index in monospace
         assertEquals(lines[3].indexOf(" gals"), lines[4].indexOf(" gal"))
-        // Verify delivered numbers end at the exact same character index in monospace
-        assertEquals(lines[11].indexOf(" gals"), lines[12].indexOf(" gals"))
-        assertEquals(lines[11].indexOf(" gals"), lines[13].indexOf(" gal"))
-        assertEquals(lines[11].indexOf(" gals"), lines[15].indexOf(" gals"))
-        assertFalse(formatted.contains("Secret Cash"))
-        assertFalse(formatted.contains("Secret Bank"))
-        assertFalse(formatted.contains("Secret Utang"))
+        assertEquals(lines[3].indexOf(" gals"), lines[5].indexOf(" gals"))
+        assertEquals(lines[3].indexOf(" gals"), lines[6].indexOf(" gals"))
+        assertEquals(lines[3].indexOf(" gals"), lines[8].indexOf(" gals"))
+        assertFalse(formatted.contains("Nene Pickup"))
+        assertFalse(formatted.contains("Unpaid Juan"))
         assertFalse(formatted.contains("₱"))
         assertFalse(formatted.contains("Commission", ignoreCase = true))
         assertFalse(formatted.contains("Remit", ignoreCase = true))
         assertFalse(formatted.contains("Sukli", ignoreCase = true))
+
+        // Verify Tagalog day-of-week mapping & empty state
+        val emptySunday = BossPickupFormatter.format(LocalDate.of(2026, 11, 22), listOf(entries.first()))
+        assertTrue(emptySunday.contains("Nov 22, 2026 (Linggo)"))
+        assertTrue(emptySunday.contains("(Wala pang paid delivery ngayon)"))
+        assertEquals("Martes", BossPickupFormatter.tagalogDayName(java.time.DayOfWeek.TUESDAY))
+        assertEquals("Miyerkules", BossPickupFormatter.tagalogDayName(java.time.DayOfWeek.WEDNESDAY))
+        assertEquals("Huwebes", BossPickupFormatter.tagalogDayName(java.time.DayOfWeek.THURSDAY))
+        assertEquals("Biyernes", BossPickupFormatter.tagalogDayName(java.time.DayOfWeek.FRIDAY))
+        assertEquals("Sabado", BossPickupFormatter.tagalogDayName(java.time.DayOfWeek.SATURDAY))
     }
 
     @Test

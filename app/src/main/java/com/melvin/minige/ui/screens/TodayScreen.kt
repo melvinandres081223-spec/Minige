@@ -190,15 +190,9 @@ fun TodayScreen(
             }
 
             item(key = "boss_pickup_update_card", contentType = "boss_pickup") {
-                val deliveredGallons = remember(uiState.deliveriesForDay) {
-                    uiState.deliveriesForDay
-                        .filter { it.paymentType != PaymentType.PICK_UP && it.totalGallons > 0 }
-                        .sumOf { it.totalGallons }
-                }
                 BossPickupUpdateCard(
                     pickupMessage = uiState.bossPickupMessage,
-                    pickupGallons = uiState.dailySummary.pickupGallons,
-                    deliveredGallons = deliveredGallons,
+                    totalPaidGallons = uiState.dailySummary.totalPaidGallons,
                     onSendToBoss = {
                         copyAndShareToMessenger(context, uiState.bossPickupMessage)
                         onBossSendTriggered("Daily Hakot report copied & opened share sheet")
@@ -641,8 +635,7 @@ private fun CommissionHeroCard(
 @Composable
 private fun BossPickupUpdateCard(
     pickupMessage: String,
-    pickupGallons: Int,
-    deliveredGallons: Int,
+    totalPaidGallons: Int,
     onSendToBoss: () -> Unit,
 ) {
     ElevatedCard(
@@ -672,11 +665,11 @@ private fun BossPickupUpdateCard(
                     )
                     Column(modifier = Modifier.fillMaxWidth()) {
                         Text(
-                            text = "Daily Hakot Report (Pick-Up & Delivered)",
+                            text = "Daily Hakot Report",
                             style = MaterialTheme.typography.titleMedium,
                         )
                         Text(
-                            text = "$pickupGallons pick-up • $deliveredGallons delivered gal(s)",
+                            text = "$totalPaidGallons delivered gal(s)",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
