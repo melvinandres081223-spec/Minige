@@ -62,6 +62,13 @@ class MinigeRepository(
         return DriveBackupManager.backupToDrive(accessToken, dao, userId, context)
     }
 
+    suspend fun exportLocalBackup(
+        userId: String,
+        context: Context,
+    ): Result<String> {
+        return DriveBackupManager.exportLocalBackupJson(dao, userId, context)
+    }
+
     suspend fun restoreFromDrive(
         accessToken: String? = null,
         userId: String,

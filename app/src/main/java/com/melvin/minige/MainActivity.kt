@@ -362,12 +362,16 @@ fun MinigeMainShell(
                     userEmail = userEmail,
                     onSaveSettings = viewModel::updateSettings,
                     onScheduleCommissionRate = viewModel::scheduleCommissionRate,
+                    onUpdateQuotaTarget = viewModel::updateDailyQuotaTarget,
+                    onToggleSundayMakeup = viewModel::setSundayMakeupMode,
                     onSyncNow = viewModel::syncNow,
                     onGrantDriveAccess = { viewModel.triggerDriveConsent(context) },
                     onBackupToDriveNow = { viewModel.manualBackupNow(context) },
                     onPreviewRestoreFromDrive = { viewModel.previewDriveRestore(context) },
                     onConfirmRestoreFromDrive = { viewModel.restoreFromDrive(context) },
                     onDismissRestorePreview = viewModel::dismissRestorePreview,
+                    onToggleAutoBackupBeforeUpdate = viewModel::setAutoBackupBeforeUpdate,
+                    onBackupBeforeUpdate = { viewModel.backupBeforeAppUpdate(context) },
                     onRunDiagnostics = { viewModel.runAppDiagnostics(context) },
                     onSignOut = {
                         GoogleAuthManager.signOut(

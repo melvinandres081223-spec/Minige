@@ -1,8 +1,13 @@
 package com.melvin.minige.sync
 
+import android.content.ContentUris
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.IntentSender
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.util.Log
 import androidx.annotation.VisibleForTesting
 import com.melvin.minige.BuildConfig
@@ -134,10 +139,15 @@ object DriveBackupManager {
     private const val TAG = "DriveBackupManager"
     const val BACKUP_FOLDER_NAME = "Minige Backup"
     const val BACKUP_FILE_NAME = "minige_auto_backup.json"
+    const val LOCAL_BACKUP_DISPLAY_PATH = "/Download/Minige/Backups"
+    const val LOCAL_BACKUP_RELATIVE_PATH = "Minige/Backups"
+    const val GITHUB_SOURCE_CODE_URL = "https://github.com/melvinandres081223-spec/Minige"
     private const val PREFS_NAME = "minige_drive_backup_prefs"
     private const val KEY_LAST_BACKUP = "last_drive_backup_"
     private const val KEY_CACHED_TOKEN = "cached_drive_token_"
     private const val KEY_LAST_BACKUP_META = "last_backup_meta_summary_"
+    private const val KEY_AUTO_BACKUP_ON_UPDATE = "auto_backup_on_update_"
+    private const val KEY_LAST_LOCAL_BACKUP_PATH = "last_local_backup_path_"
     private const val BOUNDARY = "MINIGE_DRIVE_BACKUP_BOUNDARY_7788"
 
     private const val DRIVE_FILES_ROOT_URL = "https://www.googleapis.com/drive/v3/files"
@@ -197,6 +207,152 @@ object DriveBackupManager {
         }
     }
 
+    suspend fun buildBackupPayload(
+        dao: MinigeDao,
+        userId: String,
+        context: Context,
+        timestamp: Long = System.currentTimeMillis(),
+    ): Pair<String, BackupMetadata> {
+        val deliveries = dao.getAllDeliveriesOnce(userId)
+        val utangPayments = dao.getAllUtangPaymentsOnce(userId)
+        val expenses = dao.getAllExpensesOnce(userId)
+        val dailyLedgers = dao.getAllDailyLedgersOnce(userId)
+        val settings = dao.getSettingsOnce()
+        val customers = dao.getAllCustomersOnce(userId)
+        val rateHistory = CommissionRateHistory.loadHistory(context, userId)
+
+        val quota = DailyQuotaPrefs.loadQuotaTarget(context, userId)
+        val sundayMakeup = SundayMakeupPrefs.isEnabled(context, userId)
+        val effectiveRate = settings?.commissionRate ?: 8
+        val purified = settings?.purifiedPrice ?: 30
+        val alkaline = settings?.alkalinePrice ?: 40
+        val sukli = settings?.defaultSukli ?: 0
+
+        val appPreferences = BackupAppPreferences(
+            purifiedPrice = purified,
+            alkalinePrice = alkaline,
+            commissionRate = effectiveRate,
+            defaultSukli = sukli,
+            dailyQuotaTarget = quota,
+            sundayMakeupEnabled = sundayMakeup,
+        )
+
+        val totalPickups = deliveries.count { it.paymentType == "PICK_UP" }
+        val totalPautang = deliveries.count { it.paymentType == "PAUTANG" }
+
+        val backupMetadata = BackupMetadata(
+            appVersion = BuildConfig.VERSION_NAME,
+            versionCode = BuildConfig.VERSION_CODE,
+            exportedAt = formatBackupTimestamp(timestamp),
+            totalDeliveries = deliveries.size,
+            totalPickups = totalPickups,
+            totalPautang = totalPautang,
+            totalExpenses = expenses.size,
+            totalCustomers = customers.size,
+            totalPayments = utangPayments.size,
+        )
+
+        val backupData = MinigeBackupData(
+            version = 2,
+            backupTimestamp = timestamp,
+            userId = userId,
+            deliveries = deliveries,
+            utangPayments = utangPayments,
+            expenses = expenses,
+            dailyLedgers = dailyLedgers,
+            settings = settings,
+            customers = customers,
+            commissionRateHistory = rateHistory,
+            preferences = appPreferences,
+            metadata = backupMetadata,
+        )
+
+        return serializeBackupPayload(backupData) to backupMetadata
+    }
+
+    /**
+     * Exports [BACKUP_FILE_NAME] to the local Downloads folder (`Download/Minige/Backups`)
+     * using scoped [MediaStore.Downloads] on API 29+ (zero storage permissions required) with a
+     * safe app-external/internal fallback on API 26–28 or test environments.
+     */
+    suspend fun exportLocalBackupJson(
+        dao: MinigeDao,
+        userId: String,
+        context: Context,
+    ): Result<String> = withContext(Dispatchers.IO) {
+        try {
+            val now = System.currentTimeMillis()
+            val (jsonPayload, backupMetadata) = buildBackupPayload(dao, userId, context, now)
+            val appContext = context.applicationContext
+            val bytes = jsonPayload.toByteArray(StandardCharsets.UTF_8)
+
+            var writtenViaMediaStore = false
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val relativePath = "${Environment.DIRECTORY_DOWNLOADS}/$LOCAL_BACKUP_RELATIVE_PATH"
+                val resolver = appContext.contentResolver
+                val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+                val existingUri = runCatching {
+                    resolver.query(
+                        collection,
+                        arrayOf(MediaStore.MediaColumns._ID),
+                        "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND ${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?",
+                        arrayOf(BACKUP_FILE_NAME, "$relativePath%"),
+                        null,
+                    )?.use { cursor ->
+                        if (cursor.moveToFirst()) {
+                            val id = cursor.getLong(0)
+                            ContentUris.withAppendedId(collection, id)
+                        } else {
+                            null
+                        }
+                    }
+                }.getOrNull()
+
+                val targetUri = existingUri ?: runCatching {
+                    val values = ContentValues().apply {
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, BACKUP_FILE_NAME)
+                        put(MediaStore.MediaColumns.MIME_TYPE, "application/json")
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+                    }
+                    resolver.insert(collection, values)
+                }.getOrNull()
+
+                if (targetUri != null) {
+                    val wrote = runCatching {
+                        resolver.openOutputStream(targetUri, "wt")?.use { out ->
+                            out.write(bytes)
+                            out.flush()
+                            true
+                        } ?: false
+                    }.getOrDefault(false)
+                    writtenViaMediaStore = wrote
+                }
+            }
+
+            if (!writtenViaMediaStore) {
+                val baseDir = appContext.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+                    ?: appContext.filesDir
+                val backupDir = java.io.File(baseDir, LOCAL_BACKUP_RELATIVE_PATH)
+                if (!backupDir.exists()) {
+                    backupDir.mkdirs()
+                }
+                val outFile = java.io.File(backupDir, BACKUP_FILE_NAME)
+                outFile.writeBytes(bytes)
+            }
+
+            val displayLocation = "$LOCAL_BACKUP_DISPLAY_PATH/$BACKUP_FILE_NAME"
+            saveLastBackupTimestamp(context, userId, now)
+            saveBackupMetadataSummary(context, userId, backupMetadata)
+            saveLastLocalBackupPath(context, userId, displayLocation)
+            Result.success(displayLocation)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Local JSON backup failed: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
+
     suspend fun backupToDrive(
         accessToken: String? = null,
         dao: MinigeDao,
@@ -205,61 +361,7 @@ object DriveBackupManager {
     ): Result<Long> = withContext(Dispatchers.IO) {
         try {
             val now = System.currentTimeMillis()
-            val deliveries = dao.getAllDeliveriesOnce(userId)
-            val utangPayments = dao.getAllUtangPaymentsOnce(userId)
-            val expenses = dao.getAllExpensesOnce(userId)
-            val dailyLedgers = dao.getAllDailyLedgersOnce(userId)
-            val settings = dao.getSettingsOnce()
-            val customers = dao.getAllCustomersOnce(userId)
-            val rateHistory = CommissionRateHistory.loadHistory(context, userId)
-
-            val quota = DailyQuotaPrefs.loadQuotaTarget(context, userId)
-            val sundayMakeup = SundayMakeupPrefs.isEnabled(context, userId)
-            val effectiveRate = settings?.commissionRate ?: 8
-            val purified = settings?.purifiedPrice ?: 30
-            val alkaline = settings?.alkalinePrice ?: 40
-            val sukli = settings?.defaultSukli ?: 0
-
-            val appPreferences = BackupAppPreferences(
-                purifiedPrice = purified,
-                alkalinePrice = alkaline,
-                commissionRate = effectiveRate,
-                defaultSukli = sukli,
-                dailyQuotaTarget = quota,
-                sundayMakeupEnabled = sundayMakeup,
-            )
-
-            val totalPickups = deliveries.count { it.paymentType == "PICK_UP" }
-            val totalPautang = deliveries.count { it.paymentType == "PAUTANG" }
-
-            val backupMetadata = BackupMetadata(
-                appVersion = BuildConfig.VERSION_NAME,
-                versionCode = BuildConfig.VERSION_CODE,
-                exportedAt = formatBackupTimestamp(now),
-                totalDeliveries = deliveries.size,
-                totalPickups = totalPickups,
-                totalPautang = totalPautang,
-                totalExpenses = expenses.size,
-                totalCustomers = customers.size,
-                totalPayments = utangPayments.size,
-            )
-
-            val backupData = MinigeBackupData(
-                version = 2,
-                backupTimestamp = now,
-                userId = userId,
-                deliveries = deliveries,
-                utangPayments = utangPayments,
-                expenses = expenses,
-                dailyLedgers = dailyLedgers,
-                settings = settings,
-                customers = customers,
-                commissionRateHistory = rateHistory,
-                preferences = appPreferences,
-                metadata = backupMetadata,
-            )
-
-            val jsonPayload = serializeBackupPayload(backupData)
+            val (jsonPayload, backupMetadata) = buildBackupPayload(dao, userId, context, now)
             val (_, activeToken) = executeWithTokenRetry(
                 context = context,
                 userId = userId,
@@ -1062,6 +1164,28 @@ object DriveBackupManager {
     fun clearCachedToken(context: Context, userId: String) {
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().remove("$KEY_CACHED_TOKEN$userId").apply()
+    }
+
+    fun isAutoBackupBeforeUpdateEnabled(context: Context, userId: String): Boolean {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean("$KEY_AUTO_BACKUP_ON_UPDATE$userId", true)
+    }
+
+    fun setAutoBackupBeforeUpdateEnabled(context: Context, userId: String, enabled: Boolean) {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putBoolean("$KEY_AUTO_BACKUP_ON_UPDATE$userId", enabled).apply()
+    }
+
+    fun getLastLocalBackupPath(context: Context, userId: String): String {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getString("$KEY_LAST_LOCAL_BACKUP_PATH$userId", null)
+            ?.takeIf { it.isNotBlank() }
+            ?: LOCAL_BACKUP_DISPLAY_PATH
+    }
+
+    fun saveLastLocalBackupPath(context: Context, userId: String, path: String) {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putString("$KEY_LAST_LOCAL_BACKUP_PATH$userId", path).apply()
     }
 
     fun formatBackupTimestamp(epochMs: Long): String {

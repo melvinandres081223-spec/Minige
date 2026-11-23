@@ -131,6 +131,8 @@ data class MinigeUiState(
     val driveBackupSummary: com.melvin.minige.sync.BackupMetadataSummary? = null,
     val driveBackupPreview: DriveBackupPreview? = null,
     val showRestorePreviewDialog: Boolean = false,
+    val autoBackupBeforeUpdate: Boolean = true,
+    val lastLocalBackupPath: String = DriveBackupManager.LOCAL_BACKUP_DISPLAY_PATH,
     val bulkSettlementConfirmation: BulkUtangSettlementSummary? = null,
     val inactiveSukiAlerts: List<InactiveSukiAlert> = emptyList(),
     val inactiveAlertsByCustomerId: Map<String, InactiveSukiAlert> = emptyMap(),
@@ -181,6 +183,13 @@ class MinigeViewModel(
     private val _isDriveBackingUp = MutableStateFlow(false)
     private val _driveBackupPreview = MutableStateFlow<DriveBackupPreview?>(null)
     private val _showRestorePreviewDialog = MutableStateFlow(false)
+    private val _autoBackupBeforeUpdate = MutableStateFlow(
+        appContext?.let { DriveBackupManager.isAutoBackupBeforeUpdateEnabled(it, currentUserId) } ?: true
+    )
+    private val _lastLocalBackupPath = MutableStateFlow(
+        appContext?.let { DriveBackupManager.getLastLocalBackupPath(it, currentUserId) }
+            ?: DriveBackupManager.LOCAL_BACKUP_DISPLAY_PATH
+    )
     private val _bulkSettlementConfirmation = MutableStateFlow<BulkUtangSettlementSummary?>(null)
     private val _diagnosticReport = MutableStateFlow<AppDiagnosticReport?>(null)
     private val _isRunningDiagnostics = MutableStateFlow(false)
@@ -259,6 +268,8 @@ class MinigeViewModel(
         val sundayEnabled: Boolean,
         val rateHistory: List<CommissionRateEntry>,
         val quotaTarget: Int,
+        val autoBackupBeforeUpdate: Boolean,
+        val lastLocalBackupPath: String,
     )
 
     private data class DriveBackupSnapshot(
@@ -270,8 +281,23 @@ class MinigeViewModel(
     )
 
     val uiState: StateFlow<MinigeUiState> = combine(
-        combine(_selectedDate, _sundayMakeupEnabled, _commissionRateHistory, _dailyQuotaTarget) { date, sundayEnabled, rateHist, quotaTarget ->
-            ViewPrefsSnapshot(date, sundayEnabled, rateHist, quotaTarget)
+        combine(
+            _selectedDate,
+            _sundayMakeupEnabled,
+            _commissionRateHistory,
+            _dailyQuotaTarget,
+            combine(_autoBackupBeforeUpdate, _lastLocalBackupPath) { autoBackup, localPath ->
+                autoBackup to localPath
+            },
+        ) { date, sundayEnabled, rateHist, quotaTarget, backupPrefPair ->
+            ViewPrefsSnapshot(
+                date = date,
+                sundayEnabled = sundayEnabled,
+                rateHistory = rateHist,
+                quotaTarget = quotaTarget,
+                autoBackupBeforeUpdate = backupPrefPair.first,
+                lastLocalBackupPath = backupPrefPair.second,
+            )
         },
         localDataFlow,
         combine(_driveBackupStatus, _driveLastBackupTimestamp, _isDriveBackingUp, _driveBackupPreview, _showRestorePreviewDialog) { status, lastTs, backingUp, preview, showPreview ->
@@ -415,6 +441,8 @@ class MinigeViewModel(
             driveBackupSummary = driveMetaSummary,
             driveBackupPreview = driveSnap.preview,
             showRestorePreviewDialog = driveSnap.showPreview,
+            autoBackupBeforeUpdate = prefs.autoBackupBeforeUpdate,
+            lastLocalBackupPath = prefs.lastLocalBackupPath,
             bulkSettlementConfirmation = bulkSummary,
             inactiveSukiAlerts = inactiveSukiAlerts,
             inactiveAlertsByCustomerId = inactiveAlertsByCustomerId,
@@ -1006,7 +1034,66 @@ class MinigeViewModel(
         }
     }
 
+    fun setAutoBackupBeforeUpdate(enabled: Boolean) {
+        _autoBackupBeforeUpdate.value = enabled
+        appContext?.let { ctx ->
+            DriveBackupManager.setAutoBackupBeforeUpdateEnabled(ctx, currentUserId, enabled)
+        }
+        _events.tryEmit(
+            MinigeEvent.ShowMessage(
+                if (enabled) "Auto-backup before app updates enabled"
+                else "Auto-backup before app updates disabled"
+            )
+        )
+    }
+
+    suspend fun backupBeforeAppUpdate(context: android.content.Context): String =
+        kotlinx.coroutines.withContext(Dispatchers.IO) {
+            _isDriveBackingUp.value = true
+            try {
+                val localRes = repository.exportLocalBackup(currentUserId, context)
+                localRes.onSuccess { path ->
+                    _lastLocalBackupPath.value = path
+                    _driveLastBackupTimestamp.value = DriveBackupManager.getLastBackupTimestamp(context, currentUserId)
+                }
+
+                var driveSynced = false
+                if (GoogleAuthManager.hasDrivePermission(context)) {
+                    val auth = GoogleAuthManager.fetchFreshDriveAccessToken(context)
+                    if (auth is DriveAuthResult.Authorized) {
+                        val driveRes = repository.backupToDrive(auth.accessToken, currentUserId, context)
+                        driveRes.onSuccess { ts ->
+                            driveSynced = true
+                            _driveLastBackupTimestamp.value = ts
+                            _driveBackupStatus.value = DriveBackupStatus.ACTIVE
+                        }
+                    }
+                }
+
+                when {
+                    driveSynced && localRes.isSuccess -> "Pre-update backup saved to Drive & Downloads ✓"
+                    localRes.isSuccess -> "Pre-update local backup saved to ${DriveBackupManager.LOCAL_BACKUP_DISPLAY_PATH} ✓"
+                    else -> "Starting update..."
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                "Starting update..."
+            } finally {
+                _isDriveBackingUp.value = false
+            }
+        }
+
     fun manualBackupNow(context: android.content.Context) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.exportLocalBackup(currentUserId, context).onSuccess { path ->
+                _lastLocalBackupPath.value = path
+                _driveLastBackupTimestamp.value = DriveBackupManager.getLastBackupTimestamp(context, currentUserId)
+                _events.tryEmit(
+                    MinigeEvent.ShowMessage("Saved local backup to $path ✓")
+                )
+            }
+        }
         performDriveBackup(isSilent = false)
     }
 

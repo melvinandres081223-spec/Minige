@@ -1487,6 +1487,70 @@ class ExampleRobolectricTest {
         assertFalse(redacted.contains("com.melvin.minige.vault"))
         assertTrue(redacted.contains("[REDACTED]"))
     }
+
+    @Test
+    fun `auto backup before update defaults to true and local JSON backup exports cleanly`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, MinigeDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        try {
+            val dao = db.minigeDao()
+            val userId = "rider_local_backup"
+
+            // Default ON for Automatic backup before app update
+            assertTrue(DriveBackupManager.isAutoBackupBeforeUpdateEnabled(context, userId))
+            DriveBackupManager.setAutoBackupBeforeUpdateEnabled(context, userId, false)
+            assertFalse(DriveBackupManager.isAutoBackupBeforeUpdateEnabled(context, userId))
+            DriveBackupManager.setAutoBackupBeforeUpdateEnabled(context, userId, true)
+            assertTrue(DriveBackupManager.isAutoBackupBeforeUpdateEnabled(context, userId))
+
+            dao.upsertDelivery(
+                DeliveryEntity(
+                    id = "loc_del_1",
+                    userId = userId,
+                    dateKey = "2026-11-25",
+                    customerName = "Local Backup Suki",
+                    purifiedGallons = 6,
+                    alkalineGallons = 0,
+                    purifiedUnitPrice = 30,
+                    alkalineUnitPrice = 40,
+                    totalAmount = 180,
+                    amountPaid = 180,
+                    paymentType = "CASH",
+                    commissionRate = 8,
+                    commissionEarned = 48,
+                    settledDateKey = "2026-11-25",
+                    notes = "",
+                    calendarEventId = null,
+                    pendingSync = false,
+                    isDeleted = false,
+                    createdAtEpochMs = 100L,
+                    updatedAtEpochMs = 100L,
+                )
+            )
+
+            val result = DriveBackupManager.exportLocalBackupJson(
+                dao = dao,
+                userId = userId,
+                context = context,
+            )
+            assertTrue("Expected local backup export to succeed: ${result.exceptionOrNull()}", result.isSuccess)
+            val displayPath = result.getOrThrow()
+            assertTrue(displayPath.contains(DriveBackupManager.LOCAL_BACKUP_DISPLAY_PATH))
+            assertTrue(displayPath.endsWith(DriveBackupManager.BACKUP_FILE_NAME))
+            assertTrue(DriveBackupManager.getLastBackupTimestamp(context, userId) > 0L)
+            assertEquals(1, DriveBackupManager.getBackupMetadataSummary(context, userId)?.totalDeliveries)
+
+            // Verify serialized payload round-trips cleanly
+            val (payloadJson, _) = DriveBackupManager.buildBackupPayload(dao, userId, context)
+            val parsed = DriveBackupManager.deserializeBackupPayload(payloadJson)
+            assertEquals(1, parsed.deliveries.size)
+            assertEquals("Local Backup Suki", parsed.deliveries.first().customerName)
+        } finally {
+            db.close()
+        }
+    }
 }
 
 
