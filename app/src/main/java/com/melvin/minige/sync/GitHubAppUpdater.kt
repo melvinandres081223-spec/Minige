@@ -51,9 +51,14 @@ object GitHubAppUpdater {
     internal const val USER_AGENT = "Minige-Android-Updater"
     internal const val ACCEPT_HEADER = "application/vnd.github+json"
 
+    internal const val RELEASE_NOTES_ATTRIBUTION = "Release Notes by Vin"
+    internal const val FALLBACK_RELEASE_NOTE = "Bug fixes, sync improvements, and UI refinements."
+    internal const val RELEASES_PAGE_URL = "https://github.com/melvinandres081223-spec/Minige/releases"
+
     private const val PREFS_NAME = "minige_updater_prefs"
     private const val KEY_LAST_PUBLISHED_AT = "last_installed_published_at"
     private const val KEY_CACHED_RELEASE_NOTES = "cached_latest_release_notes"
+    private const val KEY_CACHED_CHANGELOG_URL = "cached_latest_changelog_url"
     private const val APK_FILE_NAME = "Minige-update.apk"
 
     fun getLastInstalledPublishedAt(context: Context): String {
@@ -73,16 +78,42 @@ object GitHubAppUpdater {
         return prefs.getString(KEY_CACHED_RELEASE_NOTES, "") ?: ""
     }
 
-    fun saveCachedReleaseNotes(context: Context, notes: String) {
+    fun saveCachedReleaseNotes(context: Context, notes: String, tagName: String? = null) {
         if (notes.isBlank()) return
+        val extractedUrl = extractChangelogUrl(notes, tagName)
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString(KEY_CACHED_RELEASE_NOTES, notes)
+            .putString(KEY_CACHED_CHANGELOG_URL, extractedUrl)
             .apply()
+    }
+
+    fun getCachedChangelogUrl(context: Context): String {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getString(KEY_CACHED_CHANGELOG_URL, RELEASES_PAGE_URL)
+            ?.takeIf { it.isNotBlank() }
+            ?: RELEASES_PAGE_URL
+    }
+
+    fun extractChangelogUrl(rawBody: String?, tagName: String? = null): String {
+        if (!rawBody.isNullOrBlank()) {
+            val match = Regex("https://github\\.com/[^\\s)>\\]]+").find(rawBody)
+            if (match != null) {
+                return match.value.trimEnd('.', ',', ';')
+            }
+        }
+        val cleanTag = tagName?.trim()?.takeIf { it.isNotEmpty() && !it.equals("latest", ignoreCase = true) }
+        return if (cleanTag != null) {
+            "$RELEASES_PAGE_URL/tag/$cleanTag"
+        } else {
+            RELEASES_PAGE_URL
+        }
     }
 
     /**
      * Splits and parses Markdown or plain text release notes into clean user-facing bullet points.
+     * Filters out any line containing "Full Changelog" or "https://github.com/", strips raw "**"
+     * markdown bold markers, and returns an empty list when no bullet items remain.
      */
     fun formatReleaseNotes(rawBody: String?): List<String> {
         if (rawBody.isNullOrBlank()) return emptyList()
@@ -94,50 +125,49 @@ object GitHubAppUpdater {
             if (trimmed.isEmpty()) continue
             // Skip markdown headers
             if (trimmed.startsWith("#")) continue
-            // Skip automated bot lines or metadata
-            if (trimmed.startsWith("**Full Changelog**", ignoreCase = true)) continue
+            // Filter out Full Changelog lines and GitHub URLs
+            if (trimmed.contains("Full Changelog", ignoreCase = true)) continue
+            if (trimmed.contains("https://github.com/", ignoreCase = true)) continue
             if (trimmed.startsWith("http://", ignoreCase = true) || trimmed.startsWith("https://", ignoreCase = true)) continue
 
-            val clean = when {
+            val withoutPrefix = when {
                 trimmed.startsWith("* ") -> trimmed.removePrefix("* ").trim()
                 trimmed.startsWith("- ") -> trimmed.removePrefix("- ").trim()
                 trimmed.startsWith("• ") -> trimmed.removePrefix("• ").trim()
                 trimmed.matches(Regex("^\\d+\\.\\s+.*")) -> trimmed.substringAfter(" ").trim()
                 else -> trimmed
             }
-            if (clean.isNotBlank()) {
-                // Strip common github commit hashes or author trailers like "by @user in #12"
-                val cleanedBullet = clean
-                    .replace(Regex("\\s+in\\s+https://github\\.com/[^\\s]+"), "")
-                    .replace(Regex("\\s+by\\s+@[^\\s]+"), "")
+            val cleanedBullet = withoutPrefix
+                .replace("**", "")
+                .replace(Regex("\\s+by\\s+@[^\\s]+"), "")
+                .trim()
+
+            if (cleanedBullet.isNotBlank()) {
                 bullets.add(cleanedBullet)
             }
         }
 
-        return if (bullets.isEmpty()) {
-            listOf(rawBody.trim().take(300))
-        } else {
-            bullets
-        }
+        return bullets
     }
 
     /**
-     * Provides curated release notes for the active version, falling back to cached GitHub notes
-     * or curated flagship feature highlights.
+     * Provides clean release notes for the active version, returning the standard fallback bullet
+     * when cached release notes only contain filtered changelog URLs, or curated highlights before
+     * any release notes have been fetched.
      */
     fun getWhatsNewForCurrentVersion(context: Context): List<String> {
         val cached = getCachedReleaseNotes(context)
-        val parsed = formatReleaseNotes(cached)
-        if (parsed.isNotEmpty()) {
-            return parsed
+        if (cached.isNotBlank()) {
+            val parsed = formatReleaseNotes(cached)
+            return if (parsed.isNotEmpty()) parsed else listOf(FALLBACK_RELEASE_NOTE)
         }
         return listOf(
             "Visible Google Drive Auto-Backup sa My Drive 'Minige Backup' folder (drive.file scope)",
             "Automatic 'What's New' release notes & direct in-app APK installer",
-            "Zero-lag 120Hz display refresh rate lock para sa smooth scrolling",
-            "Taglish interactive screen guide (?) at 5-segundo Undo action banner",
-            "Variable commission rate history (₱8/gal) at 1-Tap Hakot Messenger export",
-            "Per-customer suki custom pricing at offline-first Room + Cloud sync",
+            "3-Day Inactive Suki warning alerts with 1-tap Re-order prefill",
+            "Built-in App Diagnostics & Health Check with secret redaction",
+            "Variable commission rate history (₱8/gal) & bulleted Daily Hakot Messenger export",
+            "Zero-lag 120Hz display refresh rate lock & offline-first Room + Cloud sync",
         )
     }
 
@@ -310,7 +340,7 @@ object GitHubAppUpdater {
         releaseResult.fold(
             onSuccess = { release ->
                 if (release.releaseNotes.isNotBlank()) {
-                    saveCachedReleaseNotes(context, release.releaseNotes)
+                    saveCachedReleaseNotes(context, release.releaseNotes, release.tagName)
                 }
                 val isNewer = isRemoteReleaseNewer(
                     release = release,

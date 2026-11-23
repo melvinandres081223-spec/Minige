@@ -25,6 +25,7 @@ import com.melvin.minige.auth.GoogleAuthManager
 import com.melvin.minige.domain.BossPickupFormatter
 import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.ExpenseCategory
+import com.melvin.minige.domain.ExpenseRecord
 import com.melvin.minige.domain.InactiveSeverity
 import com.melvin.minige.domain.InactiveSukiAlertHelper
 import com.melvin.minige.domain.PaymentType
@@ -36,11 +37,15 @@ import com.melvin.minige.data.remote.toFirestoreCreateMap
 import com.melvin.minige.sync.BackupAppPreferences
 import com.melvin.minige.sync.BackupMetadata
 import com.melvin.minige.sync.DriveBackupManager
+import com.melvin.minige.sync.DriveBackupStatus
 import com.melvin.minige.sync.DriveConsentRequiredException
 import com.melvin.minige.sync.DriveTokenProvider
 import com.melvin.minige.sync.GitHubAppUpdater
 import com.melvin.minige.sync.MinigeBackupData
+import com.melvin.minige.util.AppDiagnosticsRunner
 import com.melvin.minige.util.CommissionRateEntry
+import com.melvin.minige.util.DiagnosticEnvironmentSnapshot
+import com.melvin.minige.util.DiagnosticStatus
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
@@ -490,7 +495,7 @@ class ExampleRobolectricTest {
             {
               "tag_name": "v1.0.42",
               "published_at": "2026-11-22T04:00:00Z",
-              "body": "## What's Changed\n* Added visible Minige Backup folder by @melvin in https://github.com/melvin/minige/pull/1\n* Direct in-app APK installer\n- Zero-lag 120Hz display refresh lock\n• 5-second undo banner",
+              "body": "## What's Changed\n* Added visible Minige Backup folder\n* Direct in-app APK installer\n- Zero-lag 120Hz display refresh lock\n• 5-second undo banner\n**Full Changelog**: https://github.com/melvin/minige/compare/v1.0.41...v1.0.42",
               "assets": [
                 {
                   "name": "app-debug.apk",
@@ -719,25 +724,18 @@ class ExampleRobolectricTest {
 
         assertTrue(formatted.contains("🚚 DAILY HAKOT (DELIVERED)"))
         assertTrue(formatted.contains("📅 Petsa: Nov 23, 2026 (Lunes)"))
-        assertTrue(formatted.contains("Store Alpha"))
-        assertTrue(formatted.contains("10 gals"))
-        assertTrue(formatted.contains("Store Beta"))
-        assertTrue(formatted.contains("5 gals"))
-        assertTrue(formatted.contains("Kuya Ben Settled"))
-        assertTrue(formatted.contains("3 gals"))
-        assertTrue(formatted.contains("Mang Tomas Partial"))
-        assertTrue(formatted.contains("DELIVERED PAID TOTAL:"))
-        assertTrue(formatted.contains("21 gals"))
+        assertTrue(formatted.contains("• Store Alpha — 10 gals"))
+        assertTrue(formatted.contains("• Store Beta — 5 gals"))
+        assertTrue(formatted.contains("• Kuya Ben Settled — 3 gals"))
+        assertTrue(formatted.contains("• Mang Tomas Partial — 2 gals"))
+        assertTrue(formatted.contains("• Kuya Joel Split — 1 gal"))
+        assertTrue(formatted.contains("DELIVERED PAID TOTAL: 21 gals"))
 
         assertTrue(formatted.contains("📋 PAUTANG DELIVERED TODAY"))
-        assertTrue(formatted.contains("Ate Rosa Unpaid"))
-        assertTrue(formatted.contains("4 gals"))
-        assertTrue(formatted.contains("Kuya Joel Split"))
-        assertTrue(formatted.contains("2 gals"))
-        assertTrue(formatted.contains("PAUTANG TOTAL:"))
-        assertTrue(formatted.contains("6 gals"))
-        assertTrue(formatted.contains("GRAND TOTAL:"))
-        assertTrue(formatted.contains("27 gals"))
+        assertTrue(formatted.contains("• Ate Rosa Unpaid — 4 gals"))
+        assertTrue(formatted.contains("• Kuya Joel Split — 2 gals"))
+        assertTrue(formatted.contains("PAUTANG TOTAL: 6 gals"))
+        assertTrue(formatted.contains("GRAND TOTAL: 27 gals"))
 
         // Verify PICK_UP and older unpaid Pautang are excluded, and zero peso/money figures appear
         assertFalse(formatted.contains("Nene Pickup"))
@@ -1341,6 +1339,153 @@ class ExampleRobolectricTest {
         } finally {
             db.close()
         }
+    }
+
+    @Test
+    fun `release notes parser strips Full Changelog URLs and bold markdown markers cleanly`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val rawBodyWithChanges = """
+            ## What's Changed
+            - **Added** 3-day inactive customer alert
+            * Clean bulleted **Daily Hakot** format by @melvin
+            **Full Changelog**: https://github.com/melvinandres081223-spec/Minige/compare/v1.0.1...v1.0.2
+        """.trimIndent()
+
+        val parsed = GitHubAppUpdater.formatReleaseNotes(rawBodyWithChanges)
+        assertEquals(
+            listOf(
+                "Added 3-day inactive customer alert",
+                "Clean bulleted Daily Hakot format",
+            ),
+            parsed,
+        )
+        assertTrue(parsed.none { it.contains("**") })
+        assertTrue(parsed.none { it.contains("Full Changelog", ignoreCase = true) })
+        assertTrue(parsed.none { it.contains("https://github.com/") })
+
+        // Body containing ONLY Full Changelog link should yield emptyList() and fallback text in What's New
+        val changelogOnly = "**Full Changelog**: https://github.com/melvinandres081223-spec/Minige/compare/v1.0.1...v1.0.2"
+        assertTrue(GitHubAppUpdater.formatReleaseNotes(changelogOnly).isEmpty())
+        assertEquals(
+            "https://github.com/melvinandres081223-spec/Minige/compare/v1.0.1...v1.0.2",
+            GitHubAppUpdater.extractChangelogUrl(changelogOnly, "v1.0.2"),
+        )
+
+        GitHubAppUpdater.saveCachedReleaseNotes(context, changelogOnly, "v1.0.2")
+        assertEquals(
+            listOf(GitHubAppUpdater.FALLBACK_RELEASE_NOTE),
+            GitHubAppUpdater.getWhatsNewForCurrentVersion(context),
+        )
+        assertEquals("Release Notes by Vin", GitHubAppUpdater.RELEASE_NOTES_ATTRIBUTION)
+    }
+
+    @Test
+    fun `app diagnostics runner validates 5 health areas and strictly redacts secrets`() {
+        val dateKey = "2026-11-25"
+        val validDelivery = DeliveryRecord(
+            id = "diag_d1",
+            userId = "u1",
+            dateKey = dateKey,
+            customerName = "Suki Uno",
+            purifiedGallons = 4,
+            alkalineGallons = 0,
+            purifiedUnitPrice = 30,
+            alkalineUnitPrice = 40,
+            totalAmount = 120,
+            amountPaid = 120,
+            paymentType = PaymentType.CASH,
+            commissionRate = 8,
+            commissionEarned = 32,
+            settledDateKey = null,
+            notes = "",
+            calendarEventId = null,
+            pendingSync = false,
+            createdAtEpochMs = 1L,
+            updatedAtEpochMs = 1L,
+        )
+        val validExpense = ExpenseRecord(
+            id = "diag_e1",
+            userId = "u1",
+            dateKey = dateKey,
+            category = ExpenseCategory.GAS,
+            amount = 50,
+            notes = "Gas",
+            pendingSync = false,
+            createdAtEpochMs = 2L,
+            updatedAtEpochMs = 2L,
+        )
+
+        val healthyEnv = DiagnosticEnvironmentSnapshot(
+            isFirebaseSignedIn = true,
+            accountLabelMasked = "me***@gmail.com",
+            pendingSyncCount = 0,
+            hasDrivePermission = true,
+            hasDriveCachedToken = true,
+            driveBackupStatus = DriveBackupStatus.ACTIVE,
+            lastDriveBackupTimestamp = 1_700_000_000_000L,
+            backupMetadataSummary = null,
+            hasMicPermission = true,
+            hasCalendarPermission = true,
+            canRequestPackageInstalls = true,
+            versionName = "1.0.99",
+            versionCode = 99,
+        )
+
+        val passReport = AppDiagnosticsRunner.evaluate(
+            env = healthyEnv,
+            selectedDateKey = dateKey,
+            deliveries = listOf(validDelivery),
+            utangPayments = emptyList(),
+            expenses = listOf(validExpense),
+            dailyLedgers = emptyList(),
+            customers = emptyList(),
+            defaultSukli = 0,
+        )
+        assertEquals(5, passReport.items.size)
+        assertEquals(DiagnosticStatus.PASS, passReport.overallStatus)
+        assertTrue(passReport.items.all { it.status == DiagnosticStatus.PASS })
+        assertTrue(passReport.formattedReportText.contains("v1.0.99"))
+
+        // Tampered PICK_UP with non-zero commission and pending sync should flag FAIL + WARN
+        val invalidPickup = validDelivery.copy(
+            id = "diag_bad_pickup",
+            customerName = "Bad Pickup",
+            paymentType = PaymentType.PICK_UP,
+            totalAmount = 0,
+            amountPaid = 0,
+            commissionEarned = 16,
+        )
+        val unhealthyReport = AppDiagnosticsRunner.evaluate(
+            env = healthyEnv.copy(pendingSyncCount = 3, hasMicPermission = false),
+            selectedDateKey = dateKey,
+            deliveries = listOf(validDelivery, invalidPickup),
+            utangPayments = emptyList(),
+            expenses = listOf(validExpense),
+            dailyLedgers = emptyList(),
+            customers = emptyList(),
+            defaultSukli = 0,
+        )
+        assertEquals(DiagnosticStatus.FAIL, unhealthyReport.overallStatus)
+        assertEquals(
+            DiagnosticStatus.WARN,
+            unhealthyReport.items.first { it.id == "firebase_auth_sync" }.status,
+        )
+        assertEquals(
+            DiagnosticStatus.FAIL,
+            unhealthyReport.items.first { it.id == "ledger_math_integrity" }.status,
+        )
+        assertEquals(
+            DiagnosticStatus.WARN,
+            unhealthyReport.items.first { it.id == "device_permissions" }.status,
+        )
+
+        // Verify strict redaction of OAuth tokens, passwords, and private vault paths
+        val sensitiveSample = "Bearer ya29.A0AfB_secret_token password=mySecret123 path=/data/user/0/com.melvin.minige/files/vault/notes.db com.melvin.minige.vault.VaultLock"
+        val redacted = AppDiagnosticsRunner.redactSensitiveInfo(sensitiveSample)
+        assertFalse(redacted.contains("ya29.A0AfB_secret_token"))
+        assertFalse(redacted.contains("mySecret123"))
+        assertFalse(redacted.contains("com.melvin.minige.vault"))
+        assertTrue(redacted.contains("[REDACTED]"))
     }
 }
 

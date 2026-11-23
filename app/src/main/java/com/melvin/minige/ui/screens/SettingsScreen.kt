@@ -1,14 +1,22 @@
 package com.melvin.minige.ui.screens
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -27,9 +35,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Logout
+import androidx.compose.material.icons.automirrored.rounded.OpenInNew
+import androidx.compose.material.icons.rounded.BugReport
 import androidx.compose.material.icons.rounded.CloudDownload
 import androidx.compose.material.icons.rounded.CloudSync
 import androidx.compose.material.icons.rounded.CloudUpload
+import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.HealthAndSafety
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.NewReleases
 import androidx.compose.material.icons.rounded.Save
@@ -39,12 +51,14 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -74,6 +88,9 @@ import com.melvin.minige.sync.UpdateCheckOutcome
 import com.melvin.minige.ui.MinigeUiState
 import com.melvin.minige.ui.components.CommissionRateCard
 import com.melvin.minige.ui.components.DeveloperSignatureCard
+import com.melvin.minige.util.AppDiagnosticReport
+import com.melvin.minige.util.DiagnosticCheckItem
+import com.melvin.minige.util.DiagnosticStatus
 import kotlinx.coroutines.launch
 import java.time.LocalDate
 
@@ -89,6 +106,7 @@ fun SettingsScreen(
     onPreviewRestoreFromDrive: () -> Unit = {},
     onConfirmRestoreFromDrive: () -> Unit = {},
     onDismissRestorePreview: () -> Unit = {},
+    onRunDiagnostics: () -> Unit = {},
     onSignOut: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -370,11 +388,18 @@ fun SettingsScreen(
                                 contentDescription = null,
                                 tint = MaterialTheme.colorScheme.primary,
                             )
-                            Text(
-                                text = "What's New in Minige",
-                                style = MaterialTheme.typography.titleMedium,
-                            )
-                            Spacer(modifier = Modifier.weight(1f))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "What's New in Minige",
+                                    style = MaterialTheme.typography.titleMedium,
+                                )
+                                Text(
+                                    text = GitHubAppUpdater.RELEASE_NOTES_ATTRIBUTION,
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.testTag("whats_new_attribution"),
+                                )
+                            }
                             Box(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(8.dp))
@@ -390,8 +415,11 @@ fun SettingsScreen(
                             }
                         }
 
-                        val whatsNewBullets = remember {
+                        val whatsNewBullets = remember(pendingUpdateRelease, updateStatusText) {
                             GitHubAppUpdater.getWhatsNewForCurrentVersion(context)
+                        }
+                        val cachedChangelogUrl = remember(pendingUpdateRelease, updateStatusText) {
+                            GitHubAppUpdater.getCachedChangelogUrl(context)
                         }
 
                         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -413,6 +441,27 @@ fun SettingsScreen(
                                     )
                                 }
                             }
+                        }
+
+                        OutlinedButton(
+                            onClick = { openChangelogUrl(context, cachedChangelogUrl) },
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                            modifier = Modifier
+                                .defaultMinSize(minHeight = 48.dp)
+                                .testTag("view_full_changelog_card_button"),
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "View Full Changelog",
+                                style = MaterialTheme.typography.labelLarge,
+                                maxLines = 1,
+                                softWrap = false,
+                            )
                         }
                     }
                 }
@@ -560,6 +609,17 @@ fun SettingsScreen(
                 }
             }
 
+            item(key = "app_diagnostics_card", contentType = "diagnostics_card") {
+                AppDiagnosticsCard(
+                    report = uiState.diagnosticReport,
+                    isRunning = uiState.isRunningDiagnostics,
+                    onRunDiagnostics = onRunDiagnostics,
+                    onCopyReport = { reportText ->
+                        copyDiagnosticReport(context, reportText)
+                    },
+                )
+            }
+
             item(key = "developer_signature_card", contentType = "developer_signature") {
                 DeveloperSignatureCard()
             }
@@ -602,45 +662,70 @@ fun SettingsScreen(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
+                    Text(
+                        text = GitHubAppUpdater.RELEASE_NOTES_ATTRIBUTION,
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.testTag("dialog_release_notes_attribution"),
+                    )
+
                     val bullets = GitHubAppUpdater.formatReleaseNotes(updateRelease.releaseNotes)
-                    if (bullets.isNotEmpty()) {
-                        Text(
-                            text = "What's New in this Version:",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
-                                .padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            bullets.forEach { note ->
-                                Row(
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    verticalAlignment = Alignment.Top,
-                                ) {
-                                    Text(
-                                        text = "•",
-                                        color = MaterialTheme.colorScheme.primary,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.Bold,
-                                    )
-                                    Text(
-                                        text = note,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                }
+                    val changelogUrl = GitHubAppUpdater.extractChangelogUrl(
+                        rawBody = updateRelease.releaseNotes,
+                        tagName = updateRelease.tagName,
+                    )
+                    Text(
+                        text = "What's New in this Version:",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    val displayBullets = bullets.ifEmpty { listOf(GitHubAppUpdater.FALLBACK_RELEASE_NOTE) }
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        displayBullets.forEach { note ->
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.Top,
+                            ) {
+                                Text(
+                                    text = "•",
+                                    color = MaterialTheme.colorScheme.primary,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                                Text(
+                                    text = note,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
                             }
                         }
-                    } else {
+                    }
+
+                    TextButton(
+                        onClick = { openChangelogUrl(context, changelogUrl) },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                        modifier = Modifier
+                            .defaultMinSize(minHeight = 48.dp)
+                            .testTag("view_full_changelog_dialog_button"),
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "May bagong bersyon ng Minige na handa nang i-install na naglalaman ng mga bagong features at route improvements.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            text = "View Full Changelog",
+                            style = MaterialTheme.typography.labelLarge,
+                            maxLines = 1,
+                            softWrap = false,
                         )
                     }
 
@@ -802,3 +887,207 @@ fun SettingsScreen(
         )
     }
 }
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun AppDiagnosticsCard(
+    report: AppDiagnosticReport?,
+    isRunning: Boolean,
+    onRunDiagnostics: () -> Unit,
+    onCopyReport: (String) -> Unit,
+) {
+    OutlinedCard(
+        shape = RoundedCornerShape(20.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("app_diagnostics_card"),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.HealthAndSafety,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "App Diagnostics",
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    Text(
+                        text = "Read-only health check across auth, Drive backup, ledger math & permissions.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (report != null) {
+                    DiagnosticStatusBadge(status = report.overallStatus)
+                }
+            }
+
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Button(
+                    onClick = onRunDiagnostics,
+                    enabled = !isRunning,
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+                    modifier = Modifier
+                        .defaultMinSize(minHeight = 48.dp)
+                        .testTag("run_diagnostics_button"),
+                ) {
+                    if (isRunning) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Running...", maxLines = 1, softWrap = false)
+                    } else {
+                        Icon(
+                            imageVector = Icons.Rounded.BugReport,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Run Diagnostics", maxLines = 1, softWrap = false)
+                    }
+                }
+
+                OutlinedButton(
+                    onClick = { report?.let { onCopyReport(it.formattedReportText) } },
+                    enabled = report != null && !isRunning,
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+                    modifier = Modifier
+                        .defaultMinSize(minHeight = 48.dp)
+                        .testTag("copy_diagnostics_button"),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.ContentCopy,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Copy Diagnostic Report", maxLines = 1, softWrap = false)
+                }
+            }
+
+            if (report != null) {
+                Text(
+                    text = "Last checked: ${report.generatedAtDisplay}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                HorizontalDivider()
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    report.items.forEach { item ->
+                        DiagnosticCheckRow(item = item)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiagnosticCheckRow(item: DiagnosticCheckItem) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("diagnostic_item_${item.id}"),
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = item.title,
+                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 8.dp),
+                )
+                DiagnosticStatusBadge(status = item.status)
+            }
+            Text(
+                text = item.summary,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            if (item.detail.isNotBlank()) {
+                Text(
+                    text = item.detail,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiagnosticStatusBadge(status: DiagnosticStatus) {
+    val (containerColor, contentColor, borderColor) = when (status) {
+        DiagnosticStatus.PASS -> Triple(
+            MaterialTheme.colorScheme.primaryContainer,
+            MaterialTheme.colorScheme.onPrimaryContainer,
+            MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
+        )
+        DiagnosticStatus.WARN -> Triple(
+            MaterialTheme.colorScheme.tertiaryContainer,
+            MaterialTheme.colorScheme.onTertiaryContainer,
+            MaterialTheme.colorScheme.tertiary.copy(alpha = 0.6f),
+        )
+        DiagnosticStatus.FAIL -> Triple(
+            MaterialTheme.colorScheme.errorContainer,
+            MaterialTheme.colorScheme.onErrorContainer,
+            MaterialTheme.colorScheme.error.copy(alpha = 0.6f),
+        )
+    }
+
+    Surface(
+        shape = CircleShape,
+        color = containerColor,
+        border = BorderStroke(1.dp, borderColor),
+    ) {
+        Text(
+            text = status.badgeLabel,
+            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+            color = contentColor,
+            maxLines = 1,
+            softWrap = false,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+        )
+    }
+}
+
+private fun openChangelogUrl(context: Context, url: String) {
+    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+    runCatching { context.startActivity(intent) }.onFailure {
+        Toast.makeText(context, "Unable to open changelog link.", Toast.LENGTH_SHORT).show()
+    }
+}
+
+private fun copyDiagnosticReport(context: Context, reportText: String) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    clipboard.setPrimaryClip(ClipData.newPlainText("Minige Diagnostic Report", reportText))
+    Toast.makeText(context, "Diagnostic report copied (secrets redacted)", Toast.LENGTH_SHORT).show()
+}
+

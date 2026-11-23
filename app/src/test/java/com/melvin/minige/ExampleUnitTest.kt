@@ -169,31 +169,22 @@ class ExampleUnitTest {
             🚚 DAILY HAKOT (DELIVERED)
             📅 Petsa: Nov 23, 2026 (Lunes)
             ━━━━━━━━━━━━━━━━━━━━
-            Aling Nena          — 10 gals
-            Kuya Jun            —  1 gal
-            Ate Rosa            —  5 gals
-            Mang Ben            —  2 gals
+            • Aling Nena — 10 gals
+            • Kuya Jun — 1 gal
+            • Ate Rosa — 5 gals
+            • Mang Ben — 2 gals
             ━━━━━━━━━━━━━━━━━━━━
             DELIVERED PAID TOTAL: 18 gals
 
             📋 PAUTANG DELIVERED TODAY
             ━━━━━━━━━━━━━━━━━━━━
-            Unpaid Juan         —  4 gals
+            • Unpaid Juan — 4 gals
             ━━━━━━━━━━━━━━━━━━━━
-            PAUTANG TOTAL:         4 gals
-            GRAND TOTAL:          22 gals
+            PAUTANG TOTAL: 4 gals
+            GRAND TOTAL: 22 gals
         """.trimIndent()
 
         assertEquals(expected, formatted)
-        val lines = formatted.lines()
-        // Verify numbers end at the exact same character index in monospace across both sections & totals
-        assertEquals(lines[3].indexOf(" gals"), lines[4].indexOf(" gal"))
-        assertEquals(lines[3].indexOf(" gals"), lines[5].indexOf(" gals"))
-        assertEquals(lines[3].indexOf(" gals"), lines[6].indexOf(" gals"))
-        assertEquals(lines[3].indexOf(" gals"), lines[8].indexOf(" gals"))
-        assertEquals(lines[3].indexOf(" gals"), lines[12].indexOf(" gals"))
-        assertEquals(lines[3].indexOf(" gals"), lines[14].indexOf(" gals"))
-        assertEquals(lines[3].indexOf(" gals"), lines[15].indexOf(" gals"))
         assertFalse(formatted.contains("Nene Pickup"))
         assertFalse(formatted.contains("₱"))
         assertFalse(formatted.contains("Commission", ignoreCase = true))

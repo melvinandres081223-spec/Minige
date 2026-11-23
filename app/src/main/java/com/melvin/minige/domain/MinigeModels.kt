@@ -536,32 +536,10 @@ object BossPickupFormatter {
 
         val orderedPaidRows = paidRows.sortedBy { it.sortTimestamp }
         val orderedPautangRows = pautangRows.sortedBy { it.sortTimestamp }
-        val allRows = orderedPaidRows + orderedPautangRows
 
         val paidTotalGals = orderedPaidRows.sumOf { it.gallons }
         val pautangTotalGals = orderedPautangRows.sumOf { it.gallons }
         val grandTotalGals = paidTotalGals + pautangTotalGals
-
-        val separator = " — "
-        val paidTotalPrefix = "DELIVERED PAID TOTAL:"
-        val pautangTotalPrefix = "PAUTANG TOTAL:"
-        val grandTotalPrefix = "GRAND TOTAL:"
-
-        // Ensure name column accommodates longest total prefix ("DELIVERED PAID TOTAL:" = 21) + 1 space
-        val minNameColForTotals = (paidTotalPrefix.length - separator.length + 1).coerceAtLeast(12)
-        val nameColWidth = (allRows.maxOfOrNull { it.customerName.length } ?: 0)
-            .coerceAtLeast(minNameColForTotals)
-        val countColWidth = maxOf(
-            grandTotalGals.toString().length,
-            paidTotalGals.toString().length,
-            pautangTotalGals.toString().length,
-            allRows.maxOfOrNull { it.gallons.toString().length } ?: 1,
-        ).coerceAtLeast(2)
-
-        val valueEndColumn = nameColWidth + separator.length + countColWidth
-        val paidPad = (valueEndColumn - paidTotalPrefix.length).coerceAtLeast(countColWidth + 1)
-        val pautangPad = (valueEndColumn - pautangTotalPrefix.length).coerceAtLeast(countColWidth + 1)
-        val grandPad = (valueEndColumn - grandTotalPrefix.length).coerceAtLeast(countColWidth + 1)
 
         fun formatUnit(count: Int): String = if (count == 1) "gal" else "gals"
 
@@ -574,14 +552,12 @@ object BossPickupFormatter {
             sb.appendLine("(Wala pang paid delivery ngayon)")
         } else {
             orderedPaidRows.forEach { row ->
-                val name = row.customerName.padEnd(nameColWidth, ' ')
-                val countStr = row.gallons.toString().padStart(countColWidth, ' ')
-                sb.appendLine("$name$separator$countStr ${formatUnit(row.gallons)}")
+                sb.appendLine("• ${row.customerName} — ${row.gallons} ${formatUnit(row.gallons)}")
             }
         }
 
         sb.appendLine(DIVIDER)
-        sb.appendLine("$paidTotalPrefix${paidTotalGals.toString().padStart(paidPad, ' ')} ${formatUnit(paidTotalGals)}")
+        sb.appendLine("DELIVERED PAID TOTAL: $paidTotalGals ${formatUnit(paidTotalGals)}")
         sb.appendLine()
         sb.appendLine("📋 PAUTANG DELIVERED TODAY")
         sb.appendLine(DIVIDER)
@@ -590,15 +566,13 @@ object BossPickupFormatter {
             sb.appendLine("(Walang pautang delivered today)")
         } else {
             orderedPautangRows.forEach { row ->
-                val name = row.customerName.padEnd(nameColWidth, ' ')
-                val countStr = row.gallons.toString().padStart(countColWidth, ' ')
-                sb.appendLine("$name$separator$countStr ${formatUnit(row.gallons)}")
+                sb.appendLine("• ${row.customerName} — ${row.gallons} ${formatUnit(row.gallons)}")
             }
         }
 
         sb.appendLine(DIVIDER)
-        sb.appendLine("$pautangTotalPrefix${pautangTotalGals.toString().padStart(pautangPad, ' ')} ${formatUnit(pautangTotalGals)}")
-        sb.append("$grandTotalPrefix${grandTotalGals.toString().padStart(grandPad, ' ')} ${formatUnit(grandTotalGals)}")
+        sb.appendLine("PAUTANG TOTAL: $pautangTotalGals ${formatUnit(pautangTotalGals)}")
+        sb.append("GRAND TOTAL: $grandTotalGals ${formatUnit(grandTotalGals)}")
 
         return DailyHakotReport(
             paidGallons = paidTotalGals,

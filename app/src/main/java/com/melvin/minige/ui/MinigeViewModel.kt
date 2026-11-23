@@ -43,6 +43,8 @@ import com.melvin.minige.ui.components.DailyQuotaPrefs
 import com.melvin.minige.ui.components.SukiAnalyticsHelper
 import com.melvin.minige.ui.components.SundayMakeupHelper
 import com.melvin.minige.ui.components.WeeklySukiAnalytics
+import com.melvin.minige.util.AppDiagnosticReport
+import com.melvin.minige.util.AppDiagnosticsRunner
 import com.melvin.minige.util.BulkUtangSettlementSummary
 import com.melvin.minige.util.CommissionRateEntry
 import com.melvin.minige.util.CommissionRateHistory
@@ -132,6 +134,8 @@ data class MinigeUiState(
     val bulkSettlementConfirmation: BulkUtangSettlementSummary? = null,
     val inactiveSukiAlerts: List<InactiveSukiAlert> = emptyList(),
     val inactiveAlertsByCustomerId: Map<String, InactiveSukiAlert> = emptyMap(),
+    val diagnosticReport: AppDiagnosticReport? = null,
+    val isRunningDiagnostics: Boolean = false,
 ) {
     val inactiveSukiCount: Int
         get() = inactiveSukiAlerts.size
@@ -178,6 +182,8 @@ class MinigeViewModel(
     private val _driveBackupPreview = MutableStateFlow<DriveBackupPreview?>(null)
     private val _showRestorePreviewDialog = MutableStateFlow(false)
     private val _bulkSettlementConfirmation = MutableStateFlow<BulkUtangSettlementSummary?>(null)
+    private val _diagnosticReport = MutableStateFlow<AppDiagnosticReport?>(null)
+    private val _isRunningDiagnostics = MutableStateFlow(false)
 
     private enum class PendingDriveOperation {
         BACKUP,
@@ -272,13 +278,19 @@ class MinigeViewModel(
             DriveBackupSnapshot(status, lastTs, backingUp, preview, showPreview)
         },
         _isSyncing,
-        combine(_isCalendarSyncing, _statusMessage, _bulkSettlementConfirmation) { calSyncing, status, bulkSummary ->
-            Triple(calSyncing, status, bulkSummary)
+        combine(
+            _isCalendarSyncing,
+            _statusMessage,
+            _bulkSettlementConfirmation,
+            _diagnosticReport,
+            _isRunningDiagnostics,
+        ) { calSyncing, status, bulkSummary, diagReport, runningDiag ->
+            UiExtrasSnapshot(calSyncing, status, bulkSummary, diagReport, runningDiag)
         },
-    ) { prefs, bundle, driveSnap, syncing, calStatusBulk ->
-        val calSyncing = calStatusBulk.first
-        val status = calStatusBulk.second
-        val bulkSummary = calStatusBulk.third
+    ) { prefs, bundle, driveSnap, syncing, extras ->
+        val calSyncing = extras.calSyncing
+        val status = extras.status
+        val bulkSummary = extras.bulkSummary
         val date = prefs.date
         val sundayEnabled = prefs.sundayEnabled
         val rateHist = prefs.rateHistory
@@ -406,6 +418,8 @@ class MinigeViewModel(
             bulkSettlementConfirmation = bulkSummary,
             inactiveSukiAlerts = inactiveSukiAlerts,
             inactiveAlertsByCustomerId = inactiveAlertsByCustomerId,
+            diagnosticReport = extras.diagnosticReport,
+            isRunningDiagnostics = extras.isRunningDiagnostics,
         )
     }.flowOn(Dispatchers.Default).stateIn(
         scope = viewModelScope,
@@ -1232,6 +1246,43 @@ class MinigeViewModel(
             _isCalendarSyncing.value = false
         }
     }
+
+    fun runAppDiagnostics(context: android.content.Context) {
+        if (_isRunningDiagnostics.value) return
+        val snapshot = uiState.value
+        val bundle = latestBundle
+        viewModelScope.launch(Dispatchers.Default) {
+            _isRunningDiagnostics.value = true
+            try {
+                val report = AppDiagnosticsRunner.run(
+                    context = context,
+                    userId = currentUserId,
+                    selectedDateKey = snapshot.selectedDateKey,
+                    deliveries = bundle?.deliveries ?: snapshot.deliveriesForDay,
+                    utangPayments = bundle?.payments ?: snapshot.utangPayments,
+                    expenses = bundle?.expenses ?: snapshot.expensesForDay,
+                    dailyLedgers = bundle?.ledgers ?: emptyList(),
+                    customers = bundle?.customers ?: snapshot.customers,
+                    defaultSukli = bundle?.settings?.defaultSukli ?: snapshot.settings.defaultSukli,
+                    pendingSyncCount = bundle?.pendingCount ?: snapshot.pendingSyncCount,
+                    driveBackupStatus = snapshot.driveBackupStatus,
+                    lastDriveBackupTimestamp = snapshot.driveLastBackupTimestamp,
+                    backupMetadataSummary = snapshot.driveBackupSummary,
+                )
+                _diagnosticReport.value = report
+            } finally {
+                _isRunningDiagnostics.value = false
+            }
+        }
+    }
+
+    private data class UiExtrasSnapshot(
+        val calSyncing: Boolean,
+        val status: String?,
+        val bulkSummary: BulkUtangSettlementSummary?,
+        val diagnosticReport: AppDiagnosticReport?,
+        val isRunningDiagnostics: Boolean,
+    )
 
     private data class LocalBundle(
         val deliveries: List<DeliveryRecord>,

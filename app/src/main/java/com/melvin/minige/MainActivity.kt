@@ -368,6 +368,7 @@ fun MinigeMainShell(
                     onPreviewRestoreFromDrive = { viewModel.previewDriveRestore(context) },
                     onConfirmRestoreFromDrive = { viewModel.restoreFromDrive(context) },
                     onDismissRestorePreview = viewModel::dismissRestorePreview,
+                    onRunDiagnostics = { viewModel.runAppDiagnostics(context) },
                     onSignOut = {
                         GoogleAuthManager.signOut(
                             credentialManager = credentialManager,
