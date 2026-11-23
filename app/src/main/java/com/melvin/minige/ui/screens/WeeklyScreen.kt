@@ -137,7 +137,10 @@ fun WeeklyScreen(
             }
 
             item(key = "weekly_suki_analytics", contentType = "suki_analytics") {
-                SukiAnalyticsCard(analytics = uiState.weeklySukiAnalytics)
+                SukiAnalyticsCard(
+                    analytics = uiState.weeklySukiAnalytics,
+                    inactiveAlertsByCustomerId = uiState.inactiveAlertsByCustomerId,
+                )
             }
 
             item(key = "weekly_calendar_actions", contentType = "calendar_actions") {

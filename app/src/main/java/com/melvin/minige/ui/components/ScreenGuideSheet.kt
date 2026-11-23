@@ -68,6 +68,11 @@ object ScreenGuideCatalog {
                     example = "Hal: \"Hakot: 35 / 50 gal • ₱280 comm\"",
                 ),
                 GuideItem(
+                    badgeOrButton = "3+ Days Walang Karga",
+                    taglishExplanation = "May lalabas na bell/warning badge sa itaas kapag may suking 3 araw o higit pang walang delivery. I-tap ang Re-order para ma-auto-fill ang huli nilang order.",
+                    example = "Hal: ⏰ 3 araw na • 🚨 5+ araw na → tap Re-order",
+                ),
+                GuideItem(
                     badgeOrButton = "Closing",
                     taglishExplanation = "Pribadong end-of-day summary ng commission, sukli, bank payments, gastos, at eksaktong Cash to Remit kay Boss. Hindi ito nasasama sa Messenger Hakot.",
                     example = "Hal: Cash ₱950 − Gas ₱120 = ₱830 remit",

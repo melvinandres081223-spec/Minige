@@ -5,6 +5,7 @@ import com.melvin.minige.util.PartialPaymentHelper
 import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
+import java.time.temporal.ChronoUnit
 import java.time.temporal.TemporalAdjusters
 import java.util.Locale
 
@@ -605,5 +606,117 @@ object BossPickupFormatter {
             grandTotalGallons = grandTotalGals,
             message = sb.toString(),
         )
+    }
+}
+
+enum class InactiveSeverity {
+    AMBER_WARNING, // 3–4 days without an order
+    RED_CRITICAL,  // 5+ days without an order
+}
+
+@Immutable
+data class InactiveSukiAlert(
+    val customerId: String,
+    val customerName: String,
+    val lastDeliveryDateKey: String,
+    val daysSinceLastDelivery: Int,
+    val severity: InactiveSeverity,
+    val lastOrderGallons: Int,
+    val lastPurifiedGallons: Int,
+    val lastAlkalineGallons: Int,
+    val lastUnitPrice: Double?,
+    val lastNotes: String = "",
+)
+
+object InactiveSukiAlertHelper {
+    const val INACTIVE_THRESHOLD_DAYS = 3L
+    const val CRITICAL_THRESHOLD_DAYS = 5L
+
+    fun findInactiveCustomers(
+        customers: List<CustomerRecord>,
+        deliveries: List<DeliveryRecord>,
+        referenceDate: LocalDate = LocalDate.now(),
+    ): List<InactiveSukiAlert> {
+        val referenceKey = MinigeDateUtils.toKey(referenceDate)
+        val customersById = customers.associateBy { customer ->
+            MinigeCustomerUtils.normalizeCustomerId(customer.name)
+                .ifEmpty { customer.id }
+        }
+
+        // Only actual water deliveries (excluding PaymentType.PICK_UP) on or before referenceDate count
+        val deliveriesByCustomerId = deliveries
+            .filter {
+                it.paymentType != PaymentType.PICK_UP &&
+                    it.totalGallons > 0 &&
+                    it.dateKey <= referenceKey
+            }
+            .groupBy { MinigeCustomerUtils.normalizeCustomerId(it.customerName) }
+
+        val allCustomerIds = (customersById.keys + deliveriesByCustomerId.keys).distinct()
+
+        return allCustomerIds.mapNotNull { cid ->
+            val customerRecord = customersById[cid]
+            val latestDelivery = deliveriesByCustomerId[cid]
+                ?.maxWithOrNull(
+                    compareBy<DeliveryRecord> { it.dateKey }
+                        .thenBy { it.updatedAtEpochMs }
+                        .thenBy { it.createdAtEpochMs }
+                )
+                ?: return@mapNotNull null
+
+            val lastDate = runCatching { LocalDate.parse(latestDelivery.dateKey) }.getOrNull()
+                ?: return@mapNotNull null
+            val daysElapsed = ChronoUnit.DAYS.between(lastDate, referenceDate)
+            if (daysElapsed < INACTIVE_THRESHOLD_DAYS) return@mapNotNull null
+
+            val displayName = customerRecord?.name?.takeIf { it.isNotBlank() }
+                ?: latestDelivery.customerName.trim().ifEmpty { return@mapNotNull null }
+
+            val derivedUnitPrice = customerRecord?.lastUnitPrice
+                ?: deriveUnitPrice(latestDelivery)
+
+            val severity = if (daysElapsed >= CRITICAL_THRESHOLD_DAYS) {
+                InactiveSeverity.RED_CRITICAL
+            } else {
+                InactiveSeverity.AMBER_WARNING
+            }
+
+            InactiveSukiAlert(
+                customerId = cid,
+                customerName = displayName,
+                lastDeliveryDateKey = latestDelivery.dateKey,
+                daysSinceLastDelivery = daysElapsed.toInt(),
+                severity = severity,
+                lastOrderGallons = latestDelivery.totalGallons,
+                lastPurifiedGallons = latestDelivery.purifiedGallons,
+                lastAlkalineGallons = latestDelivery.alkalineGallons,
+                lastUnitPrice = derivedUnitPrice,
+                lastNotes = latestDelivery.notes,
+            )
+        }.sortedWith(
+            compareByDescending<InactiveSukiAlert> { it.daysSinceLastDelivery }
+                .thenByDescending { it.lastOrderGallons }
+                .thenBy { it.customerName.lowercase(Locale.ENGLISH) }
+        )
+    }
+
+    private fun deriveUnitPrice(delivery: DeliveryRecord): Double? {
+        if (delivery.totalGallons <= 0) return null
+        if (delivery.totalAmount > 0) {
+            val defaultSplit = (delivery.purifiedGallons * delivery.purifiedUnitPrice) +
+                (delivery.alkalineGallons * delivery.alkalineUnitPrice)
+            return when {
+                delivery.totalAmount != defaultSplit ->
+                    delivery.totalAmount.toDouble() / delivery.totalGallons.toDouble()
+                delivery.alkalineGallons > 0 && delivery.purifiedGallons == 0 ->
+                    delivery.alkalineUnitPrice.toDouble()
+                else -> delivery.purifiedUnitPrice.toDouble()
+            }
+        }
+        return if (delivery.alkalineGallons > 0 && delivery.purifiedGallons == 0) {
+            delivery.alkalineUnitPrice.toDouble()
+        } else {
+            delivery.purifiedUnitPrice.toDouble()
+        }
     }
 }

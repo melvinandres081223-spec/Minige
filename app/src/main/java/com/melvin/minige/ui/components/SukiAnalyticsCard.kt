@@ -33,6 +33,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.melvin.minige.domain.DeliveryRecord
+import com.melvin.minige.domain.InactiveSukiAlert
 import com.melvin.minige.domain.MinigeCustomerUtils
 import com.melvin.minige.domain.MinigeDateUtils
 import com.melvin.minige.domain.PaymentType
@@ -216,6 +217,7 @@ object SukiAnalyticsHelper {
 @Composable
 fun SukiAnalyticsCard(
     analytics: WeeklySukiAnalytics,
+    inactiveAlertsByCustomerId: Map<String, InactiveSukiAlert> = emptyMap(),
     modifier: Modifier = Modifier,
 ) {
     val classifiedTotal = (analytics.outletGallons + analytics.residentialGallons).coerceAtLeast(1)
@@ -369,6 +371,9 @@ fun SukiAnalyticsCard(
                                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                                     )
                                 }
+                            }
+                            inactiveAlertsByCustomerId[suki.customerId]?.let { alert ->
+                                InactiveSukiWarningChip(alert = alert)
                             }
                         }
                         Text(

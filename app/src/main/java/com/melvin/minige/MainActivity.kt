@@ -65,6 +65,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.melvin.minige.auth.GoogleAuthManager
 import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.ExpenseCategory
+import com.melvin.minige.domain.InactiveSukiAlert
 import com.melvin.minige.sync.CalendarSyncManager
 import com.melvin.minige.ui.MinigeEvent
 import com.melvin.minige.ui.MinigeViewModel
@@ -152,6 +153,7 @@ fun MinigeMainShell(
 
     var selectedTab by rememberSaveable { mutableStateOf(MinigeTab.TODAY) }
     var editingDelivery by remember { mutableStateOf<DeliveryRecord?>(null) }
+    var reorderPrefill by remember { mutableStateOf<InactiveSukiAlert?>(null) }
     var showAddDeliverySheet by remember { mutableStateOf(false) }
     var showAddExpenseSheet by remember { mutableStateOf(false) }
     var initialExpenseCategory by remember { mutableStateOf(ExpenseCategory.FOOD) }
@@ -287,6 +289,7 @@ fun MinigeMainShell(
                     FloatingActionButton(
                         onClick = {
                             editingDelivery = null
+                            reorderPrefill = null
                             showAddDeliverySheet = true
                         },
                         modifier = Modifier.testTag("fab_add_entry"),
@@ -310,6 +313,7 @@ fun MinigeMainShell(
                     onJumpToday = viewModel::jumpToToday,
                     onEditSukliClick = { showEditSukliDialog = true },
                     onEditDelivery = { delivery ->
+                        reorderPrefill = null
                         editingDelivery = delivery
                         showAddDeliverySheet = true
                     },
@@ -328,6 +332,11 @@ fun MinigeMainShell(
                         scope.launch { snackbarHostState.showSnackbar(msg) }
                     },
                     onUpdateQuotaTarget = viewModel::updateDailyQuotaTarget,
+                    onReorderInactiveSuki = { alert ->
+                        editingDelivery = null
+                        reorderPrefill = alert
+                        showAddDeliverySheet = true
+                    },
                 )
                 MinigeTab.PAUTANG -> PautangScreen(
                     uiState = uiState,
@@ -389,11 +398,14 @@ fun MinigeMainShell(
             settings = uiState.settings,
             customers = uiState.customers,
             sukiDirectory = uiState.sukiDirectory,
+            inactiveAlertsByCustomerId = uiState.inactiveAlertsByCustomerId,
             activeCommissionRate = uiState.activeCommissionRate,
             initialDelivery = editingDelivery,
+            reorderPrefill = reorderPrefill,
             onDismiss = {
                 showAddDeliverySheet = false
                 editingDelivery = null
+                reorderPrefill = null
             },
             onSave = { customerName, purifiedGallons, alkalineGallons, paymentType, notes, customUnitPrice, hasCommission ->
                 val editing = editingDelivery

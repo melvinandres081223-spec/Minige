@@ -70,6 +70,7 @@ import androidx.core.content.ContextCompat
 import com.melvin.minige.domain.CustomerRecord
 import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.ExpenseCategory
+import com.melvin.minige.domain.InactiveSukiAlert
 import com.melvin.minige.domain.MinigeCustomerUtils
 import com.melvin.minige.domain.MinigeSettings
 import com.melvin.minige.domain.PaymentType
@@ -91,8 +92,10 @@ fun AddDeliverySheet(
     settings: MinigeSettings,
     customers: List<CustomerRecord>,
     sukiDirectory: List<SukiCustomerProfile> = emptyList(),
+    inactiveAlertsByCustomerId: Map<String, InactiveSukiAlert> = emptyMap(),
     activeCommissionRate: Double = settings.commissionRate.toDouble(),
     initialDelivery: DeliveryRecord? = null,
+    reorderPrefill: InactiveSukiAlert? = null,
     onDismiss: () -> Unit,
     onSave: (
         customerName: String,
@@ -109,8 +112,9 @@ fun AddDeliverySheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val customerFocusRequester = remember { FocusRequester() }
     val keyboardController = LocalSoftwareKeyboardController.current
+    val formKey = Triple(initialDelivery?.id, reorderPrefill?.customerId, reorderPrefill?.lastDeliveryDateKey)
 
-    val initialPriceText = remember(initialDelivery?.id, settings) {
+    val initialPriceText = remember(formKey, settings) {
         if (initialDelivery != null &&
             initialDelivery.paymentType != PaymentType.PICK_UP &&
             initialDelivery.paymentType != PaymentType.PAID_WALK_IN &&
@@ -126,26 +130,30 @@ fun AddDeliverySheet(
                 initialDelivery.purifiedUnitPrice.toDouble()
             }
             MinigeCustomerUtils.formatPrice(derivedPrice)
+        } else if (reorderPrefill?.lastUnitPrice != null && reorderPrefill.lastUnitPrice >= 0.0) {
+            MinigeCustomerUtils.formatPrice(reorderPrefill.lastUnitPrice)
         } else {
             settings.purifiedPrice.toString()
         }
     }
 
-    var isQuickCashAdvanceMode by remember(initialDelivery?.id) { mutableStateOf(false) }
-    var cashAdvanceAmountText by remember(initialDelivery?.id) { mutableStateOf("") }
-    var cashAdvanceNotes by remember(initialDelivery?.id) { mutableStateOf("") }
+    var isQuickCashAdvanceMode by remember(formKey) { mutableStateOf(false) }
+    var cashAdvanceAmountText by remember(formKey) { mutableStateOf("") }
+    var cashAdvanceNotes by remember(formKey) { mutableStateOf("") }
 
-    var customerName by remember(initialDelivery?.id) { mutableStateOf(initialDelivery?.customerName ?: "") }
-    var purifiedText by remember(initialDelivery?.id) {
-        mutableStateOf((initialDelivery?.purifiedGallons ?: 0).toString())
+    var customerName by remember(formKey) {
+        mutableStateOf(initialDelivery?.customerName ?: reorderPrefill?.customerName ?: "")
     }
-    var alkalineText by remember(initialDelivery?.id) {
-        mutableStateOf((initialDelivery?.alkalineGallons ?: 0).toString())
+    var purifiedText by remember(formKey) {
+        mutableStateOf((initialDelivery?.purifiedGallons ?: reorderPrefill?.lastPurifiedGallons ?: 0).toString())
     }
-    var paymentType by remember(initialDelivery?.id) {
+    var alkalineText by remember(formKey) {
+        mutableStateOf((initialDelivery?.alkalineGallons ?: reorderPrefill?.lastAlkalineGallons ?: 0).toString())
+    }
+    var paymentType by remember(formKey) {
         mutableStateOf(initialDelivery?.paymentType ?: PaymentType.CASH)
     }
-    var hasPaidWalkInCommission by remember(initialDelivery?.id) {
+    var hasPaidWalkInCommission by remember(formKey) {
         mutableStateOf(
             if (initialDelivery?.paymentType == PaymentType.PAID_WALK_IN) {
                 PaymentBreakdownHelper.resolvePaidWalkInHasCommission(initialDelivery)
@@ -154,19 +162,21 @@ fun AddDeliverySheet(
             }
         )
     }
-    var selectedPaidChannel by remember(initialDelivery?.id) {
+    var selectedPaidChannel by remember(formKey) {
         mutableStateOf(
             if (initialDelivery != null) PaymentBreakdownHelper.resolveDeliveryChannel(initialDelivery)
             else PaidChannel.CASH
         )
     }
-    var classification by remember(initialDelivery?.id) {
-        mutableStateOf(initialDelivery?.let { DeliveryVoiceParser.extractClassification(it.notes) })
+    var classification by remember(formKey) {
+        val sourceNotes = initialDelivery?.notes ?: reorderPrefill?.lastNotes
+        mutableStateOf(sourceNotes?.let { DeliveryVoiceParser.extractClassification(it) })
     }
-    var routeArea by remember(initialDelivery?.id) {
-        mutableStateOf(initialDelivery?.let { CustomerDirectoryHelper.extractRouteArea(it.notes) } ?: "")
+    var routeArea by remember(formKey) {
+        val sourceNotes = initialDelivery?.notes ?: reorderPrefill?.lastNotes
+        mutableStateOf(sourceNotes?.let { CustomerDirectoryHelper.extractRouteArea(it) } ?: "")
     }
-    val initialCleanNotes = remember(initialDelivery?.id) {
+    val initialCleanNotes = remember(formKey) {
         initialDelivery?.notes?.let {
             CustomerDirectoryHelper.stripRouteAreaTag(
                 PaymentBreakdownHelper.stripPaidWalkInTags(
@@ -175,13 +185,15 @@ fun AddDeliverySheet(
             )
         } ?: ""
     }
-    var notes by remember(initialDelivery?.id) { mutableStateOf(initialCleanNotes) }
-    var unitPriceText by remember(initialDelivery?.id) { mutableStateOf(initialPriceText) }
-    var hasManualPriceOverride by remember(initialDelivery?.id) { mutableStateOf(initialDelivery != null) }
+    var notes by remember(formKey) { mutableStateOf(initialCleanNotes) }
+    var unitPriceText by remember(formKey) { mutableStateOf(initialPriceText) }
+    var hasManualPriceOverride by remember(formKey) {
+        mutableStateOf(initialDelivery != null || reorderPrefill?.lastUnitPrice != null)
+    }
     var formError by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(initialDelivery?.id) {
-        if (initialDelivery == null) {
+    LaunchedEffect(formKey) {
+        if (initialDelivery == null && reorderPrefill == null) {
             delay(80)
             runCatching { customerFocusRequester.requestFocus() }
             keyboardController?.show()
@@ -192,7 +204,7 @@ fun AddDeliverySheet(
     val alkalineQty = alkalineText.toIntOrNull()?.coerceAtLeast(0) ?: 0
     val totalGallons = purifiedQty + alkalineQty
 
-    var debouncedCustomerQuery by remember(initialDelivery?.id) { mutableStateOf(customerName) }
+    var debouncedCustomerQuery by remember(formKey) { mutableStateOf(customerName) }
     LaunchedEffect(customerName) {
         if (customerName.isBlank()) {
             debouncedCustomerQuery = ""
@@ -474,6 +486,7 @@ fun AddDeliverySheet(
 
                 CustomerSuggestionBar(
                     suggestions = sukiSuggestions,
+                    inactiveAlertsByCustomerId = inactiveAlertsByCustomerId,
                     onSelectCustomer = { profile ->
                         customerName = profile.name
                         if (profile.classification != null) {

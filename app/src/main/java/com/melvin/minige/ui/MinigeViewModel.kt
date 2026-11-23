@@ -20,6 +20,8 @@ import com.melvin.minige.domain.DailySummary
 import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.ExpenseCategory
 import com.melvin.minige.domain.ExpenseRecord
+import com.melvin.minige.domain.InactiveSukiAlert
+import com.melvin.minige.domain.InactiveSukiAlertHelper
 import com.melvin.minige.domain.MinigeCalculator
 import com.melvin.minige.domain.MinigeDateUtils
 import com.melvin.minige.domain.MinigeSettings
@@ -128,7 +130,12 @@ data class MinigeUiState(
     val driveBackupPreview: DriveBackupPreview? = null,
     val showRestorePreviewDialog: Boolean = false,
     val bulkSettlementConfirmation: BulkUtangSettlementSummary? = null,
-)
+    val inactiveSukiAlerts: List<InactiveSukiAlert> = emptyList(),
+    val inactiveAlertsByCustomerId: Map<String, InactiveSukiAlert> = emptyMap(),
+) {
+    val inactiveSukiCount: Int
+        get() = inactiveSukiAlerts.size
+}
 
 sealed interface MinigeEvent {
     data class ShowMessage(val message: String) : MinigeEvent
@@ -355,6 +362,12 @@ class MinigeViewModel(
             deliveries = bundle.deliveries,
             utangPayments = bundle.payments,
         )
+        val inactiveSukiAlerts = InactiveSukiAlertHelper.findInactiveCustomers(
+            customers = mergedCustomers,
+            deliveries = bundle.deliveries,
+            referenceDate = date,
+        )
+        val inactiveAlertsByCustomerId = inactiveSukiAlerts.associateBy { it.customerId }
 
         MinigeUiState(
             selectedDate = date,
@@ -391,6 +404,8 @@ class MinigeViewModel(
             driveBackupPreview = driveSnap.preview,
             showRestorePreviewDialog = driveSnap.showPreview,
             bulkSettlementConfirmation = bulkSummary,
+            inactiveSukiAlerts = inactiveSukiAlerts,
+            inactiveAlertsByCustomerId = inactiveAlertsByCustomerId,
         )
     }.flowOn(Dispatchers.Default).stateIn(
         scope = viewModelScope,

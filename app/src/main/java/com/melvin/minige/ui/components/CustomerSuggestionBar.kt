@@ -30,6 +30,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.melvin.minige.domain.InactiveSukiAlert
 import com.melvin.minige.domain.MinigeCustomerUtils
 import com.melvin.minige.util.SukiCustomerProfile
 
@@ -38,6 +39,7 @@ import com.melvin.minige.util.SukiCustomerProfile
 fun CustomerSuggestionBar(
     suggestions: List<SukiCustomerProfile>,
     onSelectCustomer: (SukiCustomerProfile) -> Unit,
+    inactiveAlertsByCustomerId: Map<String, InactiveSukiAlert> = emptyMap(),
     modifier: Modifier = Modifier,
 ) {
     if (suggestions.isEmpty()) return
@@ -116,10 +118,14 @@ fun CustomerSuggestionBar(
                             }
                         }
 
+                        val inactiveAlert = inactiveAlertsByCustomerId[profile.id]
                         FlowRow(
                             horizontalArrangement = Arrangement.spacedBy(4.dp),
                             verticalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
+                            if (inactiveAlert != null) {
+                                InactiveSukiWarningChip(alert = inactiveAlert)
+                            }
                             if (profile.classification != null) {
                                 Surface(
                                     shape = CircleShape,

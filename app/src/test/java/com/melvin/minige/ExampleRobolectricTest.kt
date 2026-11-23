@@ -25,6 +25,8 @@ import com.melvin.minige.auth.GoogleAuthManager
 import com.melvin.minige.domain.BossPickupFormatter
 import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.ExpenseCategory
+import com.melvin.minige.domain.InactiveSeverity
+import com.melvin.minige.domain.InactiveSukiAlertHelper
 import com.melvin.minige.domain.PaymentType
 import com.melvin.minige.domain.UtangMethod
 import com.melvin.minige.domain.UtangPaymentRecord
@@ -1197,5 +1199,149 @@ class ExampleRobolectricTest {
             db.close()
         }
     }
+
+    @Test
+    fun `inactive suki alert flags 3plus day non-pickup customers and clears on new delivery`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        if (FirebaseApp.getApps(context).isEmpty()) {
+            FirebaseApp.initializeApp(
+                context,
+                FirebaseOptions.Builder()
+                    .setProjectId("minige-f6338")
+                    .setApplicationId("1:466130893778:android:c5d0d190ec29d4fb2be60b")
+                    .setApiKey("AIzaSyFakeKeyForRobolectricTest")
+                    .build()
+            )
+        }
+        val db = Room.inMemoryDatabaseBuilder(context, MinigeDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        try {
+            val dao = db.minigeDao()
+            val firestore = FirebaseFirestore.getInstance()
+            val remote = MinigeFirestoreDataSource(firestore)
+            val repo = MinigeRepository(
+                dao = dao,
+                remote = remote,
+                pricingRepository = PricingRepository(dao, remote),
+            )
+            dao.upsertSettings(
+                AppSettingsEntity(
+                    id = "default",
+                    userId = "rider_inactive",
+                    purifiedPrice = 30,
+                    alkalinePrice = 40,
+                    commissionRate = 8,
+                    defaultSukli = 0,
+                    pendingSync = false,
+                    updatedAtEpochMs = 1L,
+                )
+            )
+
+            val referenceDate = LocalDate.of(2026, 11, 25)
+
+            // Active customer: 2 days ago (Nov 23) -> must NOT be flagged
+            repo.addDelivery(
+                userId = "rider_inactive",
+                dateKey = "2026-11-23",
+                customerName = "Active Suki",
+                purifiedGallons = 3,
+                alkalineGallons = 0,
+                paymentType = PaymentType.CASH,
+                notes = "",
+            )
+
+            // 4 days ago (Nov 21) delivery + yesterday PICK_UP -> MUST remain flagged at 4 days (AMBER_WARNING)
+            repo.addDelivery(
+                userId = "rider_inactive",
+                dateKey = "2026-11-21",
+                customerName = "Amber Canteen",
+                purifiedGallons = 5,
+                alkalineGallons = 2,
+                paymentType = PaymentType.CASH,
+                notes = "[Outlet] [Area: Poblacion]",
+                customUnitPrice = 25.0,
+            )
+            repo.addDelivery(
+                userId = "rider_inactive",
+                dateKey = "2026-11-24",
+                customerName = "Amber Canteen",
+                purifiedGallons = 4,
+                alkalineGallons = 0,
+                paymentType = PaymentType.PICK_UP,
+                notes = "",
+            )
+
+            // 6 days ago (Nov 19) -> MUST be flagged RED_CRITICAL and sorted first
+            repo.addDelivery(
+                userId = "rider_inactive",
+                dateKey = "2026-11-19",
+                customerName = "Critical Reseller",
+                purifiedGallons = 10,
+                alkalineGallons = 0,
+                paymentType = PaymentType.PAUTANG,
+                notes = "",
+                customUnitPrice = 28.0,
+            )
+
+            // Pick-up only customer 7 days ago -> never had a delivery, must NOT be flagged
+            repo.addDelivery(
+                userId = "rider_inactive",
+                dateKey = "2026-11-18",
+                customerName = "Pickup Only Walkin",
+                purifiedGallons = 2,
+                alkalineGallons = 0,
+                paymentType = PaymentType.PICK_UP,
+                notes = "",
+            )
+
+            val customers = dao.observeCustomers("rider_inactive").first().map { it.toDomain() }
+            val deliveries = dao.getAllDeliveriesOnce("rider_inactive").map { it.toDomain() }
+
+            val alerts = InactiveSukiAlertHelper.findInactiveCustomers(
+                customers = customers,
+                deliveries = deliveries,
+                referenceDate = referenceDate,
+            )
+
+            assertEquals(2, alerts.size)
+            assertEquals("Critical Reseller", alerts[0].customerName)
+            assertEquals(6, alerts[0].daysSinceLastDelivery)
+            assertEquals(InactiveSeverity.RED_CRITICAL, alerts[0].severity)
+            assertEquals(10, alerts[0].lastOrderGallons)
+            assertEquals(28.0, alerts[0].lastUnitPrice ?: 0.0, 0.01)
+
+            assertEquals("Amber Canteen", alerts[1].customerName)
+            assertEquals(4, alerts[1].daysSinceLastDelivery)
+            assertEquals(InactiveSeverity.AMBER_WARNING, alerts[1].severity)
+            assertEquals(7, alerts[1].lastOrderGallons)
+            assertEquals(5, alerts[1].lastPurifiedGallons)
+            assertEquals(2, alerts[1].lastAlkalineGallons)
+            assertEquals(25.0, alerts[1].lastUnitPrice ?: 0.0, 0.01)
+
+            // Recording a new non-PICK_UP delivery on referenceDate clears Amber Canteen immediately
+            repo.addDelivery(
+                userId = "rider_inactive",
+                dateKey = "2026-11-25",
+                customerName = "Amber Canteen",
+                purifiedGallons = 5,
+                alkalineGallons = 2,
+                paymentType = PaymentType.CASH,
+                notes = "[Outlet] [Area: Poblacion]",
+                customUnitPrice = 25.0,
+            )
+
+            val updatedDeliveries = dao.getAllDeliveriesOnce("rider_inactive").map { it.toDomain() }
+            val updatedAlerts = InactiveSukiAlertHelper.findInactiveCustomers(
+                customers = customers,
+                deliveries = updatedDeliveries,
+                referenceDate = referenceDate,
+            )
+            assertEquals(listOf("Critical Reseller"), updatedAlerts.map { it.customerName })
+        } finally {
+            db.close()
+        }
+    }
 }
+
 
