@@ -19,6 +19,8 @@ import com.melvin.minige.data.local.MinigeDatabase
 import com.melvin.minige.data.local.UtangPaymentEntity
 import com.melvin.minige.data.remote.FirestoreSyncHelper
 import com.melvin.minige.data.remote.MinigeFirestoreDataSource
+import android.content.Intent
+import com.melvin.minige.auth.DriveAuthResult
 import com.melvin.minige.auth.GoogleAuthManager
 import com.melvin.minige.domain.BossPickupFormatter
 import com.melvin.minige.domain.DeliveryRecord
@@ -28,9 +30,18 @@ import com.melvin.minige.domain.UtangPaymentRecord
 import com.melvin.minige.sync.BackupAppPreferences
 import com.melvin.minige.sync.BackupMetadata
 import com.melvin.minige.sync.DriveBackupManager
+import com.melvin.minige.sync.DriveConsentRequiredException
+import com.melvin.minige.sync.DriveTokenProvider
 import com.melvin.minige.sync.GitHubAppUpdater
 import com.melvin.minige.sync.MinigeBackupData
 import com.melvin.minige.util.CommissionRateEntry
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
+import java.io.OutputStream
+import java.net.HttpURLConnection
+import java.net.URL
+import java.nio.charset.StandardCharsets
 import java.time.LocalDate
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
@@ -815,6 +826,163 @@ class ExampleRobolectricTest {
             assertEquals("2026-11-23", finalNew.settledDateKey)
             assertTrue(finalNew.pendingSync)
         } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun `drive backup manager clears stale token on HTTP 401 and retries with refreshed token`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, MinigeDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+
+        val clearedTokens = mutableListOf<String>()
+        val fetchedTokens = ArrayDeque(listOf("stale_token_401", "fresh_token_200"))
+        val recordedAuthHeaders = mutableListOf<String>()
+
+        DriveBackupManager.saveCachedToken(context, "u_401", "stale_token_401")
+        DriveBackupManager.tokenProviderForTest = object : DriveTokenProvider {
+            override suspend fun getFreshAccessToken(context: Context): DriveAuthResult {
+                val next = fetchedTokens.removeFirst()
+                return DriveAuthResult.Authorized(next)
+            }
+
+            override suspend fun clearToken(context: Context, token: String) {
+                clearedTokens.add(token)
+            }
+        }
+        DriveBackupManager.openConnectionForTest = { urlString ->
+            object : HttpURLConnection(URL(urlString)) {
+                private val headers = mutableMapOf<String, String>()
+                private val outStream = ByteArrayOutputStream()
+                private var responseBody = "{}"
+
+                override fun setRequestProperty(key: String?, value: String?) {
+                    if (key != null && value != null) {
+                        headers[key] = value
+                    }
+                }
+
+                override fun getOutputStream(): OutputStream = outStream
+
+                override fun getResponseCode(): Int {
+                    val authHeader = headers["Authorization"].orEmpty()
+                    recordedAuthHeaders.add(authHeader)
+                    if (authHeader == "Bearer stale_token_401") {
+                        responseCode = HTTP_UNAUTHORIZED
+                        responseBody = """{"error":{"code":401,"message":"Invalid Credentials","status":"UNAUTHENTICATED"}}"""
+                        return HTTP_UNAUTHORIZED
+                    }
+                    responseCode = HTTP_OK
+                    responseBody = when {
+                        urlString.contains("mimeType%3D'application%2Fvnd.google-apps.folder'") -> {
+                            """{"files":[]}"""
+                        }
+                        urlString == "https://www.googleapis.com/drive/v3/files" -> {
+                            """{"id":"folder_minige_backup"}"""
+                        }
+                        urlString.contains("name%3D'minige_auto_backup.json'") -> {
+                            """{"files":[]}"""
+                        }
+                        else -> {
+                            """{"id":"file_backup_123"}"""
+                        }
+                    }
+                    return HTTP_OK
+                }
+
+                override fun getInputStream(): InputStream =
+                    ByteArrayInputStream(responseBody.toByteArray(StandardCharsets.UTF_8))
+
+                override fun getErrorStream(): InputStream =
+                    ByteArrayInputStream(responseBody.toByteArray(StandardCharsets.UTF_8))
+
+                override fun connect() {}
+                override fun disconnect() {}
+                override fun usingProxy(): Boolean = false
+            }
+        }
+
+        try {
+            val result = DriveBackupManager.backupToDrive(
+                accessToken = null,
+                dao = db.minigeDao(),
+                userId = "u_401",
+                context = context,
+            )
+
+            assertTrue(result.isSuccess)
+            assertEquals(listOf("stale_token_401"), clearedTokens)
+            assertTrue(recordedAuthHeaders.isNotEmpty())
+            assertEquals("Bearer stale_token_401", recordedAuthHeaders.first())
+            assertTrue(recordedAuthHeaders.drop(1).all { it == "Bearer fresh_token_200" })
+            assertEquals("fresh_token_200", DriveBackupManager.getCachedToken(context, "u_401"))
+        } finally {
+            DriveBackupManager.tokenProviderForTest = null
+            DriveBackupManager.openConnectionForTest = null
+            DriveBackupManager.clearCachedToken(context, "u_401")
+            db.close()
+        }
+    }
+
+    @Test
+    fun `drive backup manager surfaces DriveConsentRequiredException when 401 refresh needs consent`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, MinigeDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+
+        val clearedTokens = mutableListOf<String>()
+        var fetchCallCount = 0
+        val recoveryIntent = Intent("com.google.android.gms.auth.RECOVERY")
+
+        DriveBackupManager.saveCachedToken(context, "u_consent", "stale_token_401")
+        DriveBackupManager.tokenProviderForTest = object : DriveTokenProvider {
+            override suspend fun getFreshAccessToken(context: Context): DriveAuthResult {
+                fetchCallCount++
+                return if (fetchCallCount == 1) {
+                    DriveAuthResult.Authorized("stale_token_401")
+                } else {
+                    DriveAuthResult.NeedsConsentIntent(recoveryIntent)
+                }
+            }
+
+            override suspend fun clearToken(context: Context, token: String) {
+                clearedTokens.add(token)
+            }
+        }
+        DriveBackupManager.openConnectionForTest = { urlString ->
+            object : HttpURLConnection(URL(urlString)) {
+                override fun getResponseCode(): Int = HTTP_UNAUTHORIZED
+                override fun getErrorStream(): InputStream = ByteArrayInputStream(
+                    """{"error":{"code":401,"message":"Invalid Credentials","status":"UNAUTHENTICATED"}}"""
+                        .toByteArray(StandardCharsets.UTF_8)
+                )
+                override fun connect() {}
+                override fun disconnect() {}
+                override fun usingProxy(): Boolean = false
+            }
+        }
+
+        try {
+            val result = DriveBackupManager.backupToDrive(
+                accessToken = null,
+                dao = db.minigeDao(),
+                userId = "u_consent",
+                context = context,
+            )
+
+            assertTrue(result.isFailure)
+            val exception = result.exceptionOrNull()
+            assertTrue(exception is DriveConsentRequiredException)
+            assertEquals(recoveryIntent, (exception as DriveConsentRequiredException).recoveryIntent)
+            assertEquals(listOf("stale_token_401"), clearedTokens)
+            assertNull(DriveBackupManager.getCachedToken(context, "u_consent"))
+        } finally {
+            DriveBackupManager.tokenProviderForTest = null
+            DriveBackupManager.openConnectionForTest = null
+            DriveBackupManager.clearCachedToken(context, "u_consent")
             db.close()
         }
     }

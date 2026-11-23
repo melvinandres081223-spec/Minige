@@ -53,11 +53,19 @@ class MinigeRepository(
         _localDataChangeEvents.tryEmit(Unit)
     }
 
-    suspend fun backupToDrive(accessToken: String, userId: String, context: Context): Result<Long> {
+    suspend fun backupToDrive(
+        accessToken: String? = null,
+        userId: String,
+        context: Context,
+    ): Result<Long> {
         return DriveBackupManager.backupToDrive(accessToken, dao, userId, context)
     }
 
-    suspend fun restoreFromDrive(accessToken: String, userId: String, context: Context): Result<DriveRestoreSummary> {
+    suspend fun restoreFromDrive(
+        accessToken: String? = null,
+        userId: String,
+        context: Context,
+    ): Result<DriveRestoreSummary> {
         val result = DriveBackupManager.restoreFromDrive(accessToken, dao, userId, context)
         if (result.isSuccess) {
             notifyLocalDataChanged()

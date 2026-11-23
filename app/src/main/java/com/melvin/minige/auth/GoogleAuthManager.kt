@@ -1,15 +1,18 @@
 package com.melvin.minige.auth
 
+import android.accounts.Account
 import android.app.Activity
 import android.content.Context
+import android.content.Intent
+import android.content.IntentSender
 import android.util.Log
 import androidx.credentials.ClearCredentialStateRequest
 import androidx.credentials.CredentialManager
 import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.GetCredentialCancellationException
-import android.content.Intent
-import android.content.IntentSender
+import com.google.android.gms.auth.GoogleAuthUtil
+import com.google.android.gms.auth.UserRecoverableAuthException
 import com.google.android.gms.auth.api.identity.AuthorizationRequest
 import com.google.android.gms.auth.api.identity.Identity
 import com.google.android.gms.auth.api.signin.GoogleSignIn
@@ -25,7 +28,9 @@ import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.auth.auth
 import com.melvin.minige.R
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -37,6 +42,7 @@ import kotlinx.coroutines.withContext
 sealed interface DriveAuthResult {
     data class Authorized(val accessToken: String) : DriveAuthResult
     data class NeedsConsent(val intentSender: IntentSender) : DriveAuthResult
+    data class NeedsConsentIntent(val intent: Intent) : DriveAuthResult
     data class Failure(val message: String) : DriveAuthResult
 }
 
@@ -60,12 +66,40 @@ object GoogleAuthManager {
         return account != null && GoogleSignIn.hasPermissions(account, DRIVE_SCOPE)
     }
 
-    suspend fun checkOrRequestDriveAuthorization(context: Context): DriveAuthResult {
-        return try {
+    suspend fun checkOrRequestDriveAuthorization(context: Context): DriveAuthResult =
+        fetchFreshDriveAccessToken(context)
+
+    /**
+     * Clears a stale/unauthorized OAuth access token from Google Play Services cache so the next
+     * token request fetches a fresh token instead of returning the rejected cached token.
+     */
+    suspend fun invalidateDriveAccessToken(context: Context, staleToken: String?) {
+        val tokenToClear = staleToken?.trim().orEmpty()
+        if (tokenToClear.isEmpty()) return
+        withContext(Dispatchers.IO) {
+            try {
+                GoogleAuthUtil.clearToken(context.applicationContext, tokenToClear)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to clear stale Drive access token: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Always requests a fresh Google OAuth access token for [DRIVE_FILE_SCOPE] via Google Play
+     * Services [Identity.getAuthorizationClient], falling back to [GoogleAuthUtil.getToken]
+     * if needed and surfacing [DriveAuthResult.NeedsConsent] / [DriveAuthResult.NeedsConsentIntent]
+     * when user interaction is required.
+     */
+    suspend fun fetchFreshDriveAccessToken(context: Context): DriveAuthResult = withContext(Dispatchers.IO) {
+        val appContext = context.applicationContext
+        val authClientError: Exception? = try {
             val request = AuthorizationRequest.builder()
                 .setRequestedScopes(listOf(DRIVE_SCOPE))
                 .build()
-            val result = Identity.getAuthorizationClient(context)
+            val result = Identity.getAuthorizationClient(appContext)
                 .authorize(request)
                 .await()
 
@@ -73,18 +107,55 @@ object GoogleAuthManager {
             val token = result.accessToken
             when {
                 result.hasResolution() && pendingIntent != null -> {
-                    DriveAuthResult.NeedsConsent(pendingIntent.intentSender)
+                    return@withContext DriveAuthResult.NeedsConsent(pendingIntent.intentSender)
                 }
                 !token.isNullOrBlank() -> {
-                    DriveAuthResult.Authorized(token)
+                    return@withContext DriveAuthResult.Authorized(token)
                 }
-                else -> {
-                    DriveAuthResult.Failure("No Google Drive access token returned.")
-                }
+                else -> null
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            DriveAuthResult.Failure(e.localizedMessage ?: "Failed to authorize Google Drive.")
+            Log.w(TAG, "AuthorizationClient token fetch failed, attempting GoogleAuthUtil fallback: ${e.message}")
+            e
         }
+
+        val account = resolveGoogleAccount(appContext)
+        if (account != null) {
+            try {
+                val scopeString = "oauth2:$DRIVE_FILE_SCOPE"
+                val token = GoogleAuthUtil.getToken(appContext, account, scopeString)
+                if (!token.isNullOrBlank()) {
+                    return@withContext DriveAuthResult.Authorized(token)
+                }
+            } catch (e: UserRecoverableAuthException) {
+                val recoveryIntent = e.intent
+                return@withContext if (recoveryIntent != null) {
+                    DriveAuthResult.NeedsConsentIntent(recoveryIntent)
+                } else {
+                    DriveAuthResult.Failure(e.localizedMessage ?: "Google Drive re-authentication required.")
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "GoogleAuthUtil.getToken fallback failed: ${e.message}")
+                return@withContext DriveAuthResult.Failure(
+                    e.localizedMessage ?: authClientError?.localizedMessage ?: "Failed to authorize Google Drive."
+                )
+            }
+        }
+
+        DriveAuthResult.Failure(
+            authClientError?.localizedMessage ?: "No Google Drive access token returned."
+        )
+    }
+
+    private fun resolveGoogleAccount(context: Context): Account? {
+        val gsaAccount = runCatching { GoogleSignIn.getLastSignedInAccount(context)?.account }.getOrNull()
+        if (gsaAccount != null) return gsaAccount
+        val email = runCatching { Firebase.auth.currentUser?.email }.getOrNull()?.trim().orEmpty()
+        return if (email.isNotEmpty()) Account(email, GoogleAuthUtil.GOOGLE_ACCOUNT_TYPE) else null
     }
 
     fun extractDriveTokenFromIntent(context: Context, data: Intent?): String? {

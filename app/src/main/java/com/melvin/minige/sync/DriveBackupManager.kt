@@ -1,8 +1,13 @@
 package com.melvin.minige.sync
 
 import android.content.Context
+import android.content.Intent
+import android.content.IntentSender
 import android.util.Log
+import androidx.annotation.VisibleForTesting
 import com.melvin.minige.BuildConfig
+import com.melvin.minige.auth.DriveAuthResult
+import com.melvin.minige.auth.GoogleAuthManager
 import com.melvin.minige.data.local.AppSettingsEntity
 import com.melvin.minige.data.local.CustomerEntity
 import com.melvin.minige.data.local.DailyLedgerEntity
@@ -14,6 +19,7 @@ import com.melvin.minige.ui.components.DailyQuotaPrefs
 import com.melvin.minige.ui.components.SundayMakeupPrefs
 import com.melvin.minige.util.CommissionRateEntry
 import com.melvin.minige.util.CommissionRateHistory
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -98,6 +104,31 @@ data class MinigeBackupData(
     val metadata: BackupMetadata = BackupMetadata(),
 )
 
+class DriveUnauthorizedException(
+    val failedToken: String,
+    message: String = "Google Drive authorization expired or invalid (HTTP 401).",
+) : RuntimeException(message)
+
+class DriveConsentRequiredException(
+    val intentSender: IntentSender? = null,
+    val recoveryIntent: Intent? = null,
+    message: String = "Google Drive re-authentication required.",
+) : RuntimeException(message)
+
+interface DriveTokenProvider {
+    suspend fun getFreshAccessToken(context: Context): DriveAuthResult
+    suspend fun clearToken(context: Context, token: String)
+}
+
+private object DefaultDriveTokenProvider : DriveTokenProvider {
+    override suspend fun getFreshAccessToken(context: Context): DriveAuthResult =
+        GoogleAuthManager.fetchFreshDriveAccessToken(context)
+
+    override suspend fun clearToken(context: Context, token: String) {
+        GoogleAuthManager.invalidateDriveAccessToken(context, token)
+    }
+}
+
 object DriveBackupManager {
 
     private const val TAG = "DriveBackupManager"
@@ -112,8 +143,62 @@ object DriveBackupManager {
     private const val DRIVE_FILES_ROOT_URL = "https://www.googleapis.com/drive/v3/files"
     private const val DRIVE_UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart"
 
+    @VisibleForTesting
+    internal var tokenProviderForTest: DriveTokenProvider? = null
+
+    @VisibleForTesting
+    internal var openConnectionForTest: ((String) -> HttpURLConnection)? = null
+
+    private fun openDriveConnection(urlString: String): HttpURLConnection =
+        openConnectionForTest?.invoke(urlString) ?: (URL(urlString).openConnection() as HttpURLConnection)
+
+    private suspend fun resolveFreshTokenOrThrow(
+        context: Context,
+        provider: DriveTokenProvider,
+    ): String {
+        return when (val auth = provider.getFreshAccessToken(context)) {
+            is DriveAuthResult.Authorized -> auth.accessToken.also {
+                if (it.isBlank()) throw IllegalStateException("Received blank Google Drive access token.")
+            }
+            is DriveAuthResult.NeedsConsent -> throw DriveConsentRequiredException(
+                intentSender = auth.intentSender,
+            )
+            is DriveAuthResult.NeedsConsentIntent -> throw DriveConsentRequiredException(
+                recoveryIntent = auth.intent,
+            )
+            is DriveAuthResult.Failure -> throw IllegalStateException(auth.message)
+        }
+    }
+
+    private suspend fun <T> executeWithTokenRetry(
+        context: Context,
+        userId: String,
+        providedToken: String?,
+        block: (activeToken: String) -> T,
+    ): Pair<T, String> {
+        val provider = tokenProviderForTest ?: DefaultDriveTokenProvider
+        // Always retrieve a fresh token right before executing Drive REST calls unless
+        // a non-blank token was just supplied directly from an interactive consent flow.
+        val initialToken = if (!providedToken.isNullOrBlank()) {
+            providedToken.trim()
+        } else {
+            resolveFreshTokenOrThrow(context, provider)
+        }
+
+        return try {
+            block(initialToken) to initialToken
+        } catch (e: DriveUnauthorizedException) {
+            Log.w(TAG, "Drive API returned HTTP 401; clearing stale token and retrying once", e)
+            clearCachedToken(context, userId)
+            provider.clearToken(context, e.failedToken)
+            val refreshedToken = resolveFreshTokenOrThrow(context, provider)
+            val retried = block(refreshedToken)
+            retried to refreshedToken
+        }
+    }
+
     suspend fun backupToDrive(
-        accessToken: String,
+        accessToken: String? = null,
         dao: MinigeDao,
         userId: String,
         context: Context,
@@ -175,20 +260,27 @@ object DriveBackupManager {
             )
 
             val jsonPayload = serializeBackupPayload(backupData)
-            val folderId = findOrCreateBackupFolder(accessToken)
-            val existingFileId = findExistingBackupFileId(accessToken, folderId)
-
-            if (existingFileId != null) {
-                overwriteDriveFile(accessToken, existingFileId, folderId, jsonPayload)
-            } else {
-                createNewDriveFile(accessToken, folderId, jsonPayload)
+            val (_, activeToken) = executeWithTokenRetry(
+                context = context,
+                userId = userId,
+                providedToken = accessToken,
+            ) { token ->
+                val folderId = findOrCreateBackupFolder(token)
+                val existingFileId = findExistingBackupFileId(token, folderId)
+                if (existingFileId != null) {
+                    overwriteDriveFile(token, existingFileId, folderId, jsonPayload)
+                } else {
+                    createNewDriveFile(token, folderId, jsonPayload)
+                }
             }
 
             saveLastBackupTimestamp(context, userId, now)
-            saveCachedToken(context, userId, accessToken)
+            saveCachedToken(context, userId, activeToken)
             saveBackupMetadataSummary(context, userId, backupMetadata)
             Log.i(TAG, "Successfully backed up Minige to Google Drive folder '$BACKUP_FOLDER_NAME' at $now")
             Result.success(now)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.w(TAG, "Google Drive backup failed: ${e.message}", e)
             Result.failure(e)
@@ -196,16 +288,25 @@ object DriveBackupManager {
     }
 
     suspend fun fetchBackupPreview(
-        accessToken: String,
+        context: Context,
+        userId: String,
+        accessToken: String? = null,
     ): Result<DriveBackupPreview> = withContext(Dispatchers.IO) {
         try {
-            val folderId = findBackupFolder(accessToken)
-            val fileId = findExistingBackupFileId(accessToken, folderId)
-                ?: return@withContext Result.failure(
-                    NoSuchElementException("Walang nahanap na backup file ($BACKUP_FILE_NAME) sa '$BACKUP_FOLDER_NAME' sa Google Drive.")
-                )
+            val (jsonPayload, activeToken) = executeWithTokenRetry(
+                context = context,
+                userId = userId,
+                providedToken = accessToken,
+            ) { token ->
+                val folderId = findBackupFolder(token)
+                val fileId = findExistingBackupFileId(token, folderId)
+                    ?: throw NoSuchElementException(
+                        "Walang nahanap na backup file ($BACKUP_FILE_NAME) sa '$BACKUP_FOLDER_NAME' sa Google Drive."
+                    )
+                downloadDriveFile(token, fileId)
+            }
 
-            val jsonPayload = downloadDriveFile(accessToken, fileId)
+            saveCachedToken(context, userId, activeToken)
             val backupData = deserializeBackupPayload(jsonPayload)
             Result.success(
                 DriveBackupPreview(
@@ -219,25 +320,32 @@ object DriveBackupManager {
                     customerCount = backupData.customers.size,
                 )
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Result.failure(e)
         }
     }
 
     suspend fun restoreFromDrive(
-        accessToken: String,
+        accessToken: String? = null,
         dao: MinigeDao,
         userId: String,
         context: Context,
     ): Result<DriveRestoreSummary> = withContext(Dispatchers.IO) {
         try {
-            val folderId = findBackupFolder(accessToken)
-            val fileId = findExistingBackupFileId(accessToken, folderId)
-                ?: return@withContext Result.failure(
-                    NoSuchElementException("Walang nahanap na backup file ($BACKUP_FILE_NAME) sa '$BACKUP_FOLDER_NAME' sa Google Drive.")
-                )
-
-            val jsonPayload = downloadDriveFile(accessToken, fileId)
+            val (jsonPayload, activeToken) = executeWithTokenRetry(
+                context = context,
+                userId = userId,
+                providedToken = accessToken,
+            ) { token ->
+                val folderId = findBackupFolder(token)
+                val fileId = findExistingBackupFileId(token, folderId)
+                    ?: throw NoSuchElementException(
+                        "Walang nahanap na backup file ($BACKUP_FILE_NAME) sa '$BACKUP_FOLDER_NAME' sa Google Drive."
+                    )
+                downloadDriveFile(token, fileId)
+            }
             val backupData = deserializeBackupPayload(jsonPayload)
 
             // Upsert records into Room by ID to prevent duplicate deliveries, payments, or pautangs
@@ -299,7 +407,7 @@ object DriveBackupManager {
             }
 
             saveLastBackupTimestamp(context, userId, backupData.backupTimestamp)
-            saveCachedToken(context, userId, accessToken)
+            saveCachedToken(context, userId, activeToken)
             saveBackupMetadataSummary(context, userId, backupData.metadata)
 
             val summary = DriveRestoreSummary(
@@ -313,11 +421,16 @@ object DriveBackupManager {
             )
             Log.i(TAG, "Successfully restored Minige from Google Drive folder '$BACKUP_FOLDER_NAME': $summary")
             Result.success(summary)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Restore from Google Drive failed: ${e.message}", e)
             Result.failure(e)
         }
     }
+
+    private fun readErrorText(conn: HttpURLConnection): String? =
+        runCatching { conn.errorStream?.bufferedReader()?.use { it.readText() } }.getOrNull()
 
     private fun findOrCreateBackupFolder(accessToken: String): String {
         val existingId = findBackupFolder(accessToken)
@@ -329,8 +442,7 @@ object DriveBackupManager {
 
     private fun findBackupFolder(accessToken: String): String? {
         val query = "name%3D'Minige+Backup'+and+mimeType%3D'application%2Fvnd.google-apps.folder'+and+'root'+in+parents+and+trashed%3Dfalse"
-        val url = URL("$DRIVE_FILES_ROOT_URL?q=$query&fields=files(id,name)")
-        val conn = (url.openConnection() as HttpURLConnection).apply {
+        val conn = openDriveConnection("$DRIVE_FILES_ROOT_URL?q=$query&fields=files(id,name)").apply {
             requestMethod = "GET"
             connectTimeout = 12_000
             readTimeout = 12_000
@@ -340,6 +452,13 @@ object DriveBackupManager {
 
         return try {
             val code = conn.responseCode
+            if (code == HttpURLConnection.HTTP_UNAUTHORIZED) {
+                val errorText = readErrorText(conn)
+                throw DriveUnauthorizedException(
+                    failedToken = accessToken,
+                    message = "Search backup folder unauthorized (HTTP 401): $errorText",
+                )
+            }
             if (code in 200..299) {
                 val responseText = conn.inputStream.bufferedReader().use { it.readText() }
                 val files = JSONObject(responseText).optJSONArray("files")
@@ -356,8 +475,7 @@ object DriveBackupManager {
     }
 
     private fun createBackupFolder(accessToken: String): String {
-        val url = URL(DRIVE_FILES_ROOT_URL)
-        val conn = (url.openConnection() as HttpURLConnection).apply {
+        val conn = openDriveConnection(DRIVE_FILES_ROOT_URL).apply {
             requestMethod = "POST"
             doOutput = true
             connectTimeout = 15_000
@@ -372,25 +490,34 @@ object DriveBackupManager {
             put("parents", JSONArray(listOf("root")))
         }.toString()
 
-        conn.outputStream.use { os ->
-            os.write(metadata.toByteArray(StandardCharsets.UTF_8))
-            os.flush()
-        }
+        return try {
+            conn.outputStream.use { os ->
+                os.write(metadata.toByteArray(StandardCharsets.UTF_8))
+                os.flush()
+            }
 
-        val code = conn.responseCode
-        if (code !in 200..299) {
-            val errorText = runCatching {
-                conn.errorStream?.bufferedReader()?.use { it.readText() }
-            }.getOrNull()
-            throw IllegalStateException("Failed to create '$BACKUP_FOLDER_NAME' folder (HTTP $code): $errorText")
-        }
+            val code = conn.responseCode
+            if (code == HttpURLConnection.HTTP_UNAUTHORIZED) {
+                val errorText = readErrorText(conn)
+                throw DriveUnauthorizedException(
+                    failedToken = accessToken,
+                    message = "Failed to create '$BACKUP_FOLDER_NAME' folder (HTTP 401): $errorText",
+                )
+            }
+            if (code !in 200..299) {
+                val errorText = readErrorText(conn)
+                throw IllegalStateException("Failed to create '$BACKUP_FOLDER_NAME' folder (HTTP $code): $errorText")
+            }
 
-        val responseText = conn.inputStream.bufferedReader().use { it.readText() }
-        val id = JSONObject(responseText).optString("id")
-        if (id.isBlank()) {
-            throw IllegalStateException("Created '$BACKUP_FOLDER_NAME' folder but returned no ID.")
+            val responseText = conn.inputStream.bufferedReader().use { it.readText() }
+            val id = JSONObject(responseText).optString("id")
+            if (id.isBlank()) {
+                throw IllegalStateException("Created '$BACKUP_FOLDER_NAME' folder but returned no ID.")
+            }
+            id
+        } finally {
+            conn.disconnect()
         }
-        return id
     }
 
     private fun findExistingBackupFileId(accessToken: String, folderId: String?): String? {
@@ -399,8 +526,7 @@ object DriveBackupManager {
         } else {
             "name%3D'minige_auto_backup.json'+and+trashed%3Dfalse"
         }
-        val url = URL("$DRIVE_FILES_ROOT_URL?q=$folderQuery&fields=files(id,name,modifiedTime,size)")
-        val conn = (url.openConnection() as HttpURLConnection).apply {
+        val conn = openDriveConnection("$DRIVE_FILES_ROOT_URL?q=$folderQuery&fields=files(id,name,modifiedTime,size)").apply {
             requestMethod = "GET"
             connectTimeout = 12_000
             readTimeout = 12_000
@@ -410,6 +536,13 @@ object DriveBackupManager {
 
         return try {
             val code = conn.responseCode
+            if (code == HttpURLConnection.HTTP_UNAUTHORIZED) {
+                val errorText = readErrorText(conn)
+                throw DriveUnauthorizedException(
+                    failedToken = accessToken,
+                    message = "Search backup file unauthorized (HTTP 401): $errorText",
+                )
+            }
             if (code in 200..299) {
                 val responseText = conn.inputStream.bufferedReader().use { it.readText() }
                 val files = JSONObject(responseText).optJSONArray("files")
@@ -428,8 +561,7 @@ object DriveBackupManager {
     }
 
     private fun createNewDriveFile(accessToken: String, folderId: String, jsonPayload: String): String {
-        val url = URL(DRIVE_UPLOAD_URL)
-        val conn = (url.openConnection() as HttpURLConnection).apply {
+        val conn = openDriveConnection(DRIVE_UPLOAD_URL).apply {
             requestMethod = "POST"
             doOutput = true
             connectTimeout = 15_000
@@ -445,27 +577,35 @@ object DriveBackupManager {
 
         val body = buildMultipartBody(metadataJson, jsonPayload)
 
-        conn.outputStream.use { os ->
-            os.write(body.toByteArray(StandardCharsets.UTF_8))
-            os.flush()
-        }
+        return try {
+            conn.outputStream.use { os ->
+                os.write(body.toByteArray(StandardCharsets.UTF_8))
+                os.flush()
+            }
 
-        val code = conn.responseCode
-        if (code !in 200..299) {
-            val errorText = runCatching {
-                conn.errorStream?.bufferedReader()?.use { it.readText() }
-            }.getOrNull()
-            throw IllegalStateException("Drive file create failed (HTTP $code): $errorText")
-        }
+            val code = conn.responseCode
+            if (code == HttpURLConnection.HTTP_UNAUTHORIZED) {
+                val errorText = readErrorText(conn)
+                throw DriveUnauthorizedException(
+                    failedToken = accessToken,
+                    message = "Drive file create unauthorized (HTTP 401): $errorText",
+                )
+            }
+            if (code !in 200..299) {
+                val errorText = readErrorText(conn)
+                throw IllegalStateException("Drive file create failed (HTTP $code): $errorText")
+            }
 
-        val responseText = conn.inputStream.bufferedReader().use { it.readText() }
-        val responseJson = JSONObject(responseText)
-        return responseJson.optString("id")
+            val responseText = conn.inputStream.bufferedReader().use { it.readText() }
+            val responseJson = JSONObject(responseText)
+            responseJson.optString("id")
+        } finally {
+            conn.disconnect()
+        }
     }
 
     private fun overwriteDriveFile(accessToken: String, fileId: String, folderId: String, jsonPayload: String): String {
-        val url = URL("https://www.googleapis.com/upload/drive/v3/files/$fileId?uploadType=multipart")
-        val conn = (url.openConnection() as HttpURLConnection).apply {
+        val conn = openDriveConnection("https://www.googleapis.com/upload/drive/v3/files/$fileId?uploadType=multipart").apply {
             requestMethod = "POST"
             doOutput = true
             connectTimeout = 15_000
@@ -481,45 +621,62 @@ object DriveBackupManager {
 
         val body = buildMultipartBody(metadataJson, jsonPayload)
 
-        conn.outputStream.use { os ->
-            os.write(body.toByteArray(StandardCharsets.UTF_8))
-            os.flush()
-        }
-
-        val code = conn.responseCode
-        if (code !in 200..299) {
-            val errorText = runCatching {
-                conn.errorStream?.bufferedReader()?.use { it.readText() }
-            }.getOrNull()
-            if (code == 404) {
-                return createNewDriveFile(accessToken, folderId, jsonPayload)
+        return try {
+            conn.outputStream.use { os ->
+                os.write(body.toByteArray(StandardCharsets.UTF_8))
+                os.flush()
             }
-            throw IllegalStateException("Drive file overwrite failed (HTTP $code): $errorText")
-        }
 
-        val responseText = conn.inputStream.bufferedReader().use { it.readText() }
-        val responseJson = JSONObject(responseText)
-        return responseJson.optString("id").ifBlank { fileId }
+            val code = conn.responseCode
+            if (code == HttpURLConnection.HTTP_UNAUTHORIZED) {
+                val errorText = readErrorText(conn)
+                throw DriveUnauthorizedException(
+                    failedToken = accessToken,
+                    message = "Drive file overwrite unauthorized (HTTP 401): $errorText",
+                )
+            }
+            if (code !in 200..299) {
+                val errorText = readErrorText(conn)
+                if (code == 404) {
+                    return createNewDriveFile(accessToken, folderId, jsonPayload)
+                }
+                throw IllegalStateException("Drive file overwrite failed (HTTP $code): $errorText")
+            }
+
+            val responseText = conn.inputStream.bufferedReader().use { it.readText() }
+            val responseJson = JSONObject(responseText)
+            responseJson.optString("id").ifBlank { fileId }
+        } finally {
+            conn.disconnect()
+        }
     }
 
     private fun downloadDriveFile(accessToken: String, fileId: String): String {
-        val url = URL("https://www.googleapis.com/drive/v3/files/$fileId?alt=media")
-        val conn = (url.openConnection() as HttpURLConnection).apply {
+        val conn = openDriveConnection("https://www.googleapis.com/drive/v3/files/$fileId?alt=media").apply {
             requestMethod = "GET"
             connectTimeout = 15_000
             readTimeout = 25_000
             setRequestProperty("Authorization", "Bearer $accessToken")
         }
 
-        val code = conn.responseCode
-        if (code !in 200..299) {
-            val errorText = runCatching {
-                conn.errorStream?.bufferedReader()?.use { it.readText() }
-            }.getOrNull()
-            throw IllegalStateException("Drive file download failed (HTTP $code): $errorText")
-        }
+        return try {
+            val code = conn.responseCode
+            if (code == HttpURLConnection.HTTP_UNAUTHORIZED) {
+                val errorText = readErrorText(conn)
+                throw DriveUnauthorizedException(
+                    failedToken = accessToken,
+                    message = "Drive file download unauthorized (HTTP 401): $errorText",
+                )
+            }
+            if (code !in 200..299) {
+                val errorText = readErrorText(conn)
+                throw IllegalStateException("Drive file download failed (HTTP $code): $errorText")
+            }
 
-        return conn.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
+            conn.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
+        } finally {
+            conn.disconnect()
+        }
     }
 
     private fun buildMultipartBody(metadataJson: String, contentJson: String): String {
@@ -900,6 +1057,11 @@ object DriveBackupManager {
     fun saveCachedToken(context: Context, userId: String, token: String) {
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().putString("$KEY_CACHED_TOKEN$userId", token).apply()
+    }
+
+    fun clearCachedToken(context: Context, userId: String) {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().remove("$KEY_CACHED_TOKEN$userId").apply()
     }
 
     fun formatBackupTimestamp(epochMs: Long): String {

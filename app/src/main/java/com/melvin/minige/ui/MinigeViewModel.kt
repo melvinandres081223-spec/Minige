@@ -1,5 +1,6 @@
 package com.melvin.minige.ui
 
+import android.content.Intent
 import android.content.IntentSender
 import android.util.Log
 import androidx.lifecycle.ViewModel
@@ -35,6 +36,7 @@ import com.melvin.minige.sync.DriveBackupManager
 import com.melvin.minige.sync.DriveBackupPreview
 import com.melvin.minige.sync.BackupMetadataSummary
 import com.melvin.minige.sync.DriveBackupStatus
+import com.melvin.minige.sync.DriveConsentRequiredException
 import com.melvin.minige.ui.components.DailyQuotaPrefs
 import com.melvin.minige.ui.components.SukiAnalyticsHelper
 import com.melvin.minige.ui.components.SundayMakeupHelper
@@ -130,6 +132,7 @@ sealed interface MinigeEvent {
     data class ShowMessage(val message: String) : MinigeEvent
     data class LaunchCalendarConsent(val intentSender: IntentSender) : MinigeEvent
     data class LaunchDriveConsent(val intentSender: IntentSender) : MinigeEvent
+    data class LaunchDriveRecoveryConsent(val intent: Intent) : MinigeEvent
 }
 
 class MinigeViewModel(
@@ -167,8 +170,14 @@ class MinigeViewModel(
     private val _showRestorePreviewDialog = MutableStateFlow(false)
     private val _bulkSettlementConfirmation = MutableStateFlow<BulkUtangSettlementSummary?>(null)
 
+    private enum class PendingDriveOperation {
+        BACKUP,
+        PREVIEW_RESTORE,
+        RESTORE,
+    }
+
     private var autoBackupJob: Job? = null
-    private var cachedDriveToken: String? = null
+    private var pendingDriveOperation: PendingDriveOperation? = null
 
     private val _undoableAction = MutableStateFlow<UndoableAction?>(null)
     val undoableAction: StateFlow<UndoableAction?> = _undoableAction.asStateFlow()
@@ -793,30 +802,68 @@ class MinigeViewModel(
         }
     }
 
-    fun performDriveBackup(isSilent: Boolean) {
+    private fun emitDriveConsentEventIfNeeded(
+        consentError: DriveConsentRequiredException,
+        pendingOperation: PendingDriveOperation,
+        showPrompt: Boolean,
+    ) {
+        _driveBackupStatus.value = DriveBackupStatus.NEEDS_PERMISSION
+        if (!showPrompt) return
+        when {
+            consentError.intentSender != null -> {
+                pendingDriveOperation = pendingOperation
+                _events.tryEmit(MinigeEvent.LaunchDriveConsent(consentError.intentSender))
+            }
+            consentError.recoveryIntent != null -> {
+                pendingDriveOperation = pendingOperation
+                _events.tryEmit(MinigeEvent.LaunchDriveRecoveryConsent(consentError.recoveryIntent))
+            }
+            else -> {
+                _events.tryEmit(
+                    MinigeEvent.ShowMessage(
+                        consentError.localizedMessage ?: "Google Drive permission kailangan i-verify ulit."
+                    )
+                )
+            }
+        }
+    }
+
+    fun performDriveBackup(
+        isSilent: Boolean,
+        overrideAccessToken: String? = null,
+    ) {
         val context = appContext ?: return
         viewModelScope.launch(Dispatchers.IO) {
             _isDriveBackingUp.value = true
             try {
-                var token = cachedDriveToken ?: DriveBackupManager.getCachedToken(context, currentUserId)
-                if (token.isNullOrBlank()) {
-                    when (val auth = GoogleAuthManager.checkOrRequestDriveAuthorization(context)) {
+                // Always obtain a fresh OAuth access token right before executing Drive REST calls
+                // unless a non-blank token was just granted directly from the consent flow.
+                val freshToken = if (!overrideAccessToken.isNullOrBlank()) {
+                    overrideAccessToken
+                } else {
+                    when (val auth = GoogleAuthManager.fetchFreshDriveAccessToken(context)) {
                         is DriveAuthResult.Authorized -> {
-                            token = auth.accessToken
-                            cachedDriveToken = auth.accessToken
                             DriveBackupManager.saveCachedToken(context, currentUserId, auth.accessToken)
+                            auth.accessToken
                         }
                         is DriveAuthResult.NeedsConsent -> {
                             _driveBackupStatus.value = DriveBackupStatus.NEEDS_PERMISSION
-                            _isDriveBackingUp.value = false
                             if (!isSilent) {
+                                pendingDriveOperation = PendingDriveOperation.BACKUP
                                 _events.tryEmit(MinigeEvent.LaunchDriveConsent(auth.intentSender))
+                            }
+                            return@launch
+                        }
+                        is DriveAuthResult.NeedsConsentIntent -> {
+                            _driveBackupStatus.value = DriveBackupStatus.NEEDS_PERMISSION
+                            if (!isSilent) {
+                                pendingDriveOperation = PendingDriveOperation.BACKUP
+                                _events.tryEmit(MinigeEvent.LaunchDriveRecoveryConsent(auth.intent))
                             }
                             return@launch
                         }
                         is DriveAuthResult.Failure -> {
                             _driveBackupStatus.value = DriveBackupStatus.ERROR
-                            _isDriveBackingUp.value = false
                             if (!isSilent) {
                                 _events.tryEmit(MinigeEvent.ShowMessage(auth.message))
                             }
@@ -826,24 +873,35 @@ class MinigeViewModel(
                 }
 
                 _driveBackupStatus.value = DriveBackupStatus.BACKING_UP
-                val res = repository.backupToDrive(token, currentUserId, context)
+                val res = repository.backupToDrive(freshToken, currentUserId, context)
                 res.onSuccess { ts ->
+                    pendingDriveOperation = null
                     _driveLastBackupTimestamp.value = ts
                     _driveBackupStatus.value = DriveBackupStatus.ACTIVE
                     if (!isSilent) {
                         _events.tryEmit(MinigeEvent.ShowMessage("Backed up to Google Drive (Minige Backup folder) ✓"))
                     }
                 }.onFailure { err ->
-                    _driveBackupStatus.value = DriveBackupStatus.ERROR
-                    val msg = if (FirestoreSyncHelper.isOfflineFirestoreError(err)) {
-                        "Drive backup saved offline — will auto-backup when online"
+                    if (err is DriveConsentRequiredException) {
+                        emitDriveConsentEventIfNeeded(
+                            consentError = err,
+                            pendingOperation = PendingDriveOperation.BACKUP,
+                            showPrompt = !isSilent,
+                        )
                     } else {
-                        "Drive backup failed: ${err.localizedMessage ?: "Unknown error"}"
-                    }
-                    if (!isSilent) {
-                        _events.tryEmit(MinigeEvent.ShowMessage(msg))
+                        _driveBackupStatus.value = DriveBackupStatus.ERROR
+                        val msg = if (FirestoreSyncHelper.isOfflineFirestoreError(err)) {
+                            "Drive backup saved offline — will auto-backup when online"
+                        } else {
+                            "Drive backup failed: ${err.localizedMessage ?: "Unknown error"}"
+                        }
+                        if (!isSilent) {
+                            _events.tryEmit(MinigeEvent.ShowMessage(msg))
+                        }
                     }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 _driveBackupStatus.value = DriveBackupStatus.ERROR
                 if (!isSilent) {
@@ -857,16 +915,20 @@ class MinigeViewModel(
 
     fun triggerDriveConsent(context: android.content.Context) {
         viewModelScope.launch {
-            when (val auth = GoogleAuthManager.checkOrRequestDriveAuthorization(context)) {
+            when (val auth = GoogleAuthManager.fetchFreshDriveAccessToken(context)) {
                 is DriveAuthResult.Authorized -> {
-                    cachedDriveToken = auth.accessToken
                     DriveBackupManager.saveCachedToken(context, currentUserId, auth.accessToken)
                     _driveBackupStatus.value = DriveBackupStatus.ACTIVE
                     _events.tryEmit(MinigeEvent.ShowMessage("Google Drive access verified ✓"))
-                    performDriveBackup(isSilent = false)
+                    performDriveBackup(isSilent = false, overrideAccessToken = auth.accessToken)
                 }
                 is DriveAuthResult.NeedsConsent -> {
+                    pendingDriveOperation = PendingDriveOperation.BACKUP
                     _events.tryEmit(MinigeEvent.LaunchDriveConsent(auth.intentSender))
+                }
+                is DriveAuthResult.NeedsConsentIntent -> {
+                    pendingDriveOperation = PendingDriveOperation.BACKUP
+                    _events.tryEmit(MinigeEvent.LaunchDriveRecoveryConsent(auth.intent))
                 }
                 is DriveAuthResult.Failure -> {
                     _driveBackupStatus.value = DriveBackupStatus.ERROR
@@ -876,50 +938,93 @@ class MinigeViewModel(
         }
     }
 
-    fun onDriveConsentGranted(token: String) {
-        cachedDriveToken = token
-        appContext?.let { DriveBackupManager.saveCachedToken(it, currentUserId, token) }
+    fun onDriveConsentGranted(token: String? = null) {
+        val cleanToken = token?.takeIf { it.isNotBlank() }
+        appContext?.let { ctx ->
+            if (cleanToken != null) {
+                DriveBackupManager.saveCachedToken(ctx, currentUserId, cleanToken)
+            } else {
+                DriveBackupManager.clearCachedToken(ctx, currentUserId)
+            }
+        }
         _driveBackupStatus.value = DriveBackupStatus.ACTIVE
         _events.tryEmit(MinigeEvent.ShowMessage("Google Drive access granted ✓"))
-        performDriveBackup(isSilent = false)
+
+        val nextOp = pendingDriveOperation ?: PendingDriveOperation.BACKUP
+        pendingDriveOperation = null
+        val context = appContext
+        when (nextOp) {
+            PendingDriveOperation.BACKUP -> performDriveBackup(
+                isSilent = false,
+                overrideAccessToken = cleanToken,
+            )
+            PendingDriveOperation.PREVIEW_RESTORE -> if (context != null) {
+                previewDriveRestore(context = context, overrideAccessToken = cleanToken)
+            }
+            PendingDriveOperation.RESTORE -> if (context != null) {
+                restoreFromDrive(context = context, overrideAccessToken = cleanToken)
+            }
+        }
     }
 
     fun manualBackupNow(context: android.content.Context) {
         performDriveBackup(isSilent = false)
     }
 
-    fun previewDriveRestore(context: android.content.Context) {
+    fun previewDriveRestore(
+        context: android.content.Context,
+        overrideAccessToken: String? = null,
+    ) {
         viewModelScope.launch(Dispatchers.IO) {
             _isDriveBackingUp.value = true
             try {
-                var token = cachedDriveToken ?: DriveBackupManager.getCachedToken(context, currentUserId)
-                if (token.isNullOrBlank()) {
-                    when (val auth = GoogleAuthManager.checkOrRequestDriveAuthorization(context)) {
+                val freshToken = if (!overrideAccessToken.isNullOrBlank()) {
+                    overrideAccessToken
+                } else {
+                    when (val auth = GoogleAuthManager.fetchFreshDriveAccessToken(context)) {
                         is DriveAuthResult.Authorized -> {
-                            token = auth.accessToken
-                            cachedDriveToken = auth.accessToken
                             DriveBackupManager.saveCachedToken(context, currentUserId, auth.accessToken)
+                            auth.accessToken
                         }
                         is DriveAuthResult.NeedsConsent -> {
-                            _isDriveBackingUp.value = false
+                            pendingDriveOperation = PendingDriveOperation.PREVIEW_RESTORE
                             _events.tryEmit(MinigeEvent.LaunchDriveConsent(auth.intentSender))
                             return@launch
                         }
+                        is DriveAuthResult.NeedsConsentIntent -> {
+                            pendingDriveOperation = PendingDriveOperation.PREVIEW_RESTORE
+                            _events.tryEmit(MinigeEvent.LaunchDriveRecoveryConsent(auth.intent))
+                            return@launch
+                        }
                         is DriveAuthResult.Failure -> {
-                            _isDriveBackingUp.value = false
                             _events.tryEmit(MinigeEvent.ShowMessage("Drive auth failed: ${auth.message}"))
                             return@launch
                         }
                     }
                 }
 
-                val res = DriveBackupManager.fetchBackupPreview(token)
+                val res = DriveBackupManager.fetchBackupPreview(
+                    context = context,
+                    userId = currentUserId,
+                    accessToken = freshToken,
+                )
                 res.onSuccess { preview ->
+                    pendingDriveOperation = null
                     _driveBackupPreview.value = preview
                     _showRestorePreviewDialog.value = true
                 }.onFailure { err ->
-                    _events.tryEmit(MinigeEvent.ShowMessage("Failed to preview backup: ${err.localizedMessage ?: "Unknown error"}"))
+                    if (err is DriveConsentRequiredException) {
+                        emitDriveConsentEventIfNeeded(
+                            consentError = err,
+                            pendingOperation = PendingDriveOperation.PREVIEW_RESTORE,
+                            showPrompt = true,
+                        )
+                    } else {
+                        _events.tryEmit(MinigeEvent.ShowMessage("Failed to preview backup: ${err.localizedMessage ?: "Unknown error"}"))
+                    }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 _events.tryEmit(MinigeEvent.ShowMessage("Preview error: ${e.localizedMessage ?: "Unknown error"}"))
             } finally {
@@ -933,34 +1038,42 @@ class MinigeViewModel(
         _driveBackupPreview.value = null
     }
 
-    fun restoreFromDrive(context: android.content.Context) {
+    fun restoreFromDrive(
+        context: android.content.Context,
+        overrideAccessToken: String? = null,
+    ) {
         dismissRestorePreview()
         viewModelScope.launch(Dispatchers.IO) {
             _isDriveBackingUp.value = true
             try {
-                var token = cachedDriveToken ?: DriveBackupManager.getCachedToken(context, currentUserId)
-                if (token.isNullOrBlank()) {
-                    when (val auth = GoogleAuthManager.checkOrRequestDriveAuthorization(context)) {
+                val freshToken = if (!overrideAccessToken.isNullOrBlank()) {
+                    overrideAccessToken
+                } else {
+                    when (val auth = GoogleAuthManager.fetchFreshDriveAccessToken(context)) {
                         is DriveAuthResult.Authorized -> {
-                            token = auth.accessToken
-                            cachedDriveToken = auth.accessToken
                             DriveBackupManager.saveCachedToken(context, currentUserId, auth.accessToken)
+                            auth.accessToken
                         }
                         is DriveAuthResult.NeedsConsent -> {
-                            _isDriveBackingUp.value = false
+                            pendingDriveOperation = PendingDriveOperation.RESTORE
                             _events.tryEmit(MinigeEvent.LaunchDriveConsent(auth.intentSender))
                             return@launch
                         }
+                        is DriveAuthResult.NeedsConsentIntent -> {
+                            pendingDriveOperation = PendingDriveOperation.RESTORE
+                            _events.tryEmit(MinigeEvent.LaunchDriveRecoveryConsent(auth.intent))
+                            return@launch
+                        }
                         is DriveAuthResult.Failure -> {
-                            _isDriveBackingUp.value = false
                             _events.tryEmit(MinigeEvent.ShowMessage("Drive auth failed: ${auth.message}"))
                             return@launch
                         }
                     }
                 }
 
-                val res = repository.restoreFromDrive(token, currentUserId, context)
+                val res = repository.restoreFromDrive(freshToken, currentUserId, context)
                 res.onSuccess { summary ->
+                    pendingDriveOperation = null
                     _driveLastBackupTimestamp.value = summary.backupTimestamp
                     _driveBackupStatus.value = DriveBackupStatus.ACTIVE
                     summary.restoredQuota?.let { q -> _dailyQuotaTarget.value = q }
@@ -973,8 +1086,18 @@ class MinigeViewModel(
                     )
                     scheduleAutoBackup()
                 }.onFailure { err ->
-                    _events.tryEmit(MinigeEvent.ShowMessage("Restore failed: ${err.localizedMessage ?: "Unknown error"}"))
+                    if (err is DriveConsentRequiredException) {
+                        emitDriveConsentEventIfNeeded(
+                            consentError = err,
+                            pendingOperation = PendingDriveOperation.RESTORE,
+                            showPrompt = true,
+                        )
+                    } else {
+                        _events.tryEmit(MinigeEvent.ShowMessage("Restore failed: ${err.localizedMessage ?: "Unknown error"}"))
+                    }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 _events.tryEmit(MinigeEvent.ShowMessage("Restore error: ${e.localizedMessage ?: "Unknown error"}"))
             } finally {

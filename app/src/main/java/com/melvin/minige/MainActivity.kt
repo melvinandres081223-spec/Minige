@@ -174,12 +174,15 @@ fun MinigeMainShell(
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
             val token = GoogleAuthManager.extractDriveTokenFromIntent(context, result.data)
-            if (!token.isNullOrBlank()) {
-                viewModel.onDriveConsentGranted(token)
-            } else {
-                scope.launch { snackbarHostState.showSnackbar("Google Drive permission granted.") }
-                viewModel.manualBackupNow(context)
-            }
+            viewModel.onDriveConsentGranted(token)
+        }
+    }
+
+    val driveRecoveryLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            viewModel.onDriveConsentGranted(token = null)
         }
     }
 
@@ -196,6 +199,9 @@ fun MinigeMainShell(
                     driveConsentLauncher.launch(
                         IntentSenderRequest.Builder(event.intentSender).build()
                     )
+                }
+                is MinigeEvent.LaunchDriveRecoveryConsent -> {
+                    driveRecoveryLauncher.launch(event.intent)
                 }
             }
         }
