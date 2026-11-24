@@ -67,6 +67,7 @@ data class DailyClosingData(
     val cashAdvanceTotal: Int = 0,
     val netCashToRemitToBoss: Int,
     val cashOnHand: Int,
+    val pautangTurnedOverToRefilling: Int = 0,
 )
 
 object DailyClosingHelper {
@@ -99,6 +100,7 @@ object DailyClosingHelper {
             cashAdvanceTotal = breakdown.cashAdvanceTotal,
             netCashToRemitToBoss = breakdown.cashToRemit,
             cashOnHand = summary.cashOnHand,
+            pautangTurnedOverToRefilling = breakdown.pautangTurnedOverToRefilling,
         )
     }
 
@@ -111,6 +113,9 @@ object DailyClosingHelper {
             appendLine("Unpaid Pautang: ${data.pautangUnpaidGallons} gal")
             appendLine("Commission Earned: ₱${data.totalCommissionEarned} (Rate ₱$rateText/gal)")
             appendLine("Bank / Online: ₱${data.bankPaidTotal}")
+            if (data.pautangTurnedOverToRefilling > 0) {
+                appendLine("Pautang Turned Over to Refilling: ₱${data.pautangTurnedOverToRefilling}")
+            }
             appendLine("Cash Collected: ₱${data.cashCollected} | Expenses: -₱${data.expensesTotal} | Cash Advance: -₱${data.cashAdvanceTotal}")
             appendLine("Retained Sukli: ₱${data.retainedSukli} (Default ₱${data.defaultStartingSukli})")
             append("Net Cash to Remit to Boss: ₱${data.netCashToRemitToBoss}")
@@ -234,6 +239,9 @@ fun DailyClosingSheet(
 
             ClosingSectionCard(title = "Sukli & Remittance", icon = Icons.Rounded.Savings) {
                 ClosingLine("Cash Collected", "₱${closingData.cashCollected}")
+                if (closingData.pautangTurnedOverToRefilling > 0) {
+                    ClosingLine("Pautang Turned Over to Refilling", "₱${closingData.pautangTurnedOverToRefilling}")
+                }
                 ClosingLine("Route Expenses", "-₱${closingData.expensesTotal}")
                 ClosingLine("Cash Advance", "-₱${closingData.cashAdvanceTotal}")
                 ClosingLine("Retained Customer Sukli", "₱${closingData.retainedSukli}")

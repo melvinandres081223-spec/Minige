@@ -19,8 +19,10 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -56,6 +58,7 @@ fun BulkCollectUtangDialog(
         mutableStateOf(combinedBalance.toString())
     }
     var selectedChannel by remember(customerName) { mutableStateOf(PaidChannel.CASH) }
+    var turnedOverToRefilling by remember(customerName) { mutableStateOf(false) }
     var notes by remember { mutableStateOf("") }
 
     val enteredAmount = (amountText.toIntOrNull() ?: 0).coerceAtLeast(0)
@@ -130,9 +133,45 @@ fun BulkCollectUtangDialog(
                         .testTag("bulk_utang_amount_input"),
                 )
 
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
+                            Text(
+                                text = "Naibigay na agad sa refilling",
+                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                            )
+                            Text(
+                                text = "May commission (+₱8/gal), pero hindi na isasama sa Net Cash to Remit sa hapon",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(
+                            checked = turnedOverToRefilling,
+                            onCheckedChange = { turnedOverToRefilling = it },
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .testTag("bulk_utang_turned_over_switch"),
+                        )
+                    }
+                }
+
                 OutlinedTextField(
                     value = notes,
-                    onValueChange = { notes = it.take(300) },
+                    onValueChange = { notes = it.take(220) },
                     label = { Text("Notes (optional)") },
                     singleLine = true,
                     modifier = Modifier
@@ -212,7 +251,11 @@ fun BulkCollectUtangDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    val taggedNotes = PaymentBreakdownHelper.applyChannelTag(notes, selectedChannel)
+                    val withChannel = PaymentBreakdownHelper.applyChannelTag(notes, selectedChannel)
+                    val taggedNotes = PaymentBreakdownHelper.applyTurnedOverToRefillingTag(
+                        notes = withChannel,
+                        turnedOver = turnedOverToRefilling,
+                    )
                     onConfirm(enteredAmount, selectedChannel.storedUtangMethod, taggedNotes)
                 },
                 enabled = enteredAmount > 0 && openEntriesFifo.isNotEmpty(),

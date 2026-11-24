@@ -10,8 +10,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Remove
@@ -23,8 +25,10 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -41,6 +45,7 @@ import com.melvin.minige.domain.UtangPaymentRecord
 import com.melvin.minige.util.CommissionRateHistory
 import com.melvin.minige.util.PaidChannel
 import com.melvin.minige.util.PartialPaymentHelper
+import com.melvin.minige.util.PaymentBreakdownHelper
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -61,6 +66,7 @@ fun PartialPaymentDialog(
         mutableStateOf(1.coerceAtMost(maxGallons).toString())
     }
     var selectedChannel by remember(delivery.id) { mutableStateOf(PaidChannel.CASH) }
+    var turnedOverToRefilling by remember(delivery.id) { mutableStateOf(false) }
     var notes by remember(delivery.id) { mutableStateOf("") }
 
     val paidGallons = (gallonsText.toIntOrNull() ?: 0).coerceIn(0, maxGallons)
@@ -77,7 +83,12 @@ fun PartialPaymentDialog(
         onDismissRequest = onDismiss,
         title = { Text("Partial Pay • ${delivery.customerName}") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
                 Text(
                     text = "Unpaid: ${status.remainingUnpaidGallons} gal(s) • Bal: ₱${status.remainingBalance} ($paymentDateKey)",
                     style = MaterialTheme.typography.bodyMedium,
@@ -147,9 +158,45 @@ fun PartialPaymentDialog(
                     }
                 }
 
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
+                            Text(
+                                text = "Naibigay na agad sa refilling",
+                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                            )
+                            Text(
+                                text = "May commission (+₱${CommissionRateHistory.formatRate(activeCommissionRate)}/gal), pero hindi na isasama sa Net Cash to Remit sa hapon",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(
+                            checked = turnedOverToRefilling,
+                            onCheckedChange = { turnedOverToRefilling = it },
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .testTag("partial_pay_turned_over_switch"),
+                        )
+                    }
+                }
+
                 OutlinedTextField(
                     value = notes,
-                    onValueChange = { notes = it.take(240) },
+                    onValueChange = { notes = it.take(200) },
                     label = { Text("Notes (optional)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
@@ -165,7 +212,11 @@ fun PartialPaymentDialog(
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         Text(
-                            text = "Amount to Deduct: ₱$calculatedAmount (${selectedChannel.label})",
+                            text = if (turnedOverToRefilling) {
+                                "Turned Over to Refilling: ₱$calculatedAmount (₱0 sa Net Remit)"
+                            } else {
+                                "Amount to Deduct: ₱$calculatedAmount (${selectedChannel.label})"
+                            },
                             style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
                         )
                         Text(
@@ -190,7 +241,11 @@ fun PartialPaymentDialog(
             Button(
                 onClick = {
                     if (paidGallons > 0 && calculatedAmount > 0) {
-                        onConfirm(paidGallons, calculatedAmount, selectedChannel, notes)
+                        val taggedNotes = PaymentBreakdownHelper.applyTurnedOverToRefillingTag(
+                            notes = notes,
+                            turnedOver = turnedOverToRefilling,
+                        )
+                        onConfirm(paidGallons, calculatedAmount, selectedChannel, taggedNotes)
                     }
                 },
                 enabled = paidGallons > 0 && calculatedAmount > 0,

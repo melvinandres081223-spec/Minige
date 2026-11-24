@@ -96,6 +96,7 @@ fun AddDeliverySheet(
     activeCommissionRate: Double = settings.commissionRate.toDouble(),
     initialDelivery: DeliveryRecord? = null,
     reorderPrefill: InactiveSukiAlert? = null,
+    initialPaymentType: PaymentType? = null,
     onDismiss: () -> Unit,
     onSave: (
         customerName: String,
@@ -112,7 +113,19 @@ fun AddDeliverySheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val customerFocusRequester = remember { FocusRequester() }
     val keyboardController = LocalSoftwareKeyboardController.current
-    val formKey = Triple(initialDelivery?.id, reorderPrefill?.customerId, reorderPrefill?.lastDeliveryDateKey)
+    val formKey = remember(
+        initialDelivery?.id,
+        reorderPrefill?.customerId,
+        reorderPrefill?.lastDeliveryDateKey,
+        initialPaymentType,
+    ) {
+        listOf(
+            initialDelivery?.id,
+            reorderPrefill?.customerId,
+            reorderPrefill?.lastDeliveryDateKey,
+            initialPaymentType?.name,
+        )
+    }
 
     val initialPriceText = remember(formKey, settings) {
         if (initialDelivery != null &&
@@ -151,7 +164,7 @@ fun AddDeliverySheet(
         mutableStateOf((initialDelivery?.alkalineGallons ?: reorderPrefill?.lastAlkalineGallons ?: 0).toString())
     }
     var paymentType by remember(formKey) {
-        mutableStateOf(initialDelivery?.paymentType ?: PaymentType.CASH)
+        mutableStateOf(initialDelivery?.paymentType ?: initialPaymentType ?: PaymentType.CASH)
     }
     var hasPaidWalkInCommission by remember(formKey) {
         mutableStateOf(
@@ -164,8 +177,12 @@ fun AddDeliverySheet(
     }
     var selectedPaidChannel by remember(formKey) {
         mutableStateOf(
-            if (initialDelivery != null) PaymentBreakdownHelper.resolveDeliveryChannel(initialDelivery)
-            else PaidChannel.CASH
+            when {
+                initialDelivery != null -> PaymentBreakdownHelper.resolveDeliveryChannel(initialDelivery)
+                initialPaymentType == PaymentType.BANK_DEPOSIT -> PaidChannel.BANK_ONLINE
+                initialPaymentType == null || initialPaymentType == PaymentType.CASH -> PaidChannel.CASH
+                else -> null
+            }
         )
     }
     var classification by remember(formKey) {
@@ -348,6 +365,8 @@ fun AddDeliverySheet(
                 text = when {
                     initialDelivery != null -> "Edit Delivery / Pick-up"
                     isQuickCashAdvanceMode -> "Log Cash Advance"
+                    paymentType == PaymentType.PICK_UP -> "Log Pick-Up (For Delivery)"
+                    initialPaymentType == PaymentType.CASH -> "Log Direct Delivery"
                     else -> "Log Delivery / Pick-up"
                 },
                 style = MaterialTheme.typography.titleLarge,

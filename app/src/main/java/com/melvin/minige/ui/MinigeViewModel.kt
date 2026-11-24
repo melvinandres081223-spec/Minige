@@ -45,6 +45,8 @@ import com.melvin.minige.ui.components.SundayMakeupHelper
 import com.melvin.minige.ui.components.WeeklySukiAnalytics
 import com.melvin.minige.util.AppDiagnosticReport
 import com.melvin.minige.util.AppDiagnosticsRunner
+import com.melvin.minige.util.BossReceivableEntry
+import com.melvin.minige.util.BossReceivablesPrefs
 import com.melvin.minige.util.BulkUtangSettlementSummary
 import com.melvin.minige.util.CommissionRateEntry
 import com.melvin.minige.util.CommissionRateHistory
@@ -138,9 +140,13 @@ data class MinigeUiState(
     val inactiveAlertsByCustomerId: Map<String, InactiveSukiAlert> = emptyMap(),
     val diagnosticReport: AppDiagnosticReport? = null,
     val isRunningDiagnostics: Boolean = false,
+    val bossReceivables: List<BossReceivableEntry> = emptyList(),
 ) {
     val inactiveSukiCount: Int
         get() = inactiveSukiAlerts.size
+
+    val unpaidBossReceivableTotal: Int
+        get() = BossReceivablesPrefs.totalUnpaidBalance(bossReceivables)
 }
 
 sealed interface MinigeEvent {
@@ -198,6 +204,9 @@ class MinigeViewModel(
     private val _bulkSettlementConfirmation = MutableStateFlow<BulkUtangSettlementSummary?>(null)
     private val _diagnosticReport = MutableStateFlow<AppDiagnosticReport?>(null)
     private val _isRunningDiagnostics = MutableStateFlow(false)
+    private val _bossReceivables = MutableStateFlow(
+        appContext?.let { BossReceivablesPrefs.loadEntries(it, currentUserId) } ?: emptyList()
+    )
 
     private enum class PendingDriveOperation {
         BACKUP,
@@ -321,7 +330,7 @@ class MinigeViewModel(
         combine(_driveBackupStatus, _driveLastBackupTimestamp, _isDriveBackingUp, _driveBackupPreview, _showRestorePreviewDialog) { status, lastTs, backingUp, preview, showPreview ->
             DriveBackupSnapshot(status, lastTs, backingUp, preview, showPreview)
         },
-        _isSyncing,
+        combine(_isSyncing, _bossReceivables) { syncing, receivables -> syncing to receivables },
         combine(
             _isCalendarSyncing,
             _statusMessage,
@@ -331,7 +340,9 @@ class MinigeViewModel(
         ) { calSyncing, status, bulkSummary, diagReport, runningDiag ->
             UiExtrasSnapshot(calSyncing, status, bulkSummary, diagReport, runningDiag)
         },
-    ) { prefs, bundle, driveSnap, syncing, extras ->
+    ) { prefs, bundle, driveSnap, syncAndReceivables, extras ->
+        val syncing = syncAndReceivables.first
+        val bossReceivables = syncAndReceivables.second
         val calSyncing = extras.calSyncing
         val status = extras.status
         val bulkSummary = extras.bulkSummary
@@ -466,6 +477,7 @@ class MinigeViewModel(
             inactiveAlertsByCustomerId = inactiveAlertsByCustomerId,
             diagnosticReport = extras.diagnosticReport,
             isRunningDiagnostics = extras.isRunningDiagnostics,
+            bossReceivables = bossReceivables,
         )
     }.flowOn(Dispatchers.Default).stateIn(
         scope = viewModelScope,
@@ -879,6 +891,50 @@ class MinigeViewModel(
         }
     }
 
+    fun addBossReceivable(
+        periodLabel: String,
+        amount: Int,
+        gallons: Int?,
+        ratePerGallon: Double?,
+        note: String,
+    ) {
+        val updated = BossReceivablesPrefs.addEntry(
+            entries = _bossReceivables.value,
+            periodLabel = periodLabel,
+            amount = amount,
+            gallons = gallons,
+            ratePerGallon = ratePerGallon,
+            note = note,
+        )
+        _bossReceivables.value = updated
+        appContext?.let { BossReceivablesPrefs.saveEntries(it, currentUserId, updated) }
+        _events.tryEmit(MinigeEvent.ShowMessage("Added unpaid sahod entry: ₱$amount ($periodLabel)"))
+        scheduleAutoBackup()
+    }
+
+    fun markBossReceivablePaid(entryId: String) {
+        val target = _bossReceivables.value.firstOrNull { it.id == entryId } ?: return
+        val updated = BossReceivablesPrefs.markPaid(
+            entries = _bossReceivables.value,
+            entryId = entryId,
+        )
+        _bossReceivables.value = updated
+        appContext?.let { BossReceivablesPrefs.saveEntries(it, currentUserId, updated) }
+        _events.tryEmit(MinigeEvent.ShowMessage("Marked Nakuha Na: ₱${target.amount} (${target.periodLabel}) ✓"))
+        scheduleAutoBackup()
+    }
+
+    fun deleteBossReceivable(entryId: String) {
+        val updated = BossReceivablesPrefs.deleteEntry(
+            entries = _bossReceivables.value,
+            entryId = entryId,
+        )
+        _bossReceivables.value = updated
+        appContext?.let { BossReceivablesPrefs.saveEntries(it, currentUserId, updated) }
+        _events.tryEmit(MinigeEvent.ShowMessage("Removed unpaid sahod entry"))
+        scheduleAutoBackup()
+    }
+
     fun scheduleAutoBackup() {
         autoBackupJob?.cancel()
         autoBackupJob = viewModelScope.launch(Dispatchers.IO) {
@@ -1223,6 +1279,7 @@ class MinigeViewModel(
                     summary.restoredQuota?.let { q -> _dailyQuotaTarget.value = q }
                     summary.restoredSundayMakeup?.let { sm -> _sundayMakeupEnabled.value = sm }
                     _commissionRateHistory.value = CommissionRateHistory.loadHistory(context, currentUserId)
+                    _bossReceivables.value = BossReceivablesPrefs.loadEntries(context, currentUserId)
                     _events.tryEmit(
                         MinigeEvent.ShowMessage(
                             "Restored ${summary.deliveryCount} deliveries, ${summary.paymentCount} payments, preferences, at customer directory mula sa 'Minige Backup' folder ✓"

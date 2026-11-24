@@ -36,6 +36,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.melvin.minige.domain.MinigeDateUtils
 import com.melvin.minige.ui.MinigeUiState
+import com.melvin.minige.ui.components.BossReceivablesCard
 import com.melvin.minige.ui.components.SukiAnalyticsCard
 import com.melvin.minige.ui.components.SundayMakeupHelper
 import com.melvin.minige.ui.components.SundayMakeupToggle
@@ -49,6 +50,9 @@ fun WeeklyScreen(
     onSyncCalendarClick: () -> Unit,
     onToggleSundayMakeup: (Boolean) -> Unit,
     onSyncSundayMakeupClick: (LocalDate) -> Unit,
+    onAddBossReceivable: (periodLabel: String, amount: Int, gallons: Int?, ratePerGallon: Double?, note: String) -> Unit = { _, _, _, _, _ -> },
+    onMarkBossReceivablePaid: (String) -> Unit = {},
+    onDeleteBossReceivable: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val weekly by remember(uiState.weeklySummary, uiState.sundayMakeupDaySummary, uiState.sundayMakeupEnabled) {
@@ -140,6 +144,17 @@ fun WeeklyScreen(
                 SukiAnalyticsCard(
                     analytics = uiState.weeklySukiAnalytics,
                     inactiveAlertsByCustomerId = uiState.inactiveAlertsByCustomerId,
+                )
+            }
+
+            item(key = "weekly_boss_receivables", contentType = "boss_receivables") {
+                BossReceivablesCard(
+                    entries = uiState.bossReceivables,
+                    defaultCommissionRate = uiState.activeCommissionRate,
+                    suggestedPeriodLabel = "${MinigeDateUtils.formatShort(weekly.monday)} – ${MinigeDateUtils.formatShort(weekly.saturday)}",
+                    onAddEntry = onAddBossReceivable,
+                    onMarkPaid = onMarkBossReceivablePaid,
+                    onDeleteEntry = onDeleteBossReceivable,
                 )
             }
 

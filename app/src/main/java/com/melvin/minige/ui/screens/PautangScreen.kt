@@ -19,8 +19,10 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.CreditScore
@@ -36,8 +38,10 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -540,6 +544,7 @@ private fun CollectUtangDialog(
     val remaining = delivery.remainingBalance
     var amountText by remember(delivery.id) { mutableStateOf(remaining.toString()) }
     var selectedChannel by remember(delivery.id) { mutableStateOf(PaidChannel.CASH) }
+    var turnedOverToRefilling by remember(delivery.id) { mutableStateOf(false) }
     var notes by remember { mutableStateOf("") }
 
     val parsedAmount = (amountText.toIntOrNull() ?: 0).coerceIn(0, remaining)
@@ -549,7 +554,12 @@ private fun CollectUtangDialog(
         onDismissRequest = onDismiss,
         title = { Text("Collect from ${delivery.customerName}") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
                 Text(
                     text = "Remaining Balance: ₱$remaining • Date: $paymentDateKey",
                     style = MaterialTheme.typography.bodyMedium,
@@ -580,19 +590,60 @@ private fun CollectUtangDialog(
                     modifier = Modifier.fillMaxWidth(),
                 )
 
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
+                            Text(
+                                text = "Naibigay na agad sa refilling",
+                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                            )
+                            Text(
+                                text = "May commission (+₱$commissionRate/gal), pero hindi na isasama sa Net Cash to Remit sa hapon",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(
+                            checked = turnedOverToRefilling,
+                            onCheckedChange = { turnedOverToRefilling = it },
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .testTag("utang_turned_over_switch"),
+                        )
+                    }
+                }
+
                 OutlinedTextField(
                     value = notes,
-                    onValueChange = { notes = it.take(300) },
+                    onValueChange = { notes = it.take(220) },
                     label = { Text("Notes (optional)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
 
                 Text(
-                    text = if (willFullySettle) {
-                        "Reaches ₱0 balance → Awards ₱${delivery.totalGallons * commissionRate} commission on $paymentDateKey!"
-                    } else {
-                        "Partial payment → Remaining ₱${remaining - parsedAmount} • ₱0 commission until fully paid."
+                    text = when {
+                        turnedOverToRefilling && willFullySettle ->
+                            "Turned over to refilling → +₱${delivery.totalGallons * commissionRate} commission on $paymentDateKey • Excluded from Net Cash to Remit."
+                        turnedOverToRefilling ->
+                            "Turned over to refilling → Remaining ₱${remaining - parsedAmount} • Excluded from Net Cash to Remit."
+                        willFullySettle ->
+                            "Reaches ₱0 balance → Awards ₱${delivery.totalGallons * commissionRate} commission on $paymentDateKey!"
+                        else ->
+                            "Partial payment → Remaining ₱${remaining - parsedAmount} • ₱0 commission until fully paid."
                     },
                     style = MaterialTheme.typography.labelMedium,
                     color = if (willFullySettle) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -602,7 +653,11 @@ private fun CollectUtangDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    val taggedNotes = PaymentBreakdownHelper.applyChannelTag(notes, selectedChannel)
+                    val withChannel = PaymentBreakdownHelper.applyChannelTag(notes, selectedChannel)
+                    val taggedNotes = PaymentBreakdownHelper.applyTurnedOverToRefillingTag(
+                        notes = withChannel,
+                        turnedOver = turnedOverToRefilling,
+                    )
                     onConfirm(parsedAmount, selectedChannel.storedUtangMethod, taggedNotes)
                 },
                 enabled = parsedAmount > 0,

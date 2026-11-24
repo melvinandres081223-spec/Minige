@@ -45,6 +45,7 @@ data class PaymentChannelBreakdown(
     val paidWalkInGallons: Int = 0,
     val commissionFromPaidWalkIn: Int = 0,
     val cashAdvanceTotal: Int = 0,
+    val pautangTurnedOverToRefilling: Int = 0,
 )
 
 object PaymentBreakdownHelper {
@@ -55,6 +56,7 @@ object PaymentBreakdownHelper {
     const val TAG_PAID_WALK_IN = "[Paid Walk-in]"
     const val TAG_NO_COMMISSION = "[No Commission]"
     const val TAG_CASH_ADVANCE = "[Cash Advance]"
+    const val TAG_TURNED_OVER_REFILLING = "[Turned Over to Refilling]"
 
     fun resolveDeliveryChannel(delivery: DeliveryRecord): PaidChannel? {
         return when (delivery.paymentType) {
@@ -133,6 +135,24 @@ object PaymentBreakdownHelper {
     fun applyCashAdvanceTag(notes: String): String {
         val cleaned = stripCashAdvanceTag(notes)
         return if (cleaned.isEmpty()) TAG_CASH_ADVANCE else "$TAG_CASH_ADVANCE $cleaned".take(300)
+    }
+
+    fun isTurnedOverToRefilling(notes: String): Boolean =
+        notes.contains(TAG_TURNED_OVER_REFILLING, ignoreCase = true)
+
+    fun stripTurnedOverToRefillingTag(notes: String): String {
+        return notes
+            .replace(TAG_TURNED_OVER_REFILLING, "", ignoreCase = true)
+            .replace(Regex("\\s{2,}"), " ")
+            .trim()
+    }
+
+    fun applyTurnedOverToRefillingTag(notes: String, turnedOver: Boolean): String {
+        val cleaned = stripTurnedOverToRefillingTag(notes)
+        if (!turnedOver) return cleaned.take(300)
+        val maxRemaining = (300 - TAG_TURNED_OVER_REFILLING.length - 1).coerceAtLeast(0)
+        val trimmed = cleaned.take(maxRemaining).trimEnd()
+        return if (trimmed.isEmpty()) TAG_TURNED_OVER_REFILLING else "$trimmed $TAG_TURNED_OVER_REFILLING"
     }
 
     fun displayMethodLabel(delivery: DeliveryRecord): String {
@@ -215,11 +235,18 @@ object PaymentBreakdownHelper {
             }
         }
 
-        // Paid Walk-in never contributes to cashCollected or bankPaidTotal
+        // Paid Walk-in and Pautang payments turned over directly to refilling never contribute to cashCollected or bankPaidTotal
+        val pautangTurnedOverToRefilling = paymentsForDate
+            .filter { it.isTurnedOverToRefilling }
+            .sumOf { it.amount }
         val cashCollected = directCash.sumOf { it.amountPaid } +
-            paymentsForDate.filter { resolveUtangPaymentChannel(it) == PaidChannel.CASH }.sumOf { it.amount }
+            paymentsForDate
+                .filter { resolveUtangPaymentChannel(it) == PaidChannel.CASH && !it.isTurnedOverToRefilling }
+                .sumOf { it.amount }
         val bankPaidTotal = directBankOnline.sumOf { it.amountPaid } +
-            paymentsForDate.filter { resolveUtangPaymentChannel(it) == PaidChannel.BANK_ONLINE }.sumOf { it.amount }
+            paymentsForDate
+                .filter { resolveUtangPaymentChannel(it) == PaidChannel.BANK_ONLINE && !it.isTurnedOverToRefilling }
+                .sumOf { it.amount }
 
         val bankOnlineGallons = directBankOnline.sumOf { it.totalGallons } + utangBankGals
         val paidWalkInGallons = directPaidWalkIn.sumOf { it.totalGallons }
@@ -244,6 +271,7 @@ object PaymentBreakdownHelper {
             paidWalkInGallons = paidWalkInGallons,
             commissionFromPaidWalkIn = commissionFromPaidWalkIn,
             cashAdvanceTotal = cashAdvanceTotal,
+            pautangTurnedOverToRefilling = pautangTurnedOverToRefilling,
         )
     }
 }

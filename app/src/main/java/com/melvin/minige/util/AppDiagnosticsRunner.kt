@@ -355,9 +355,24 @@ object AppDiagnosticsRunner {
                 utangPayments = utangPayments,
                 expenses = expenses,
             )
-            val expectedNetRemit = daily.cashCollected - daily.expensesTotal - daily.cashAdvanceTotal
-            if (daily.netCashRemit != expectedNetRemit || breakdown.cashToRemit != expectedNetRemit) {
-                issues += "Remittance mismatch on $dateKey: summary=${daily.netCashRemit}, breakdown=${breakdown.cashToRemit}, expected=$expectedNetRemit."
+            val directCashSales = deliveries
+                .filter { it.dateKey == dateKey && it.paymentType == PaymentType.CASH }
+                .sumOf { it.amountPaid }
+            val nonTurnedOverPautangCash = utangPayments
+                .filter {
+                    it.dateKey == dateKey &&
+                        it.method == com.melvin.minige.domain.UtangMethod.CASH &&
+                        !it.isTurnedOverToRefilling
+                }
+                .sumOf { it.amount }
+            val expectedCashCollected = directCashSales + nonTurnedOverPautangCash
+            val expectedNetRemit = expectedCashCollected - daily.expensesTotal - daily.cashAdvanceTotal
+            if (daily.cashCollected != expectedCashCollected ||
+                breakdown.cashCollected != expectedCashCollected ||
+                daily.netCashRemit != expectedNetRemit ||
+                breakdown.cashToRemit != expectedNetRemit
+            ) {
+                issues += "Remittance mismatch on $dateKey: cash=${daily.cashCollected}/$expectedCashCollected, summary=${daily.netCashRemit}, breakdown=${breakdown.cashToRemit}, expected=$expectedNetRemit."
             }
             if (daily.dailyCommission < 0) {
                 issues += "Negative daily commission (${daily.dailyCommission}) on $dateKey."
@@ -370,7 +385,7 @@ object AppDiagnosticsRunner {
                 title = "Ledger & Remittance Math Integrity",
                 status = DiagnosticStatus.PASS,
                 summary = "All ${allDates.size} ledger day(s) pass remittance, commission, and balance checks.",
-                detail = "Verified: Cash to Remit == Cash Collected - Route Expenses - Cash Advance across ${deliveries.size} deliveries.",
+                detail = "Verified: Net Cash to Remit == (Cash Sales + Non-Turned-Over Pautang Payments) - Route Expenses - Cash Advance across ${deliveries.size} deliveries.",
             )
         } else {
             DiagnosticCheckItem(

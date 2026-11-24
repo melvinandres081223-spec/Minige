@@ -22,6 +22,8 @@ import com.melvin.minige.data.local.MinigeDao
 import com.melvin.minige.data.local.UtangPaymentEntity
 import com.melvin.minige.ui.components.DailyQuotaPrefs
 import com.melvin.minige.ui.components.SundayMakeupPrefs
+import com.melvin.minige.util.BossReceivableEntry
+import com.melvin.minige.util.BossReceivablesPrefs
 import com.melvin.minige.util.CommissionRateEntry
 import com.melvin.minige.util.CommissionRateHistory
 import kotlinx.coroutines.CancellationException
@@ -107,6 +109,7 @@ data class MinigeBackupData(
     val commissionRateHistory: List<CommissionRateEntry> = emptyList(),
     val preferences: BackupAppPreferences = BackupAppPreferences(),
     val metadata: BackupMetadata = BackupMetadata(),
+    val unpaidBossReceivables: List<BossReceivableEntry> = emptyList(),
 )
 
 class DriveUnauthorizedException(
@@ -221,6 +224,7 @@ object DriveBackupManager {
         val settings = dao.getSettingsOnce()
         val customers = dao.getAllCustomersOnce(userId)
         val rateHistory = CommissionRateHistory.loadHistory(context, userId)
+        val bossReceivables = BossReceivablesPrefs.loadEntries(context, userId)
 
         val quota = DailyQuotaPrefs.loadQuotaTarget(context, userId)
         val sundayMakeup = SundayMakeupPrefs.isEnabled(context, userId)
@@ -266,6 +270,7 @@ object DriveBackupManager {
             commissionRateHistory = rateHistory,
             preferences = appPreferences,
             metadata = backupMetadata,
+            unpaidBossReceivables = bossReceivables,
         )
 
         return serializeBackupPayload(backupData) to backupMetadata
@@ -515,6 +520,13 @@ object DriveBackupManager {
 
             if (backupData.commissionRateHistory.isNotEmpty()) {
                 CommissionRateHistory.saveHistory(context, userId, backupData.commissionRateHistory)
+            }
+            if (backupData.unpaidBossReceivables.isNotEmpty()) {
+                val mergedReceivables = BossReceivablesPrefs.mergeRestoredEntries(
+                    existing = BossReceivablesPrefs.loadEntries(context, userId),
+                    restored = backupData.unpaidBossReceivables,
+                )
+                BossReceivablesPrefs.saveEntries(context, userId, mergedReceivables)
             }
 
             // Restore App Preferences
@@ -914,6 +926,7 @@ object DriveBackupManager {
             put("customers", custArr)
 
             put("commissionRateHistory", CommissionRateHistory.serialize(data.commissionRateHistory))
+            put("unpaidBossReceivables", BossReceivablesPrefs.serializeToJsonArray(data.unpaidBossReceivables))
 
             // App Preferences
             put("preferences", JSONObject().apply {
@@ -1118,6 +1131,10 @@ object DriveBackupManager {
             )
         }
 
+        val unpaidBossReceivables = BossReceivablesPrefs.deserializeFromJsonArray(
+            root.optJSONArray("unpaidBossReceivables")
+        )
+
         return MinigeBackupData(
             version = version,
             backupTimestamp = timestamp,
@@ -1131,6 +1148,7 @@ object DriveBackupManager {
             commissionRateHistory = commissionRateHistory,
             preferences = preferences,
             metadata = metadata,
+            unpaidBossReceivables = unpaidBossReceivables,
         )
     }
 

@@ -38,11 +38,16 @@ object PartialPaymentHelper {
         paidGallons: Int,
         commissionEarned: Int,
         channel: PaidChannel,
+        turnedOverToRefilling: Boolean = false,
     ): String {
-        val base = PaymentBreakdownHelper.stripChannelTags(stripPartialGallonTag(notes))
+        val hasTurnedOver = turnedOverToRefilling || PaymentBreakdownHelper.isTurnedOverToRefilling(notes)
+        val base = PaymentBreakdownHelper.stripTurnedOverToRefillingTag(
+            PaymentBreakdownHelper.stripChannelTags(stripPartialGallonTag(notes))
+        )
         val gallonTag = "[Gallons:${paidGallons.coerceAtLeast(1)} Comm:${commissionEarned.coerceAtLeast(0)}]"
         val withGallons = if (base.isEmpty()) gallonTag else "$gallonTag $base"
-        return PaymentBreakdownHelper.applyChannelTag(withGallons, channel).take(300)
+        val withChannel = PaymentBreakdownHelper.applyChannelTag(withGallons, channel)
+        return PaymentBreakdownHelper.applyTurnedOverToRefillingTag(withChannel, hasTurnedOver)
     }
 
     fun getStatus(

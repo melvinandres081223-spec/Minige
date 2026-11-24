@@ -213,6 +213,14 @@ fun RemittanceSummaryCard(
                             color = MaterialTheme.colorScheme.primary,
                         )
                     }
+                    if (breakdown.pautangTurnedOverToRefilling > 0) {
+                        Text(
+                            text = "Pautang Turned Over to Refilling: ₱${breakdown.pautangTurnedOverToRefilling}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.tertiary,
+                            modifier = Modifier.testTag("pautang_turned_over_refilling_line"),
+                        )
+                    }
                 }
             }
 

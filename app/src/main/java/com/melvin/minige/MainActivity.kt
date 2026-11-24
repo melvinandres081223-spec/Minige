@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
@@ -25,10 +26,14 @@ import androidx.compose.material.icons.automirrored.rounded.HelpOutline
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.CreditScore
 import androidx.compose.material.icons.rounded.DateRange
+import androidx.compose.material.icons.rounded.LocalShipping
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Today
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -66,13 +71,16 @@ import com.melvin.minige.auth.GoogleAuthManager
 import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.ExpenseCategory
 import com.melvin.minige.domain.InactiveSukiAlert
+import com.melvin.minige.domain.PaymentType
 import com.melvin.minige.sync.CalendarSyncManager
 import com.melvin.minige.ui.MinigeEvent
 import com.melvin.minige.ui.MinigeViewModel
+import com.melvin.minige.ui.components.ConfirmPickupDeliveredDialog
 import com.melvin.minige.ui.components.GuideScreenTab
 import com.melvin.minige.ui.components.MinigeTooltipWrapper
 import com.melvin.minige.ui.components.ScreenGuideSheet
 import com.melvin.minige.ui.components.SyncStatusPill
+import com.melvin.minige.ui.components.TodayPickupChecklistSheet
 import com.melvin.minige.ui.components.UndoActionBanner
 import com.melvin.minige.ui.screens.AddDeliverySheet
 import com.melvin.minige.ui.screens.AddExpenseSheet
@@ -154,7 +162,10 @@ fun MinigeMainShell(
     var selectedTab by rememberSaveable { mutableStateOf(MinigeTab.TODAY) }
     var editingDelivery by remember { mutableStateOf<DeliveryRecord?>(null) }
     var reorderPrefill by remember { mutableStateOf<InactiveSukiAlert?>(null) }
+    var initialPaymentTypeForSheet by remember { mutableStateOf<PaymentType?>(null) }
     var showAddDeliverySheet by remember { mutableStateOf(false) }
+    var showPickupChecklistSheet by remember { mutableStateOf(false) }
+    var confirmingPickupDelivery by remember { mutableStateOf<DeliveryRecord?>(null) }
     var showAddExpenseSheet by remember { mutableStateOf(false) }
     var initialExpenseCategory by remember { mutableStateOf(ExpenseCategory.FOOD) }
     var showEditSukliDialog by remember { mutableStateOf(false) }
@@ -285,16 +296,66 @@ fun MinigeMainShell(
         },
         floatingActionButton = {
             if (selectedTab == MinigeTab.TODAY) {
-                MinigeTooltipWrapper(label = "Log delivery or pick-up") {
-                    FloatingActionButton(
-                        onClick = {
-                            editingDelivery = null
-                            reorderPrefill = null
-                            showAddDeliverySheet = true
-                        },
-                        modifier = Modifier.testTag("fab_add_entry"),
-                    ) {
-                        Icon(Icons.Rounded.Add, contentDescription = "Log delivery or pick-up")
+                Column(
+                    horizontalAlignment = Alignment.End,
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    MinigeTooltipWrapper(label = "Log Pick-Up (For Delivery)") {
+                        ExtendedFloatingActionButton(
+                            onClick = {
+                                editingDelivery = null
+                                reorderPrefill = null
+                                initialPaymentTypeForSheet = PaymentType.PICK_UP
+                                showAddDeliverySheet = true
+                            },
+                            icon = {
+                                Icon(
+                                    imageVector = Icons.Rounded.LocalShipping,
+                                    contentDescription = "Log pick-up",
+                                )
+                            },
+                            text = {
+                                Text(
+                                    text = "Pick Up",
+                                    maxLines = 1,
+                                    softWrap = false,
+                                )
+                            },
+                            containerColor = MaterialTheme.colorScheme.tertiary,
+                            contentColor = MaterialTheme.colorScheme.onTertiary,
+                            modifier = Modifier
+                                .defaultMinSize(minHeight = 48.dp)
+                                .testTag("fab_pick_up"),
+                        )
+                    }
+
+                    MinigeTooltipWrapper(label = "Check off Pick-Up or add direct delivery") {
+                        BadgedBox(
+                            badge = {
+                                val pendingPickups = uiState.pickupsForDay.size
+                                if (pendingPickups > 0) {
+                                    Badge(
+                                        containerColor = MaterialTheme.colorScheme.tertiary,
+                                        contentColor = MaterialTheme.colorScheme.onTertiary,
+                                        modifier = Modifier.testTag("fab_pickup_badge"),
+                                    ) {
+                                        Text(pendingPickups.toString())
+                                    }
+                                }
+                            },
+                        ) {
+                            FloatingActionButton(
+                                onClick = { showPickupChecklistSheet = true },
+                                containerColor = MaterialTheme.colorScheme.primary,
+                                contentColor = MaterialTheme.colorScheme.onPrimary,
+                                modifier = Modifier.testTag("fab_add_entry"),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Add,
+                                    contentDescription = "Open pick-up checklist or log direct delivery",
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -314,6 +375,7 @@ fun MinigeMainShell(
                     onEditSukliClick = { showEditSukliDialog = true },
                     onEditDelivery = { delivery ->
                         reorderPrefill = null
+                        initialPaymentTypeForSheet = null
                         editingDelivery = delivery
                         showAddDeliverySheet = true
                     },
@@ -334,8 +396,12 @@ fun MinigeMainShell(
                     onUpdateQuotaTarget = viewModel::updateDailyQuotaTarget,
                     onReorderInactiveSuki = { alert ->
                         editingDelivery = null
+                        initialPaymentTypeForSheet = null
                         reorderPrefill = alert
                         showAddDeliverySheet = true
+                    },
+                    onMarkPickupDelivered = { pickup ->
+                        confirmingPickupDelivery = pickup
                     },
                 )
                 MinigeTab.PAUTANG -> PautangScreen(
@@ -356,6 +422,9 @@ fun MinigeMainShell(
                     onSyncSundayMakeupClick = { sundayDate ->
                         viewModel.triggerCalendarSync(context, targetDate = sundayDate)
                     },
+                    onAddBossReceivable = viewModel::addBossReceivable,
+                    onMarkBossReceivablePaid = viewModel::markBossReceivablePaid,
+                    onDeleteBossReceivable = viewModel::deleteBossReceivable,
                 )
                 MinigeTab.SETTINGS -> SettingsScreen(
                     uiState = uiState,
@@ -399,6 +468,48 @@ fun MinigeMainShell(
         }
     }
 
+    if (showPickupChecklistSheet) {
+        TodayPickupChecklistSheet(
+            pickups = uiState.pickupsForDay,
+            onCheckOffPickup = { pickup ->
+                showPickupChecklistSheet = false
+                confirmingPickupDelivery = pickup
+            },
+            onNewDirectDelivery = {
+                showPickupChecklistSheet = false
+                editingDelivery = null
+                reorderPrefill = null
+                initialPaymentTypeForSheet = PaymentType.CASH
+                showAddDeliverySheet = true
+            },
+            onDismiss = { showPickupChecklistSheet = false },
+        )
+    }
+
+    val pickupToConfirm = confirmingPickupDelivery
+    if (pickupToConfirm != null) {
+        ConfirmPickupDeliveredDialog(
+            delivery = pickupToConfirm,
+            settings = uiState.settings,
+            customers = uiState.customers,
+            activeCommissionRate = uiState.activeCommissionRate,
+            onDismiss = { confirmingPickupDelivery = null },
+            onConfirm = { paymentType, notes, customUnitPrice, hasCommission ->
+                viewModel.updateDelivery(
+                    deliveryId = pickupToConfirm.id,
+                    customerName = pickupToConfirm.customerName,
+                    purifiedGallons = pickupToConfirm.purifiedGallons,
+                    alkalineGallons = pickupToConfirm.alkalineGallons,
+                    paymentType = paymentType,
+                    notes = notes,
+                    customUnitPrice = customUnitPrice,
+                    hasCommission = hasCommission,
+                )
+                confirmingPickupDelivery = null
+            },
+        )
+    }
+
     if (showAddDeliverySheet) {
         AddDeliverySheet(
             settings = uiState.settings,
@@ -408,10 +519,12 @@ fun MinigeMainShell(
             activeCommissionRate = uiState.activeCommissionRate,
             initialDelivery = editingDelivery,
             reorderPrefill = reorderPrefill,
+            initialPaymentType = initialPaymentTypeForSheet,
             onDismiss = {
                 showAddDeliverySheet = false
                 editingDelivery = null
                 reorderPrefill = null
+                initialPaymentTypeForSheet = null
             },
             onSave = { customerName, purifiedGallons, alkalineGallons, paymentType, notes, customUnitPrice, hasCommission ->
                 val editing = editingDelivery

@@ -28,6 +28,7 @@ import com.melvin.minige.domain.ExpenseCategory
 import com.melvin.minige.domain.ExpenseRecord
 import com.melvin.minige.domain.InactiveSeverity
 import com.melvin.minige.domain.InactiveSukiAlertHelper
+import com.melvin.minige.domain.MinigeCalculator
 import com.melvin.minige.domain.PaymentType
 import com.melvin.minige.domain.UtangMethod
 import com.melvin.minige.domain.UtangPaymentRecord
@@ -42,10 +43,15 @@ import com.melvin.minige.sync.DriveConsentRequiredException
 import com.melvin.minige.sync.DriveTokenProvider
 import com.melvin.minige.sync.GitHubAppUpdater
 import com.melvin.minige.sync.MinigeBackupData
+import com.melvin.minige.ui.components.PickupChecklistHelper
 import com.melvin.minige.util.AppDiagnosticsRunner
+import com.melvin.minige.util.BossReceivablesPrefs
 import com.melvin.minige.util.CommissionRateEntry
 import com.melvin.minige.util.DiagnosticEnvironmentSnapshot
 import com.melvin.minige.util.DiagnosticStatus
+import com.melvin.minige.util.PaidChannel
+import com.melvin.minige.util.PartialPaymentHelper
+import com.melvin.minige.util.PaymentBreakdownHelper
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
@@ -1667,6 +1673,512 @@ class ExampleRobolectricTest {
             GoogleAuthManager.clearDriveAuthRecord(context)
             DriveBackupManager.clearLastSuccessfulDriveAuthEpochMs(context, userId)
             MinigeFirestoreDataSource.clearLastSyncError(context, userId)
+        }
+    }
+
+    @Test
+    fun `pautang turned over to refilling credits commission without changing net cash to remit and passes diagnostics`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        if (FirebaseApp.getApps(context).isEmpty()) {
+            FirebaseApp.initializeApp(
+                context,
+                FirebaseOptions.Builder()
+                    .setProjectId("minige-f6338")
+                    .setApplicationId("1:466130893778:android:c5d0d190ec29d4fb2be60b")
+                    .setApiKey("AIzaSyFakeKeyForRobolectricTest")
+                    .build()
+            )
+        }
+        val db = Room.inMemoryDatabaseBuilder(context, MinigeDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        try {
+            val dao = db.minigeDao()
+            val remote = MinigeFirestoreDataSource(FirebaseFirestore.getInstance())
+            val repo = MinigeRepository(
+                dao = dao,
+                remote = remote,
+                pricingRepository = PricingRepository(dao, remote),
+            )
+            val userId = "rider_turned_over"
+            dao.upsertSettings(
+                AppSettingsEntity(
+                    id = "default",
+                    userId = userId,
+                    purifiedPrice = 30,
+                    alkalinePrice = 40,
+                    commissionRate = 8,
+                    defaultSukli = 0,
+                    pendingSync = false,
+                    updatedAtEpochMs = 1L,
+                )
+            )
+
+            // Prior-day Pautang A: 5 gals = ₱150 (will be settled & turned over directly to refilling)
+            repo.addDelivery(
+                userId = userId,
+                dateKey = "2026-11-23",
+                customerName = "Suki Turned Over",
+                purifiedGallons = 5,
+                alkalineGallons = 0,
+                paymentType = PaymentType.PAUTANG,
+                notes = "",
+            )
+            // Prior-day Pautang B: 4 gals = ₱120 (partial 2 gals = ₱60 turned over, plus normal Pautang C 2 gals = ₱60 held by rider)
+            repo.addDelivery(
+                userId = userId,
+                dateKey = "2026-11-23",
+                customerName = "Suki Partial Refilling",
+                purifiedGallons = 4,
+                alkalineGallons = 0,
+                paymentType = PaymentType.PAUTANG,
+                notes = "",
+            )
+            repo.addDelivery(
+                userId = userId,
+                dateKey = "2026-11-23",
+                customerName = "Suki Cash Held",
+                purifiedGallons = 2,
+                alkalineGallons = 0,
+                paymentType = PaymentType.PAUTANG,
+                notes = "",
+            )
+
+            val allOpen = dao.getAllDeliveriesOnce(userId).map { it.toDomain() }
+            val utangA = allOpen.first { it.customerName == "Suki Turned Over" }
+            val utangB = allOpen.first { it.customerName == "Suki Partial Refilling" }
+            val utangC = allOpen.first { it.customerName == "Suki Cash Held" }
+
+            val settleDateKey = "2026-11-24"
+            // Today's cash sale: 3 gals = ₱90 (₱24 commission)
+            repo.addDelivery(
+                userId = userId,
+                dateKey = settleDateKey,
+                customerName = "Cash Customer",
+                purifiedGallons = 3,
+                alkalineGallons = 0,
+                paymentType = PaymentType.CASH,
+                notes = "",
+            )
+            // Route expense: ₱20
+            repo.addExpense(
+                userId = userId,
+                dateKey = settleDateKey,
+                category = ExpenseCategory.GAS,
+                amount = 20,
+                notes = "Gas",
+            )
+
+            // 1) Settle utangA with [Turned Over to Refilling]
+            val taggedFullNotes = PaymentBreakdownHelper.applyTurnedOverToRefillingTag(
+                notes = "Gave directly to boss",
+                turnedOver = true,
+            )
+            repo.recordUtangPayment(
+                userId = userId,
+                deliveryId = utangA.id,
+                amount = 150,
+                method = UtangMethod.CASH,
+                paymentDateKey = settleDateKey,
+                notes = taggedFullNotes,
+            )
+
+            // 2) Partial pay 2 gals (₱60) on utangB with [Turned Over to Refilling]
+            val taggedPartialNotes = PaymentBreakdownHelper.applyTurnedOverToRefillingTag(
+                notes = "Partial refilling",
+                turnedOver = true,
+            )
+            repo.recordPartialGallonPayment(
+                userId = userId,
+                deliveryId = utangB.id,
+                paidGallons = 2,
+                amount = 60,
+                channel = PaidChannel.CASH,
+                paymentDateKey = settleDateKey,
+                notes = taggedPartialNotes,
+            )
+
+            // 3) Normal collect on utangC (₱60 held by rider -> DOES enter Net Cash to Remit)
+            repo.recordUtangPayment(
+                userId = userId,
+                deliveryId = utangC.id,
+                amount = 60,
+                method = UtangMethod.CASH,
+                paymentDateKey = settleDateKey,
+                notes = "",
+            )
+
+            val deliveries = dao.getAllDeliveriesOnce(userId).map { it.toDomain() }
+            val payments = dao.getAllUtangPaymentsOnce(userId).map { it.toDomain() }
+            val expenses = dao.getAllExpensesOnce(userId).map { it.toDomain() }
+
+            val summary = MinigeCalculator.calculateDailySummary(
+                dateKey = settleDateKey,
+                deliveries = deliveries,
+                utangPayments = payments,
+                expenses = expenses,
+                startingSukli = 0,
+            )
+            val breakdown = PaymentBreakdownHelper.calculateBreakdown(
+                dateKey = settleDateKey,
+                deliveries = deliveries,
+                utangPayments = payments,
+                expenses = expenses,
+            )
+
+            // Commission: 3 cash + 5 turned-over utangA + 2 partial turned-over utangB + 2 cash-held utangC = 12 gals * ₱8 = ₱96
+            assertEquals(12, summary.totalPaidGallons)
+            assertEquals(96, summary.dailyCommission)
+            assertEquals(96, breakdown.totalPaidCommission)
+
+            // Cash Collected & Net Cash to Remit exclude ₱150 + ₱60 = ₱210 turned over to refilling!
+            // Cash Collected = ₱90 (direct cash) + ₱60 (utangC held by rider) = ₱150
+            assertEquals(210, summary.pautangTurnedOverToRefilling)
+            assertEquals(210, breakdown.pautangTurnedOverToRefilling)
+            assertEquals(150, summary.cashCollected)
+            assertEquals(150, breakdown.cashCollected)
+            // Net Cash to Remit = ₱150 - ₱20 expense = ₱130
+            assertEquals(130, summary.netCashRemit)
+            assertEquals(130, breakdown.cashToRemit)
+
+            // Verify AppDiagnosticsRunner passes math integrity checks with turned-over payments
+            val diagEnv = DiagnosticEnvironmentSnapshot(
+                isFirebaseSignedIn = true,
+                accountLabelMasked = "me***@gmail.com",
+                pendingSyncCount = 0,
+                hasDrivePermission = true,
+                hasDriveCachedToken = true,
+                driveBackupStatus = DriveBackupStatus.ACTIVE,
+                lastDriveBackupTimestamp = 1_750_000_000_000L,
+                backupMetadataSummary = null,
+                hasMicPermission = true,
+                hasCalendarPermission = true,
+                canRequestPackageInstalls = true,
+                versionName = "1.0.99",
+                versionCode = 99,
+            )
+            val report = AppDiagnosticsRunner.evaluate(
+                env = diagEnv,
+                selectedDateKey = settleDateKey,
+                deliveries = deliveries,
+                utangPayments = payments,
+                expenses = expenses,
+                dailyLedgers = emptyList(),
+                customers = emptyList(),
+                defaultSukli = 0,
+            )
+            val mathCheck = report.items.first { it.id == "ledger_math_integrity" }
+            assertEquals(DiagnosticStatus.PASS, mathCheck.status)
+            assertTrue(mathCheck.detail.contains("Non-Turned-Over Pautang Payments"))
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun `boss receivables tracker isolates from net cash to remit and round-trips safely with legacy Drive JSON compatibility`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, MinigeDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        val userId = "rider_boss_receivables"
+        try {
+            val dao = db.minigeDao()
+            // 1) Gallons * Rate helper calculation
+            val computed = BossReceivablesPrefs.calculateGallonsAmount(gallons = 50, ratePerGallon = 8.0)
+            assertEquals(400, computed)
+
+            // 2) Add, total, mark Nakuha Na, and delete entries
+            var list = emptyList<com.melvin.minige.util.BossReceivableEntry>()
+            list = BossReceivablesPrefs.addEntry(
+                entries = list,
+                periodLabel = "Nov 16–21, 2026",
+                amount = computed,
+                gallons = 50,
+                ratePerGallon = 8.0,
+                note = "Unpaid commission bago mag-app",
+                id = "br_1",
+                nowEpochMs = 1000L,
+            )
+            list = BossReceivablesPrefs.addEntry(
+                entries = list,
+                periodLabel = "Nov 22, 2026",
+                amount = 250,
+                gallons = null,
+                ratePerGallon = null,
+                note = "Sobra sa hakot",
+                id = "br_2",
+                nowEpochMs = 2000L,
+            )
+            list = BossReceivablesPrefs.addEntry(
+                entries = list,
+                periodLabel = "Mistaken entry",
+                amount = 999,
+                id = "br_3",
+                nowEpochMs = 3000L,
+            )
+
+            assertEquals(1649, BossReceivablesPrefs.totalUnpaidBalance(list))
+
+            list = BossReceivablesPrefs.deleteEntry(list, "br_3")
+            assertEquals(650, BossReceivablesPrefs.totalUnpaidBalance(list))
+
+            list = BossReceivablesPrefs.markPaid(list, "br_1", paidDateKey = "2026-11-25", nowEpochMs = 4000L)
+            assertEquals(250, BossReceivablesPrefs.totalUnpaidBalance(list))
+            assertEquals(400, BossReceivablesPrefs.totalPaidHistory(list))
+            assertTrue(list.first { it.id == "br_1" }.isPaid)
+            assertEquals("2026-11-25", list.first { it.id == "br_1" }.paidDateKey)
+
+            // Daily Net Cash to Remit stays strictly unaffected by boss receivables
+            val dailySummary = MinigeCalculator.calculateDailySummary(
+                dateKey = "2026-11-25",
+                deliveries = emptyList(),
+                utangPayments = emptyList(),
+                expenses = emptyList(),
+                startingSukli = 0,
+            )
+            assertEquals(0, dailySummary.cashCollected)
+            assertEquals(0, dailySummary.netCashRemit)
+
+            // 3) Save to SharedPreferences and verify DriveBackupManager JSON round-trip
+            BossReceivablesPrefs.saveEntries(context, userId, list)
+            val (payloadJson, _) = DriveBackupManager.buildBackupPayload(dao, userId, context, timestamp = 5000L)
+            val parsed = DriveBackupManager.deserializeBackupPayload(payloadJson)
+            assertEquals(2, parsed.unpaidBossReceivables.size)
+            assertEquals(250, BossReceivablesPrefs.totalUnpaidBalance(parsed.unpaidBossReceivables))
+            val restoredPaid = parsed.unpaidBossReceivables.first { it.id == "br_1" }
+            assertTrue(restoredPaid.isPaid)
+            assertEquals(50, restoredPaid.gallons)
+            assertEquals("2026-11-25", restoredPaid.paidDateKey)
+
+            // 4) Legacy backup JSON without "unpaidBossReceivables" key must safely default to emptyList()
+            val legacyJson = """
+                {
+                  "version": 2,
+                  "app": "Minige",
+                  "backupTimestamp": 1700000000000,
+                  "userId": "$userId",
+                  "deliveries": [],
+                  "utangPayments": [],
+                  "expenses": [],
+                  "dailyLedgers": [],
+                  "customers": []
+                }
+            """.trimIndent()
+            val legacyParsed = DriveBackupManager.deserializeBackupPayload(legacyJson)
+            assertTrue(legacyParsed.unpaidBossReceivables.isEmpty())
+        } finally {
+            BossReceivablesPrefs.saveEntries(context, userId, emptyList())
+            db.close()
+        }
+    }
+
+    @Test
+    fun `pickup checklist converts pickup entries in place across payment types without duplicates`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        if (FirebaseApp.getApps(context).isEmpty()) {
+            FirebaseApp.initializeApp(
+                context,
+                FirebaseOptions.Builder()
+                    .setProjectId("minige-f6338")
+                    .setApplicationId("1:466130893778:android:c5d0d190ec29d4fb2be60b")
+                    .setApiKey("AIzaSyFakeKeyForRobolectricTest")
+                    .build()
+            )
+        }
+        val db = Room.inMemoryDatabaseBuilder(context, MinigeDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        try {
+            val dao = db.minigeDao()
+            val remote = MinigeFirestoreDataSource(FirebaseFirestore.getInstance())
+            val repo = MinigeRepository(
+                dao = dao,
+                remote = remote,
+                pricingRepository = PricingRepository(dao, remote),
+            )
+            val userId = "rider_pickup_checklist"
+            val date = LocalDate.of(2026, 11, 25)
+            val dateKey = "2026-11-25"
+            dao.upsertSettings(
+                AppSettingsEntity(
+                    id = "default",
+                    userId = userId,
+                    purifiedPrice = 30,
+                    alkalinePrice = 40,
+                    commissionRate = 8,
+                    defaultSukli = 0,
+                    pendingSync = false,
+                    updatedAtEpochMs = 1L,
+                )
+            )
+
+            // Log 5 station Pick-Up entries waiting to be delivered
+            repo.addDelivery(userId, dateKey, "Cash Suki", 4, 0, PaymentType.PICK_UP, "[Outlet] [Area: Market]")
+            repo.addDelivery(userId, dateKey, "Bank Suki", 3, 0, PaymentType.PICK_UP, "[Residential]")
+            repo.addDelivery(userId, dateKey, "Walkin Comm On", 2, 0, PaymentType.PICK_UP, "[Outlet]")
+            repo.addDelivery(userId, dateKey, "Walkin Comm Off", 2, 0, PaymentType.PICK_UP, "[Residential]")
+            repo.addDelivery(userId, dateKey, "Pautang Suki", 5, 0, PaymentType.PICK_UP, "[Outlet] [Area: Poblacion]")
+
+            val initialAll = dao.getAllDeliveriesOnce(userId).map { it.toDomain() }
+            assertEquals(5, initialAll.size)
+            assertTrue(initialAll.all { it.paymentType == PaymentType.PICK_UP })
+
+            // Before checking off: ₱0 commission, ₱0 cash collected, 0 Boss Daily Hakot Delivered/Pautang
+            val initialSummary = MinigeCalculator.calculateDailySummary(
+                dateKey = dateKey,
+                deliveries = initialAll,
+                utangPayments = emptyList(),
+                expenses = emptyList(),
+                startingSukli = 0,
+            )
+            assertEquals(0, initialSummary.totalPaidGallons)
+            assertEquals(0, initialSummary.dailyCommission)
+            assertEquals(0, initialSummary.cashCollected)
+            assertEquals(0, initialSummary.netCashRemit)
+
+            val initialHakot = BossPickupFormatter.buildReport(date = date, deliveries = initialAll)
+            assertEquals(0, initialHakot.paidGallons)
+            assertEquals(0, initialHakot.unpaidPautangGallons)
+            assertEquals(0, initialHakot.grandTotalGallons)
+
+            // Check off & convert each Pick-Up in-place via updateDelivery (no duplicate rows)
+            val byName = initialAll.associateBy { it.customerName }
+
+            val cashPickup = byName.getValue("Cash Suki")
+            repo.updateDelivery(
+                userId = userId,
+                deliveryId = cashPickup.id,
+                customerName = cashPickup.customerName,
+                purifiedGallons = cashPickup.purifiedGallons,
+                alkalineGallons = cashPickup.alkalineGallons,
+                paymentType = PaymentType.CASH,
+                notes = PickupChecklistHelper.buildConvertedDeliveryNotes(cashPickup.notes, PaymentType.CASH, true),
+                customUnitPrice = 30.0,
+                hasCommission = true,
+            )
+
+            val bankPickup = byName.getValue("Bank Suki")
+            repo.updateDelivery(
+                userId = userId,
+                deliveryId = bankPickup.id,
+                customerName = bankPickup.customerName,
+                purifiedGallons = bankPickup.purifiedGallons,
+                alkalineGallons = bankPickup.alkalineGallons,
+                paymentType = PaymentType.BANK_DEPOSIT,
+                notes = PickupChecklistHelper.buildConvertedDeliveryNotes(bankPickup.notes, PaymentType.BANK_DEPOSIT, true),
+                customUnitPrice = 30.0,
+                hasCommission = true,
+            )
+
+            val walkInOnPickup = byName.getValue("Walkin Comm On")
+            repo.updateDelivery(
+                userId = userId,
+                deliveryId = walkInOnPickup.id,
+                customerName = walkInOnPickup.customerName,
+                purifiedGallons = walkInOnPickup.purifiedGallons,
+                alkalineGallons = walkInOnPickup.alkalineGallons,
+                paymentType = PaymentType.PAID_WALK_IN,
+                notes = PickupChecklistHelper.buildConvertedDeliveryNotes(walkInOnPickup.notes, PaymentType.PAID_WALK_IN, true),
+                customUnitPrice = null,
+                hasCommission = true,
+            )
+
+            val walkInOffPickup = byName.getValue("Walkin Comm Off")
+            repo.updateDelivery(
+                userId = userId,
+                deliveryId = walkInOffPickup.id,
+                customerName = walkInOffPickup.customerName,
+                purifiedGallons = walkInOffPickup.purifiedGallons,
+                alkalineGallons = walkInOffPickup.alkalineGallons,
+                paymentType = PaymentType.PAID_WALK_IN,
+                notes = PickupChecklistHelper.buildConvertedDeliveryNotes(walkInOffPickup.notes, PaymentType.PAID_WALK_IN, false),
+                customUnitPrice = null,
+                hasCommission = false,
+            )
+
+            val pautangPickup = byName.getValue("Pautang Suki")
+            repo.updateDelivery(
+                userId = userId,
+                deliveryId = pautangPickup.id,
+                customerName = pautangPickup.customerName,
+                purifiedGallons = pautangPickup.purifiedGallons,
+                alkalineGallons = pautangPickup.alkalineGallons,
+                paymentType = PaymentType.PAUTANG,
+                notes = PickupChecklistHelper.buildConvertedDeliveryNotes(pautangPickup.notes, PaymentType.PAUTANG, true),
+                customUnitPrice = 25.0,
+                hasCommission = true,
+            )
+
+            val convertedAll = dao.getAllDeliveriesOnce(userId).map { it.toDomain() }
+            // Strictly 5 rows (no duplicates), all preserving dateKey and zero remaining PICK_UP
+            assertEquals(5, convertedAll.size)
+            assertTrue(convertedAll.all { it.dateKey == dateKey })
+            assertTrue(convertedAll.none { it.paymentType == PaymentType.PICK_UP })
+            assertTrue(convertedAll.first { it.id == cashPickup.id }.notes.contains("[Outlet]"))
+            assertTrue(convertedAll.first { it.id == cashPickup.id }.notes.contains("[Area: Market]"))
+            assertTrue(convertedAll.first { it.id == bankPickup.id }.notes.contains("[Bank / Online]"))
+            assertTrue(convertedAll.first { it.id == walkInOffPickup.id }.notes.contains("[No Commission]"))
+
+            val finalSummary = MinigeCalculator.calculateDailySummary(
+                dateKey = dateKey,
+                deliveries = convertedAll,
+                utangPayments = emptyList(),
+                expenses = emptyList(),
+                startingSukli = 0,
+            )
+            // All 4 delivered non-Pautang orders count in totalPaidGallons: 4 (Cash) + 3 (Bank) + 2 (Walk-in ON) + 2 (Walk-in OFF) = 11 gals
+            // Commission-eligible gallons: 4 + 3 + 2 = 9 gals * ₱8 = ₱72 (Walk-in OFF earns ₱0)
+            assertEquals(11, finalSummary.totalPaidGallons)
+            assertEquals(72, finalSummary.dailyCommission)
+            // Cash Collected / Net Cash to Remit = 4 * 30 = ₱120 (Bank, Paid Walk-in, and Pautang excluded)
+            assertEquals(120, finalSummary.cashCollected)
+            assertEquals(120, finalSummary.netCashRemit)
+            assertEquals(90, finalSummary.bankDepositTotal)
+
+            val finalBreakdown = PaymentBreakdownHelper.calculateBreakdown(
+                dateKey = dateKey,
+                deliveries = convertedAll,
+                utangPayments = emptyList(),
+                expenses = emptyList(),
+            )
+            assertEquals(4, finalBreakdown.paidWalkInGallons)
+            assertEquals(16, finalBreakdown.commissionFromPaidWalkIn)
+
+            // Boss Daily Hakot includes all 4 paid/delivered orders (4+3+2+2 = 11 gals) + 5 Pautang = 16 grand total
+            val finalHakot = BossPickupFormatter.buildReport(date = date, deliveries = convertedAll)
+            assertEquals(11, finalHakot.paidGallons)
+            assertEquals(5, finalHakot.unpaidPautangGallons)
+            assertEquals(16, finalHakot.grandTotalGallons)
+            assertFalse(finalHakot.message.contains("₱"))
+
+            val report = AppDiagnosticsRunner.evaluate(
+                env = DiagnosticEnvironmentSnapshot(
+                    isFirebaseSignedIn = true,
+                    accountLabelMasked = "me***@gmail.com",
+                    pendingSyncCount = 0,
+                    hasDrivePermission = true,
+                    hasDriveCachedToken = true,
+                    driveBackupStatus = DriveBackupStatus.ACTIVE,
+                    lastDriveBackupTimestamp = 1_750_000_000_000L,
+                    backupMetadataSummary = null,
+                    hasMicPermission = true,
+                    hasCalendarPermission = true,
+                    canRequestPackageInstalls = true,
+                    versionName = "1.0.99",
+                    versionCode = 99,
+                ),
+                selectedDateKey = dateKey,
+                deliveries = convertedAll,
+                utangPayments = emptyList(),
+                expenses = emptyList(),
+                dailyLedgers = emptyList(),
+                customers = emptyList(),
+                defaultSukli = 0,
+            )
+            assertEquals(DiagnosticStatus.PASS, report.overallStatus)
+        } finally {
+            db.close()
         }
     }
 }

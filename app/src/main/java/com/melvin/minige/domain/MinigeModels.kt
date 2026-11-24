@@ -116,7 +116,10 @@ data class UtangPaymentRecord(
     val notes: String,
     val pendingSync: Boolean,
     val createdAtEpochMs: Long,
-)
+) {
+    val isTurnedOverToRefilling: Boolean
+        get() = notes.contains("[Turned Over to Refilling]", ignoreCase = true)
+}
 
 @Immutable
 data class ExpenseRecord(
@@ -199,6 +202,7 @@ data class DailySummary(
     val cashOnHand: Int,
     val effectiveRateDisplay: Int?,
     val cashAdvanceTotal: Int = 0,
+    val pautangTurnedOverToRefilling: Int = 0,
 )
 
 @Immutable
@@ -300,12 +304,19 @@ object MinigeCalculator {
             .filter { it.paymentType == PaymentType.PAUTANG && !it.isUtangFullyPaid }
             .sumOf { it.totalGallons }
 
-        // Paid Walk-in NEVER adds to cashCollected or bankDepositTotal (paid directly at station/to boss)
+        // Paid Walk-in and Pautang payments turned over directly to refilling NEVER add to cashCollected or bankDepositTotal
+        val pautangTurnedOverToRefilling = utangPayments
+            .filter { it.dateKey == dateKey && it.isTurnedOverToRefilling }
+            .sumOf { it.amount }
         val directCash = deliveriesForDate
             .filter { it.paymentType == PaymentType.CASH }
             .sumOf { it.amountPaid }
         val utangCash = utangPayments
-            .filter { it.dateKey == dateKey && it.method == UtangMethod.CASH }
+            .filter {
+                it.dateKey == dateKey &&
+                    it.method == UtangMethod.CASH &&
+                    !it.isTurnedOverToRefilling
+            }
             .sumOf { it.amount }
         val cashCollected = directCash + utangCash
 
@@ -313,7 +324,11 @@ object MinigeCalculator {
             .filter { it.paymentType == PaymentType.BANK_DEPOSIT }
             .sumOf { it.amountPaid }
         val utangBank = utangPayments
-            .filter { it.dateKey == dateKey && it.method == UtangMethod.BANK_DEPOSIT }
+            .filter {
+                it.dateKey == dateKey &&
+                    it.method == UtangMethod.BANK_DEPOSIT &&
+                    !it.isTurnedOverToRefilling
+            }
             .sumOf { it.amount }
         val bankDepositTotal = directBank + utangBank
 
@@ -353,6 +368,7 @@ object MinigeCalculator {
             cashOnHand = cashOnHand,
             effectiveRateDisplay = effectiveRate,
             cashAdvanceTotal = cashAdvanceTotal,
+            pautangTurnedOverToRefilling = pautangTurnedOverToRefilling,
         )
     }
 
