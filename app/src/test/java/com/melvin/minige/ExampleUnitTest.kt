@@ -171,23 +171,31 @@ class ExampleUnitTest {
             ━━━━━━━━━━━━━━━━━━━━
             • Aling Nena — 10 gals
             • Kuya Jun — 1 gal
-            • Ate Rosa — 5 gals
-            • Mang Ben — 2 gals
             ━━━━━━━━━━━━━━━━━━━━
-            DELIVERED PAID TOTAL: 18 gals
+            DELIVERED PAID TOTAL: 11 gals
 
             📋 PAUTANG DELIVERED TODAY
             ━━━━━━━━━━━━━━━━━━━━
             • Unpaid Juan — 4 gals
             ━━━━━━━━━━━━━━━━━━━━
-            PAUTANG TOTAL: 4 gals
+            PAUTANG DELIVERED TOTAL: 4 gals
+
+            ✅ PAUTANG NA NAGBAYAD TODAY
+            ━━━━━━━━━━━━━━━━━━━━
+            • Ate Rosa — 5 gals (utang Nov 20)
+            • Mang Ben — 2 gals (utang Nov 21)
+            ━━━━━━━━━━━━━━━━━━━━
+            PAUTANG PAID TOTAL: 7 gals
+
+            ━━━━━━━━━━━━━━━━━━━━
             GRAND TOTAL: 22 gals
+            TOTAL MAY COMMISSION: 18 gals
         """.trimIndent()
 
         assertEquals(expected, formatted)
         assertFalse(formatted.contains("Nene Pickup"))
         assertFalse(formatted.contains("₱"))
-        assertFalse(formatted.contains("Commission", ignoreCase = true))
+        assertFalse(formatted.contains("144"))
         assertFalse(formatted.contains("Remit", ignoreCase = true))
         assertFalse(formatted.contains("Sukli", ignoreCase = true))
 
@@ -196,6 +204,7 @@ class ExampleUnitTest {
         assertTrue(emptySunday.contains("Nov 22, 2026 (Linggo)"))
         assertTrue(emptySunday.contains("(Wala pang paid delivery ngayon)"))
         assertTrue(emptySunday.contains("(Walang pautang delivered today)"))
+        assertTrue(emptySunday.contains("(Walang pautang na nagbayad today)"))
         assertEquals("Martes", BossPickupFormatter.tagalogDayName(java.time.DayOfWeek.TUESDAY))
         assertEquals("Miyerkules", BossPickupFormatter.tagalogDayName(java.time.DayOfWeek.WEDNESDAY))
         assertEquals("Huwebes", BossPickupFormatter.tagalogDayName(java.time.DayOfWeek.THURSDAY))
@@ -879,14 +888,16 @@ class ExampleUnitTest {
         assertTrue(walkInWithComm.hasPaidWalkInCommission)
         assertFalse(walkInNoComm.hasPaidWalkInCommission)
 
-        // Daily Hakot includes BOTH Paid Walk-in entries with zero peso symbols
+        // Daily Hakot includes BOTH Paid Walk-in entries with zero peso symbols and excludes no-comm walk-in from TOTAL MAY COMMISSION
         val hakot = BossPickupFormatter.buildReport(date, deliveries, emptyList())
         assertEquals(17, hakot.paidGallons)
+        assertEquals(14, hakot.mayCommissionGallons)
         assertTrue(hakot.message.contains("Walk-in Suki"))
         assertTrue(hakot.message.contains("Walk-in Zero"))
         assertTrue(hakot.message.contains("DELIVERED PAID TOTAL: 17 gals"))
+        assertTrue(hakot.message.contains("TOTAL MAY COMMISSION: 14 gals"))
         assertFalse(hakot.message.contains("₱"))
-        assertFalse(hakot.message.contains("Commission", ignoreCase = true))
+        assertFalse(hakot.message.contains("112"))
     }
 
     @Test

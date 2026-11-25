@@ -26,6 +26,8 @@ import com.melvin.minige.util.BossReceivableEntry
 import com.melvin.minige.util.BossReceivablesPrefs
 import com.melvin.minige.util.CommissionRateEntry
 import com.melvin.minige.util.CommissionRateHistory
+import com.melvin.minige.util.SmallGallonHelper
+import com.melvin.minige.util.SmallGallonPrefs
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -52,6 +54,8 @@ data class BackupAppPreferences(
     val defaultSukli: Int = 0,
     val dailyQuotaTarget: Int = 50,
     val sundayMakeupEnabled: Boolean = false,
+    val smallGallonPrice: Double = SmallGallonHelper.DEFAULT_PRICE,
+    val smallGallonCommissionRate: Double = SmallGallonHelper.DEFAULT_COMMISSION_RATE,
 )
 
 data class BackupMetadata(
@@ -94,6 +98,8 @@ data class DriveRestoreSummary(
     val backupTimestamp: Long,
     val restoredQuota: Int? = null,
     val restoredSundayMakeup: Boolean? = null,
+    val restoredSmallGallonPrice: Double? = null,
+    val restoredSmallGallonCommissionRate: Double? = null,
 )
 
 data class MinigeBackupData(
@@ -228,6 +234,8 @@ object DriveBackupManager {
 
         val quota = DailyQuotaPrefs.loadQuotaTarget(context, userId)
         val sundayMakeup = SundayMakeupPrefs.isEnabled(context, userId)
+        val smallPrice = SmallGallonPrefs.loadPrice(context, userId)
+        val smallCommRate = SmallGallonPrefs.loadCommissionRate(context, userId)
         val effectiveRate = settings?.commissionRate ?: 8
         val purified = settings?.purifiedPrice ?: 30
         val alkaline = settings?.alkalinePrice ?: 40
@@ -240,6 +248,8 @@ object DriveBackupManager {
             defaultSukli = sukli,
             dailyQuotaTarget = quota,
             sundayMakeupEnabled = sundayMakeup,
+            smallGallonPrice = smallPrice,
+            smallGallonCommissionRate = smallCommRate,
         )
 
         val totalPickups = deliveries.count { it.paymentType == "PICK_UP" }
@@ -533,6 +543,8 @@ object DriveBackupManager {
             backupData.preferences.let { p ->
                 DailyQuotaPrefs.saveQuotaTarget(context, userId, p.dailyQuotaTarget)
                 SundayMakeupPrefs.setEnabled(context, userId, p.sundayMakeupEnabled)
+                SmallGallonPrefs.savePrice(context, userId, p.smallGallonPrice)
+                SmallGallonPrefs.saveCommissionRate(context, userId, p.smallGallonCommissionRate)
             }
 
             val authNow = System.currentTimeMillis()
@@ -550,6 +562,8 @@ object DriveBackupManager {
                 backupTimestamp = backupData.backupTimestamp,
                 restoredQuota = backupData.preferences.dailyQuotaTarget,
                 restoredSundayMakeup = backupData.preferences.sundayMakeupEnabled,
+                restoredSmallGallonPrice = backupData.preferences.smallGallonPrice,
+                restoredSmallGallonCommissionRate = backupData.preferences.smallGallonCommissionRate,
             )
             Log.i(TAG, "Successfully restored Minige from Google Drive folder '$BACKUP_FOLDER_NAME': $summary")
             Result.success(summary)
@@ -936,6 +950,8 @@ object DriveBackupManager {
                 put("defaultSukli", data.preferences.defaultSukli)
                 put("dailyQuotaTarget", data.preferences.dailyQuotaTarget)
                 put("sundayMakeupEnabled", data.preferences.sundayMakeupEnabled)
+                put("smallGallonPrice", data.preferences.smallGallonPrice)
+                put("smallGallonCommissionRate", data.preferences.smallGallonCommissionRate)
             })
 
             // Metadata
@@ -1092,6 +1108,12 @@ object DriveBackupManager {
 
         val preferences = if (root.has("preferences")) {
             val pObj = root.getJSONObject("preferences")
+            val parsedSmallPrice = pObj.optDouble("smallGallonPrice", SmallGallonHelper.DEFAULT_PRICE)
+                .takeIf { !it.isNaN() && it >= 0.0 }
+                ?: SmallGallonHelper.DEFAULT_PRICE
+            val parsedSmallComm = pObj.optDouble("smallGallonCommissionRate", SmallGallonHelper.DEFAULT_COMMISSION_RATE)
+                .takeIf { !it.isNaN() && it >= 0.0 }
+                ?: SmallGallonHelper.DEFAULT_COMMISSION_RATE
             BackupAppPreferences(
                 purifiedPrice = pObj.optInt("purifiedPrice", settings?.purifiedPrice ?: 30),
                 alkalinePrice = pObj.optInt("alkalinePrice", settings?.alkalinePrice ?: 40),
@@ -1099,6 +1121,8 @@ object DriveBackupManager {
                 defaultSukli = pObj.optInt("defaultSukli", settings?.defaultSukli ?: 0),
                 dailyQuotaTarget = pObj.optInt("dailyQuotaTarget", 50),
                 sundayMakeupEnabled = pObj.optBoolean("sundayMakeupEnabled", false),
+                smallGallonPrice = parsedSmallPrice,
+                smallGallonCommissionRate = parsedSmallComm,
             )
         } else {
             BackupAppPreferences(

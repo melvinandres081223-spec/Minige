@@ -178,7 +178,8 @@ class MinigeFirestoreDataSource(
         val path = "users/$uid/deliveries"
         emitAll(
             db.collection("users").document(uid).collection("deliveries")
-                .snapshots()
+                .snapshots(MetadataChanges.INCLUDE)
+                .filter { snap -> !snap.metadata.hasPendingWrites() }
                 .map { snap ->
                     snap.toObjects(
                         FirestoreDelivery::class.java,
@@ -197,7 +198,8 @@ class MinigeFirestoreDataSource(
         val path = "users/$uid/utangPayments"
         emitAll(
             db.collection("users").document(uid).collection("utangPayments")
-                .snapshots()
+                .snapshots(MetadataChanges.INCLUDE)
+                .filter { snap -> !snap.metadata.hasPendingWrites() }
                 .map { snap ->
                     snap.toObjects(
                         FirestoreUtangPayment::class.java,
@@ -216,7 +218,8 @@ class MinigeFirestoreDataSource(
         val path = "users/$uid/expenses"
         emitAll(
             db.collection("users").document(uid).collection("expenses")
-                .snapshots()
+                .snapshots(MetadataChanges.INCLUDE)
+                .filter { snap -> !snap.metadata.hasPendingWrites() }
                 .map { snap ->
                     snap.toObjects(
                         FirestoreExpense::class.java,
@@ -235,7 +238,8 @@ class MinigeFirestoreDataSource(
         val path = "users/$uid/dailyLedgers"
         emitAll(
             db.collection("users").document(uid).collection("dailyLedgers")
-                .snapshots()
+                .snapshots(MetadataChanges.INCLUDE)
+                .filter { snap -> !snap.metadata.hasPendingWrites() }
                 .map { snap ->
                     snap.toObjects(
                         FirestoreDailyLedger::class.java,
@@ -254,7 +258,8 @@ class MinigeFirestoreDataSource(
         val path = "users/$uid/settings/config"
         emitAll(
             db.collection("users").document(uid).collection("settings").document("config")
-                .snapshots()
+                .snapshots(MetadataChanges.INCLUDE)
+                .filter { snap -> !snap.metadata.hasPendingWrites() }
                 .map { snap ->
                     if (!snap.exists()) null
                     else snap.toObject(
@@ -404,7 +409,8 @@ class MinigeFirestoreDataSource(
         val path = "users/$uid/customers"
         emitAll(
             db.collection("users").document(uid).collection("customers")
-                .snapshots()
+                .snapshots(MetadataChanges.INCLUDE)
+                .filter { snap -> !snap.metadata.hasPendingWrites() }
                 .map { snap ->
                     snap.toObjects(
                         FirestoreCustomer::class.java,
@@ -416,6 +422,84 @@ class MinigeFirestoreDataSource(
                     throw error
                 }
         )
+    }
+
+    suspend fun fetchDeliveriesOnce(userId: String): Result<List<DeliveryEntity>> {
+        val path = "users/$userId/deliveries"
+        return try {
+            val uid = requireUserId(userId)
+            ensureNetworkEnabled()
+            val snap = withTimeoutOrNull(DOC_GET_TIMEOUT_MS) {
+                db.collection("users").document(uid).collection("deliveries")
+                    .get(Source.DEFAULT)
+                    .await()
+            } ?: return Result.failure(FirestoreOfflineQueuedException(FirestoreSyncHelper.MSG_SAVED_OFFLINE))
+            if (snap.metadata.hasPendingWrites()) {
+                return Result.success(emptyList())
+            }
+            val list = snap.toObjects(
+                FirestoreDelivery::class.java,
+                DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
+            ).map { it.toEntity(pendingSync = false) }
+            Result.success(list)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.LIST, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun fetchUtangPaymentsOnce(userId: String): Result<List<UtangPaymentEntity>> {
+        val path = "users/$userId/utangPayments"
+        return try {
+            val uid = requireUserId(userId)
+            ensureNetworkEnabled()
+            val snap = withTimeoutOrNull(DOC_GET_TIMEOUT_MS) {
+                db.collection("users").document(uid).collection("utangPayments")
+                    .get(Source.DEFAULT)
+                    .await()
+            } ?: return Result.failure(FirestoreOfflineQueuedException(FirestoreSyncHelper.MSG_SAVED_OFFLINE))
+            if (snap.metadata.hasPendingWrites()) {
+                return Result.success(emptyList())
+            }
+            val list = snap.toObjects(
+                FirestoreUtangPayment::class.java,
+                DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
+            ).map { it.toEntity(pendingSync = false) }
+            Result.success(list)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.LIST, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun fetchExpensesOnce(userId: String): Result<List<ExpenseEntity>> {
+        val path = "users/$userId/expenses"
+        return try {
+            val uid = requireUserId(userId)
+            ensureNetworkEnabled()
+            val snap = withTimeoutOrNull(DOC_GET_TIMEOUT_MS) {
+                db.collection("users").document(uid).collection("expenses")
+                    .get(Source.DEFAULT)
+                    .await()
+            } ?: return Result.failure(FirestoreOfflineQueuedException(FirestoreSyncHelper.MSG_SAVED_OFFLINE))
+            if (snap.metadata.hasPendingWrites()) {
+                return Result.success(emptyList())
+            }
+            val list = snap.toObjects(
+                FirestoreExpense::class.java,
+                DocumentSnapshot.ServerTimestampBehavior.ESTIMATE,
+            ).map { it.toEntity(pendingSync = false) }
+            Result.success(list)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.LIST, path)
+            Result.failure(e)
+        }
     }
 
     suspend fun upsertCustomer(userId: String, entity: CustomerEntity): Result<Unit> {
@@ -663,6 +747,43 @@ class MinigeFirestoreDataSource(
                 ?.remove("$KEY_LAST_SYNC_ERROR$key")
                 ?.remove("$KEY_LAST_SYNC_ERROR$GLOBAL_KEY")
                 ?.apply()
+        }
+
+        fun filterIncomingDeliveriesProtectingUnsynced(
+            remoteDeliveries: List<DeliveryEntity>,
+            localDeliveries: List<DeliveryEntity>,
+        ): List<DeliveryEntity> {
+            val unsyncedLocalIds = localDeliveries.asSequence()
+                .filter { it.pendingSync }
+                .map { it.id }
+                .toHashSet()
+            return remoteDeliveries.filterNot { it.id in unsyncedLocalIds }
+        }
+
+        fun mergeRemoteDeliveriesProtectingUnsynced(
+            localDeliveries: List<DeliveryEntity>,
+            remoteDeliveries: List<DeliveryEntity>,
+        ): List<DeliveryEntity> {
+            val unsyncedById = localDeliveries
+                .filter { it.pendingSync }
+                .associateBy { it.id }
+            val merged = linkedMapOf<String, DeliveryEntity>()
+            localDeliveries.forEach { local ->
+                if (local.pendingSync) {
+                    merged[local.id] = local
+                }
+            }
+            remoteDeliveries.forEach { remote ->
+                if (remote.id !in unsyncedById) {
+                    merged[remote.id] = remote
+                }
+            }
+            localDeliveries.forEach { local ->
+                if (local.id !in merged && !local.isDeleted) {
+                    merged[local.id] = local
+                }
+            }
+            return merged.values.sortedByDescending { it.createdAtEpochMs }
         }
 
         fun getLastSyncError(context: Context?, userId: String?): String? {

@@ -45,6 +45,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -55,6 +56,7 @@ import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -99,10 +101,11 @@ import com.melvin.minige.util.CustomerDirectoryHelper
 import com.melvin.minige.util.DeliveryVoiceParser
 import com.melvin.minige.util.PaymentBreakdownHelper
 import com.melvin.minige.util.RouteGroupingHelper
+import com.melvin.minige.util.SmallGallonHelper
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun TodayScreen(
     uiState: MinigeUiState,
@@ -119,51 +122,41 @@ fun TodayScreen(
     onUpdateQuotaTarget: (Int) -> Unit = {},
     onReorderInactiveSuki: (InactiveSukiAlert) -> Unit = {},
     onMarkPickupDelivered: (DeliveryRecord) -> Unit = {},
+    onSearchQueryChange: (String) -> Unit = {},
+    onSelectFilterChip: (DeliveryFilterChip) -> Unit = {},
+    onRefreshToday: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
-    var searchQuery by remember { mutableStateOf("") }
-    var debouncedSearchQuery by remember { mutableStateOf("") }
-    var selectedFilter by remember { mutableStateOf(DeliveryFilterChip.ALL) }
+    var searchQuery by remember { mutableStateOf(uiState.todaySearchQuery) }
+    val selectedFilter = uiState.todayFilterChip
     var groupByArea by remember { mutableStateOf(false) }
     var showClosingSheet by remember { mutableStateOf(false) }
     var isInactiveAlertExpanded by remember { mutableStateOf(true) }
     var isDeliveredDrawerExpanded by rememberSaveable { mutableStateOf(false) }
 
+    LaunchedEffect(uiState.todaySearchQuery) {
+        if (uiState.todaySearchQuery != searchQuery && uiState.todaySearchQuery.isEmpty()) {
+            searchQuery = ""
+        }
+    }
+
     LaunchedEffect(searchQuery) {
         if (searchQuery.isEmpty()) {
-            debouncedSearchQuery = ""
+            onSearchQueryChange("")
         } else {
             delay(120)
-            debouncedSearchQuery = searchQuery
+            onSearchQueryChange(searchQuery)
         }
     }
 
-    val filteredDeliveries by remember(uiState.deliveriesForDay, selectedFilter) {
-        derivedStateOf {
-            DeliveryFilterHelper.filterDeliveries(
-                deliveries = uiState.deliveriesForDay,
-                searchQuery = debouncedSearchQuery,
-                selectedChip = selectedFilter,
-            )
-        }
-    }
+    val filteredDeliveries = uiState.filteredDeliveriesForDay
+    val filteredPickups = uiState.pickupsForDay
+    val filteredCompletedDeliveries = uiState.completedDeliveriesForDay
 
-    val filteredPickups by remember {
-        derivedStateOf {
-            filteredDeliveries.filter { it.paymentType == PaymentType.PICK_UP }
-        }
-    }
-
-    val filteredCompletedDeliveries by remember {
-        derivedStateOf {
-            filteredDeliveries.filter { it.paymentType != PaymentType.PICK_UP }
-        }
-    }
-
-    val deliveredCustomerCount by remember {
+    val deliveredCustomerCount by remember(filteredCompletedDeliveries) {
         derivedStateOf {
             filteredCompletedDeliveries
                 .distinctBy {
@@ -173,13 +166,13 @@ fun TodayScreen(
         }
     }
 
-    val deliveredTotalGallons by remember {
+    val deliveredTotalGallons by remember(filteredCompletedDeliveries) {
         derivedStateOf {
             filteredCompletedDeliveries.sumOf { it.totalGallons }
         }
     }
 
-    val routeGrouping by remember(groupByArea, uiState.sukiDirectory) {
+    val routeGrouping by remember(groupByArea, filteredCompletedDeliveries, uiState.sukiDirectory) {
         derivedStateOf {
             if (groupByArea) {
                 RouteGroupingHelper.groupDeliveriesByArea(
@@ -192,10 +185,13 @@ fun TodayScreen(
         }
     }
 
-    Box(
+    PullToRefreshBox(
+        isRefreshing = uiState.isRefreshingToday,
+        onRefresh = onRefreshToday,
         modifier = modifier
             .fillMaxSize()
-            .imePadding(),
+            .imePadding()
+            .testTag("today_pull_to_refresh"),
         contentAlignment = Alignment.TopCenter,
     ) {
         LazyColumn(
@@ -268,6 +264,8 @@ fun TodayScreen(
                     pickupMessage = uiState.bossPickupMessage,
                     totalPaidGallons = uiState.bossHakotPaidGallons,
                     totalPautangGallons = uiState.bossHakotPautangGallons,
+                    totalPautangPaidGallons = uiState.bossHakotPautangPaidGallons,
+                    totalMayCommissionGallons = uiState.bossHakotMayCommissionGallons,
                     onSendToBoss = {
                         copyAndShareToMessenger(context, uiState.bossPickupMessage)
                         onBossSendTriggered("Daily Hakot report copied & opened share sheet")
@@ -340,7 +338,7 @@ fun TodayScreen(
                             searchQuery = searchQuery,
                             onSearchQueryChange = { searchQuery = it },
                             selectedChip = selectedFilter,
-                            onSelectChip = { selectedFilter = it },
+                            onSelectChip = { onSelectFilterChip(it) },
                             testTagPrefix = "today_filter",
                             onSearchFocusChanged = { focused ->
                                 if (focused) {
@@ -404,7 +402,7 @@ fun TodayScreen(
 
                 if (filteredCompletedDeliveries.isNotEmpty()) {
                     val effectiveDeliveredExpanded = isDeliveredDrawerExpanded ||
-                        debouncedSearchQuery.isNotBlank() ||
+                        uiState.todaySearchQuery.isNotBlank() ||
                         selectedFilter != DeliveryFilterChip.ALL
 
                     item(key = "delivered_today_drawer_header", contentType = "delivered_drawer_header") {
@@ -770,6 +768,8 @@ private fun BossPickupUpdateCard(
     pickupMessage: String,
     totalPaidGallons: Int,
     totalPautangGallons: Int,
+    totalPautangPaidGallons: Int,
+    totalMayCommissionGallons: Int,
     onSendToBoss: () -> Unit,
 ) {
     ElevatedCard(
@@ -803,7 +803,7 @@ private fun BossPickupUpdateCard(
                             style = MaterialTheme.typography.titleMedium,
                         )
                         Text(
-                            text = "$totalPaidGallons paid • $totalPautangGallons pautang gal(s)",
+                            text = "$totalPaidGallons delivered • $totalPautangGallons new pautang • $totalPautangPaidGallons pautang paid • $totalMayCommissionGallons may comm",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -903,6 +903,20 @@ private fun DeliveryRowCard(
                             color = MaterialTheme.colorScheme.onSecondaryContainer,
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
                         )
+                    }
+                    if (SmallGallonHelper.isMaliitTagged(delivery.notes)) {
+                        Surface(
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.primaryContainer,
+                            modifier = Modifier.align(Alignment.CenterVertically),
+                        ) {
+                            Text(
+                                text = "Maliit",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                            )
+                        }
                     }
                     if (classification != null) {
                         Surface(
@@ -1026,13 +1040,17 @@ private fun ExpenseRowCard(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     Text(expense.category.label, style = MaterialTheme.typography.titleMedium)
-                    if (isCashAdvance) {
+                    if (isCashAdvance || expense.category.isBossRemitAdvance) {
                         Surface(
                             shape = CircleShape,
                             color = MaterialTheme.colorScheme.tertiaryContainer,
                         ) {
                             Text(
-                                text = "Deducts Remit & Weekly",
+                                text = if (expense.category.isBossRemitAdvance) {
+                                    "Deducts Remit Only"
+                                } else {
+                                    "Deducts Remit & Weekly"
+                                },
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onTertiaryContainer,
                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),

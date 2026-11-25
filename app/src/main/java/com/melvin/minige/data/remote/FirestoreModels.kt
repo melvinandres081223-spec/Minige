@@ -116,15 +116,19 @@ data class FirestoreExpense(
     @ServerTimestamp val updatedAt: Timestamp? = null,
 ) {
     fun toEntity(pendingSync: Boolean = false): ExpenseEntity {
-        val isAdvance = category == ExpenseCategory.CASH_ADVANCE.name ||
-            PaymentBreakdownHelper.isCashAdvanceTagged(notes)
+        val resolvedCategory = ExpenseCategory.fromEntityRaw(category, notes)
+        val cleanNotes = if (resolvedCategory.isCashAdvance || resolvedCategory.isBossRemitAdvance) {
+            PaymentBreakdownHelper.stripExpenseCategoryTags(notes)
+        } else {
+            notes
+        }
         return ExpenseEntity(
             id = id,
             userId = userId,
             dateKey = dateKey,
-            category = if (isAdvance) ExpenseCategory.CASH_ADVANCE.name else category,
+            category = resolvedCategory.name,
             amount = amount.toInt(),
-            notes = if (isAdvance) PaymentBreakdownHelper.stripCashAdvanceTag(notes) else notes,
+            notes = cleanNotes,
             pendingSync = pendingSync,
             isDeleted = false,
             createdAtEpochMs = createdAt?.toDate()?.time ?: System.currentTimeMillis(),
@@ -260,25 +264,43 @@ internal fun UtangPaymentEntity.toFirestoreUpdateMap(): Map<String, Any> = mapOf
 )
 
 internal fun ExpenseEntity.toFirestoreCreateMap(uid: String): Map<String, Any> {
-    val isAdvance = category == ExpenseCategory.CASH_ADVANCE.name
+    val resolved = ExpenseCategory.fromEntityRaw(category, notes)
+    val firestoreCategory = when {
+        resolved.isCashAdvance || resolved.isBossRemitAdvance -> ExpenseCategory.FOOD.name
+        else -> category
+    }
+    val firestoreNotes = when {
+        resolved.isBossRemitAdvance -> PaymentBreakdownHelper.applyBossRemitAdvanceTag(notes)
+        resolved.isCashAdvance -> PaymentBreakdownHelper.applyCashAdvanceTag(notes)
+        else -> notes.take(300)
+    }
     return mapOf(
         "userId" to uid,
         "dateKey" to dateKey,
-        "category" to if (isAdvance) ExpenseCategory.FOOD.name else category,
+        "category" to firestoreCategory,
         "amount" to amount.toLong(),
-        "notes" to if (isAdvance) PaymentBreakdownHelper.applyCashAdvanceTag(notes) else notes.take(300),
+        "notes" to firestoreNotes,
         "createdAt" to FieldValue.serverTimestamp(),
         "updatedAt" to FieldValue.serverTimestamp(),
     )
 }
 
 internal fun ExpenseEntity.toFirestoreUpdateMap(): Map<String, Any> {
-    val isAdvance = category == ExpenseCategory.CASH_ADVANCE.name
+    val resolved = ExpenseCategory.fromEntityRaw(category, notes)
+    val firestoreCategory = when {
+        resolved.isCashAdvance || resolved.isBossRemitAdvance -> ExpenseCategory.FOOD.name
+        else -> category
+    }
+    val firestoreNotes = when {
+        resolved.isBossRemitAdvance -> PaymentBreakdownHelper.applyBossRemitAdvanceTag(notes)
+        resolved.isCashAdvance -> PaymentBreakdownHelper.applyCashAdvanceTag(notes)
+        else -> notes.take(300)
+    }
     return mapOf(
         "dateKey" to dateKey,
-        "category" to if (isAdvance) ExpenseCategory.FOOD.name else category,
+        "category" to firestoreCategory,
         "amount" to amount.toLong(),
-        "notes" to if (isAdvance) PaymentBreakdownHelper.applyCashAdvanceTag(notes) else notes.take(300),
+        "notes" to firestoreNotes,
         "updatedAt" to FieldValue.serverTimestamp(),
     )
 }

@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -11,6 +12,9 @@ interface MinigeDao {
 
     @Query("SELECT * FROM deliveries WHERE userId = :userId AND isDeleted = 0 ORDER BY createdAtEpochMs DESC")
     fun observeDeliveries(userId: String): Flow<List<DeliveryEntity>>
+
+    @Query("SELECT * FROM deliveries WHERE userId = :userId AND dateKey = :dateKey AND isDeleted = 0 ORDER BY createdAtEpochMs DESC")
+    suspend fun getDeliveriesForDateOnce(userId: String, dateKey: String): List<DeliveryEntity>
 
     @Query("SELECT * FROM deliveries WHERE userId = :userId AND pendingSync = 1")
     suspend fun getPendingDeliveries(userId: String): List<DeliveryEntity>
@@ -23,6 +27,20 @@ interface MinigeDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertDeliveries(entities: List<DeliveryEntity>)
+
+    /**
+     * Atomically merges incoming cloud deliveries without deleting or overwriting
+     * any local rows that still have `pendingSync = true`.
+     */
+    @Transaction
+    suspend fun mergeRemoteDeliveriesSafely(userId: String, remoteList: List<DeliveryEntity>) {
+        if (remoteList.isEmpty()) return
+        val pendingIds = getPendingDeliveries(userId).map { it.id }.toSet()
+        val safeRemote = remoteList.filterNot { it.id in pendingIds }
+        if (safeRemote.isNotEmpty()) {
+            upsertDeliveries(safeRemote)
+        }
+    }
 
     @Query("UPDATE deliveries SET pendingSync = 0 WHERE id = :id")
     suspend fun markDeliverySynced(id: String)
@@ -48,6 +66,16 @@ interface MinigeDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertUtangPayments(entities: List<UtangPaymentEntity>)
 
+    @Transaction
+    suspend fun mergeRemoteUtangPaymentsSafely(userId: String, remoteList: List<UtangPaymentEntity>) {
+        if (remoteList.isEmpty()) return
+        val pendingIds = getPendingUtangPayments(userId).map { it.id }.toSet()
+        val safeRemote = remoteList.filterNot { it.id in pendingIds }
+        if (safeRemote.isNotEmpty()) {
+            upsertUtangPayments(safeRemote)
+        }
+    }
+
     @Query("UPDATE utang_payments SET pendingSync = 0 WHERE id = :id")
     suspend fun markUtangPaymentSynced(id: String)
 
@@ -60,6 +88,9 @@ interface MinigeDao {
     @Query("SELECT * FROM expenses WHERE userId = :userId AND isDeleted = 0 ORDER BY createdAtEpochMs DESC")
     fun observeExpenses(userId: String): Flow<List<ExpenseEntity>>
 
+    @Query("SELECT * FROM expenses WHERE userId = :userId AND dateKey = :dateKey AND isDeleted = 0 ORDER BY createdAtEpochMs DESC")
+    suspend fun getExpensesForDateOnce(userId: String, dateKey: String): List<ExpenseEntity>
+
     @Query("SELECT * FROM expenses WHERE userId = :userId AND pendingSync = 1")
     suspend fun getPendingExpenses(userId: String): List<ExpenseEntity>
 
@@ -68,6 +99,16 @@ interface MinigeDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertExpenses(entities: List<ExpenseEntity>)
+
+    @Transaction
+    suspend fun mergeRemoteExpensesSafely(userId: String, remoteList: List<ExpenseEntity>) {
+        if (remoteList.isEmpty()) return
+        val pendingIds = getPendingExpenses(userId).map { it.id }.toSet()
+        val safeRemote = remoteList.filterNot { it.id in pendingIds }
+        if (safeRemote.isNotEmpty()) {
+            upsertExpenses(safeRemote)
+        }
+    }
 
     @Query("UPDATE expenses SET pendingSync = 0 WHERE id = :id")
     suspend fun markExpenseSynced(id: String)
@@ -89,6 +130,16 @@ interface MinigeDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertDailyLedgers(entities: List<DailyLedgerEntity>)
+
+    @Transaction
+    suspend fun mergeRemoteDailyLedgersSafely(userId: String, remoteList: List<DailyLedgerEntity>) {
+        if (remoteList.isEmpty()) return
+        val pendingKeys = getPendingDailyLedgers(userId).map { it.dateKey }.toSet()
+        val safeRemote = remoteList.filterNot { it.dateKey in pendingKeys }
+        if (safeRemote.isNotEmpty()) {
+            upsertDailyLedgers(safeRemote)
+        }
+    }
 
     @Query("UPDATE daily_ledgers SET pendingSync = 0 WHERE dateKey = :dateKey")
     suspend fun markDailyLedgerSynced(dateKey: String)
@@ -116,6 +167,16 @@ interface MinigeDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertCustomers(entities: List<CustomerEntity>)
+
+    @Transaction
+    suspend fun mergeRemoteCustomersSafely(userId: String, remoteList: List<CustomerEntity>) {
+        if (remoteList.isEmpty()) return
+        val pendingIds = getPendingCustomers(userId).map { it.id }.toSet()
+        val safeRemote = remoteList.filterNot { it.id in pendingIds }
+        if (safeRemote.isNotEmpty()) {
+            upsertCustomers(safeRemote)
+        }
+    }
 
     @Query("UPDATE customers SET pendingSync = 0 WHERE id = :id")
     suspend fun markCustomerSynced(id: String)

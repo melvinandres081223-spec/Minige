@@ -7,8 +7,11 @@ import com.melvin.minige.domain.CustomerRecord
 import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.MinigeCustomerUtils
 import com.melvin.minige.domain.PaymentType
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
 
 class PricingRepository(
     private val dao: MinigeDao,
@@ -20,7 +23,44 @@ class PricingRepository(
     suspend fun getSavedUnitPrice(customerName: String): Double? {
         if (customerName.isBlank()) return null
         val customerId = MinigeCustomerUtils.normalizeCustomerId(customerName)
-        return dao.getCustomerById(customerId)?.lastUnitPrice
+        return withContext(Dispatchers.IO) {
+            dao.getCustomerById(customerId)?.lastUnitPrice
+        }
+    }
+
+    suspend fun rememberCustomerPriceLocal(
+        userId: String,
+        customerName: String,
+        unitPriceToSave: Double?,
+        now: Long = System.currentTimeMillis(),
+    ): CustomerEntity? {
+        val cleanName = customerName.trim().take(80)
+        if (cleanName.isEmpty()) return null
+
+        val customerId = MinigeCustomerUtils.normalizeCustomerId(cleanName)
+        return withContext(Dispatchers.IO + NonCancellable) {
+            val existingCustomer = dao.getCustomerById(customerId)
+            val resolvedPrice = unitPriceToSave ?: existingCustomer?.lastUnitPrice
+            val customerEntity = CustomerEntity(
+                id = customerId,
+                userId = userId,
+                name = cleanName,
+                lastUnitPrice = resolvedPrice,
+                pendingSync = true,
+                updatedAtEpochMs = now,
+            )
+            dao.upsertCustomer(customerEntity)
+            customerEntity
+        }
+    }
+
+    suspend fun syncCustomerPriceToCloud(userId: String, customerEntity: CustomerEntity) {
+        val custSync = remote.upsertCustomer(userId, customerEntity)
+        if (custSync.isSuccess) {
+            withContext(Dispatchers.IO + NonCancellable) {
+                dao.markCustomerSynced(customerEntity.id)
+            }
+        }
     }
 
     suspend fun rememberCustomerPrice(
@@ -29,32 +69,18 @@ class PricingRepository(
         unitPriceToSave: Double?,
         now: Long = System.currentTimeMillis(),
     ) {
-        val cleanName = customerName.trim().take(80)
-        if (cleanName.isEmpty()) return
-
-        val customerId = MinigeCustomerUtils.normalizeCustomerId(cleanName)
-        val existingCustomer = dao.getCustomerById(customerId)
-        val resolvedPrice = unitPriceToSave ?: existingCustomer?.lastUnitPrice
-        val customerEntity = CustomerEntity(
-            id = customerId,
+        val customerEntity = rememberCustomerPriceLocal(
             userId = userId,
-            name = cleanName,
-            lastUnitPrice = resolvedPrice,
-            pendingSync = true,
-            updatedAtEpochMs = now,
-        )
-        dao.upsertCustomer(customerEntity)
-        val custSync = remote.upsertCustomer(userId, customerEntity)
-        if (custSync.isSuccess) {
-            dao.markCustomerSynced(customerId)
-        }
+            customerName = customerName,
+            unitPriceToSave = unitPriceToSave,
+            now = now,
+        ) ?: return
+        syncCustomerPriceToCloud(userId, customerEntity)
     }
 
     suspend fun applyRemoteCustomers(userId: String, remoteCustomers: List<CustomerEntity>) {
-        val pendingIds = dao.getPendingCustomers(userId).map { it.id }.toSet()
-        val filtered = remoteCustomers.filterNot { it.id in pendingIds }
-        if (filtered.isNotEmpty()) {
-            dao.upsertCustomers(filtered)
+        withContext(Dispatchers.IO + NonCancellable) {
+            dao.mergeRemoteCustomersSafely(userId, remoteCustomers)
         }
     }
 

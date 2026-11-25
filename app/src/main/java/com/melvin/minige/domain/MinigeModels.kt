@@ -45,20 +45,26 @@ enum class ExpenseCategory(val label: String) {
     GAS("Gas"),
     VULCANIZING("Vulcanizing"),
     MOTOR_REPAIR("Motor Repair"),
-    CASH_ADVANCE("Cash Advance");
+    CASH_ADVANCE("Cash Advance"),
+    BOSS_REMIT_ADVANCE("Kinuha ni Boss");
 
     val isCashAdvance: Boolean
         get() = this == CASH_ADVANCE
+
+    val isBossRemitAdvance: Boolean
+        get() = this == BOSS_REMIT_ADVANCE
 
     companion object {
         fun fromRaw(raw: String): ExpenseCategory =
             entries.firstOrNull { it.name == raw } ?: FOOD
 
         fun fromEntityRaw(raw: String, notes: String): ExpenseCategory {
-            return if (raw == CASH_ADVANCE.name || notes.contains("[Cash Advance]", ignoreCase = true)) {
-                CASH_ADVANCE
-            } else {
-                fromRaw(raw)
+            return when {
+                raw == BOSS_REMIT_ADVANCE.name ||
+                    notes.contains("[Kinuha ni Boss]", ignoreCase = true) -> BOSS_REMIT_ADVANCE
+                raw == CASH_ADVANCE.name ||
+                    notes.contains("[Cash Advance]", ignoreCase = true) -> CASH_ADVANCE
+                else -> fromRaw(raw)
             }
         }
     }
@@ -203,6 +209,7 @@ data class DailySummary(
     val effectiveRateDisplay: Int?,
     val cashAdvanceTotal: Int = 0,
     val pautangTurnedOverToRefilling: Int = 0,
+    val bossRemitAdvanceTotal: Int = 0,
 )
 
 @Immutable
@@ -216,6 +223,7 @@ data class WeeklyDaySummary(
     val expenses: Int,
     val pickupGallons: Int,
     val cashAdvance: Int = 0,
+    val bossRemitAdvance: Int = 0,
 )
 
 @Immutable
@@ -229,6 +237,7 @@ data class WeeklySummary(
     val totalExpenses: Int,
     val days: List<WeeklyDaySummary>,
     val totalCashAdvance: Int = 0,
+    val totalBossRemitAdvance: Int = 0,
 ) {
     val netRemainingCommission: Int
         get() = totalCommission - totalCashAdvance
@@ -334,13 +343,16 @@ object MinigeCalculator {
 
         val entriesForDate = expenses.filter { it.dateKey == dateKey }
         val expensesTotal = entriesForDate
-            .filter { !it.category.isCashAdvance }
+            .filter { !it.category.isCashAdvance && !it.category.isBossRemitAdvance }
             .sumOf { it.amount }
         val cashAdvanceTotal = entriesForDate
             .filter { it.category.isCashAdvance }
             .sumOf { it.amount }
+        val bossRemitAdvanceTotal = entriesForDate
+            .filter { it.category.isBossRemitAdvance }
+            .sumOf { it.amount }
 
-        val netCashRemit = cashCollected - expensesTotal - cashAdvanceTotal
+        val netCashRemit = cashCollected - expensesTotal - cashAdvanceTotal - bossRemitAdvanceTotal
         val cashOnHand = startingSukli + netCashRemit
 
         val hasZeroCommWalkIn = directPaidDeliveries.any {
@@ -369,6 +381,7 @@ object MinigeCalculator {
             effectiveRateDisplay = effectiveRate,
             cashAdvanceTotal = cashAdvanceTotal,
             pautangTurnedOverToRefilling = pautangTurnedOverToRefilling,
+            bossRemitAdvanceTotal = bossRemitAdvanceTotal,
         )
     }
 
@@ -398,6 +411,7 @@ object MinigeCalculator {
                 expenses = daily.expensesTotal,
                 pickupGallons = daily.pickupGallons,
                 cashAdvance = daily.cashAdvanceTotal,
+                bossRemitAdvance = daily.bossRemitAdvanceTotal,
             )
         }
         return WeeklySummary(
@@ -410,19 +424,23 @@ object MinigeCalculator {
             totalExpenses = daySummaries.sumOf { it.expenses },
             days = daySummaries,
             totalCashAdvance = daySummaries.sumOf { it.cashAdvance },
+            totalBossRemitAdvance = daySummaries.sumOf { it.bossRemitAdvance },
         )
     }
 }
 
 object BossPickupFormatter {
     private val headerDateFormatter = DateTimeFormatter.ofPattern("MMM dd, yyyy", Locale.ENGLISH)
+    private val shortUtangDateFormatter = DateTimeFormatter.ofPattern("MMM d", Locale.ENGLISH)
     private const val DIVIDER = "━━━━━━━━━━━━━━━━━━━━"
 
     @Immutable
     data class DailyHakotReport(
         val paidGallons: Int,
         val unpaidPautangGallons: Int,
+        val pautangPaidGallons: Int = 0,
         val grandTotalGallons: Int,
+        val mayCommissionGallons: Int = paidGallons + pautangPaidGallons,
         val message: String,
     )
 
@@ -440,19 +458,21 @@ object BossPickupFormatter {
         val customerName: String,
         val gallons: Int,
         val sortTimestamp: Long,
+        val originDateKey: String? = null,
     )
 
     /**
-     * Generates the Boss-facing Daily Hakot report containing two clearly separated sections
+     * Generates the Boss-facing Daily Hakot report containing three clearly separated sections
      * for [date]:
-     * 1) Paid / Delivered gallons (`CASH`, `BANK_DEPOSIT` / Bank / Online, `PAID_WALK_IN` whether
-     *    commission is ON or OFF, partial-gallon `PAUTANG` payments collected on `dateKey`, and
-     *    settled `PAUTANG` remainder gallons with `settledDateKey == dateKey`).
-     * 2) Unpaid `PAUTANG` deliveries created/delivered on `dateKey` (`!isUtangFullyPaid`), showing
-     *    remaining unpaid gallons if a partial-gallon payment already happened on `dateKey`.
+     * 1) Same-day paid deliveries (`delivery.dateKey == selectedDateKey`, excluding `PICK_UP` and
+     *    `PAUTANG`).
+     * 2) Same-day unpaid `PAUTANG` deliveries (`delivery.dateKey == selectedDateKey` and
+     *    `!isUtangFullyPaid`), showing remaining unpaid gallons if partially paid.
+     * 3) Pautang payments collected / settled on `selectedDateKey` (prior-day Pautang formatted
+     *    with `(utang MMM d)`).
      *
-     * Strictly excludes `PICK_UP` entries, peso signs (`₱`), unit prices, commissions,
-     * cash remittance, cash advances, and sukli.
+     * Ends with `GRAND TOTAL: X gals` and `TOTAL MAY COMMISSION: Y gals` (strictly in gallons,
+     * zero peso signs or commission peso amounts).
      */
     fun format(
         date: LocalDate,
@@ -469,14 +489,14 @@ object BossPickupFormatter {
         val deliveryById = deliveries.associateBy { it.id }
 
         val paidRows = mutableListOf<HakotRow>()
+        var directCommissionGallons = 0
 
-        // 1) Direct paid deliveries on selected date (Cash, Bank / Online, Paid Walk-in)
+        // 1) Same-day direct paid deliveries (Cash, Bank / Online, Paid Walk-in)
         deliveries
             .filter {
                 it.dateKey == dateKey &&
-                    (it.paymentType == PaymentType.CASH ||
-                        it.paymentType == PaymentType.BANK_DEPOSIT ||
-                        it.paymentType == PaymentType.PAID_WALK_IN) &&
+                    it.paymentType != PaymentType.PICK_UP &&
+                    it.paymentType != PaymentType.PAUTANG &&
                     it.totalGallons > 0
             }
             .forEach { entry ->
@@ -485,50 +505,18 @@ object BossPickupFormatter {
                     gallons = entry.totalGallons,
                     sortTimestamp = entry.createdAtEpochMs,
                 )
-            }
-
-        // 2) Gallon-tagged partial Pautang payments collected on selected date
-        utangPayments
-            .filter { it.dateKey == dateKey }
-            .forEach { payment ->
-                val paidGals = PartialPaymentHelper.extractPaidGallons(payment)
-                if (paidGals > 0) {
-                    val parent = deliveryById[payment.deliveryId]
-                    if (parent == null || parent.paymentType == PaymentType.PAUTANG) {
-                        val name = parent?.customerName?.trim()?.ifEmpty { "Customer" } ?: "Customer"
-                        paidRows += HakotRow(
-                            customerName = name,
-                            gallons = paidGals,
-                            sortTimestamp = payment.createdAtEpochMs,
-                        )
-                    }
+                val earnsCommission = when (entry.paymentType) {
+                    PaymentType.CASH, PaymentType.BANK_DEPOSIT -> true
+                    PaymentType.PAID_WALK_IN -> entry.hasPaidWalkInCommission
+                    else -> false
+                }
+                if (earnsCommission) {
+                    directCommissionGallons += entry.totalGallons
                 }
             }
 
-        // 3) Settled Pautang untagged remainder gallons whose settlement date is selected date
-        deliveries
-            .filter {
-                it.paymentType == PaymentType.PAUTANG &&
-                    it.isUtangFullyPaid &&
-                    it.settledDateKey == dateKey
-            }
-            .forEach { utang ->
-                val remGallons = PartialPaymentHelper.untaggedSettledRemainderGallons(utang, utangPayments)
-                if (remGallons > 0) {
-                    val lastPaymentTs = utangPayments
-                        .filter { it.deliveryId == utang.id && it.dateKey == dateKey }
-                        .maxOfOrNull { it.createdAtEpochMs }
-                        ?: utang.updatedAtEpochMs
-                    paidRows += HakotRow(
-                        customerName = utang.customerName.trim().ifEmpty { "Customer" },
-                        gallons = remGallons,
-                        sortTimestamp = lastPaymentTs,
-                    )
-                }
-            }
-
-        // 4) Unpaid Pautang deliveries created/delivered on selected date
-        val pautangRows = mutableListOf<HakotRow>()
+        // 2) Same-day unpaid Pautang deliveries
+        val pautangDeliveredRows = mutableListOf<HakotRow>()
         deliveries
             .filter {
                 it.dateKey == dateKey &&
@@ -542,7 +530,7 @@ object BossPickupFormatter {
                     .sumOf { PartialPaymentHelper.extractPaidGallons(it) }
                 val remainingUnpaidGals = (utang.totalGallons - paidTaggedOnOrBeforeDate).coerceAtLeast(0)
                 if (remainingUnpaidGals > 0) {
-                    pautangRows += HakotRow(
+                    pautangDeliveredRows += HakotRow(
                         customerName = utang.customerName.trim().ifEmpty { "Customer" },
                         gallons = remainingUnpaidGals,
                         sortTimestamp = utang.createdAtEpochMs,
@@ -550,14 +538,67 @@ object BossPickupFormatter {
                 }
             }
 
+        // 3) Pautang payments collected / settled on selected date
+        val pautangPaidRows = mutableListOf<HakotRow>()
+
+        // 3a) Gallon-tagged partial Pautang payments collected on selected date
+        utangPayments
+            .filter { it.dateKey == dateKey }
+            .forEach { payment ->
+                val paidGals = PartialPaymentHelper.extractPaidGallons(payment)
+                if (paidGals > 0) {
+                    val parent = deliveryById[payment.deliveryId]
+                    if (parent == null || parent.paymentType == PaymentType.PAUTANG) {
+                        val name = parent?.customerName?.trim()?.ifEmpty { "Customer" } ?: "Customer"
+                        pautangPaidRows += HakotRow(
+                            customerName = name,
+                            gallons = paidGals,
+                            sortTimestamp = payment.createdAtEpochMs,
+                            originDateKey = parent?.dateKey,
+                        )
+                    }
+                }
+            }
+
+        // 3b) Settled Pautang untagged remainder gallons whose settlement date is selected date
+        deliveries
+            .filter {
+                it.paymentType == PaymentType.PAUTANG &&
+                    it.isUtangFullyPaid &&
+                    it.settledDateKey == dateKey
+            }
+            .forEach { utang ->
+                val remGallons = PartialPaymentHelper.untaggedSettledRemainderGallons(utang, utangPayments)
+                if (remGallons > 0) {
+                    val lastPaymentTs = utangPayments
+                        .filter { it.deliveryId == utang.id && it.dateKey == dateKey }
+                        .maxOfOrNull { it.createdAtEpochMs }
+                        ?: utang.updatedAtEpochMs
+                    pautangPaidRows += HakotRow(
+                        customerName = utang.customerName.trim().ifEmpty { "Customer" },
+                        gallons = remGallons,
+                        sortTimestamp = lastPaymentTs,
+                        originDateKey = utang.dateKey,
+                    )
+                }
+            }
+
         val orderedPaidRows = paidRows.sortedBy { it.sortTimestamp }
-        val orderedPautangRows = pautangRows.sortedBy { it.sortTimestamp }
+        val orderedPautangDeliveredRows = pautangDeliveredRows.sortedBy { it.sortTimestamp }
+        val orderedPautangPaidRows = pautangPaidRows.sortedBy { it.sortTimestamp }
 
         val paidTotalGals = orderedPaidRows.sumOf { it.gallons }
-        val pautangTotalGals = orderedPautangRows.sumOf { it.gallons }
-        val grandTotalGals = paidTotalGals + pautangTotalGals
+        val pautangDeliveredTotalGals = orderedPautangDeliveredRows.sumOf { it.gallons }
+        val pautangPaidTotalGals = orderedPautangPaidRows.sumOf { it.gallons }
+        val grandTotalGals = paidTotalGals + pautangDeliveredTotalGals + pautangPaidTotalGals
+        val mayCommissionGals = directCommissionGallons + pautangPaidTotalGals
 
         fun formatUnit(count: Int): String = if (count == 1) "gal" else "gals"
+        fun formatUtangOriginLabel(originKey: String?): String {
+            if (originKey.isNullOrBlank() || originKey == dateKey) return ""
+            val parsed = runCatching { LocalDate.parse(originKey) }.getOrNull() ?: return ""
+            return " (utang ${parsed.format(shortUtangDateFormatter)})"
+        }
 
         val sb = StringBuilder()
         sb.appendLine("🚚 DAILY HAKOT (DELIVERED)")
@@ -578,22 +619,42 @@ object BossPickupFormatter {
         sb.appendLine("📋 PAUTANG DELIVERED TODAY")
         sb.appendLine(DIVIDER)
 
-        if (orderedPautangRows.isEmpty()) {
+        if (orderedPautangDeliveredRows.isEmpty()) {
             sb.appendLine("(Walang pautang delivered today)")
         } else {
-            orderedPautangRows.forEach { row ->
+            orderedPautangDeliveredRows.forEach { row ->
                 sb.appendLine("• ${row.customerName} — ${row.gallons} ${formatUnit(row.gallons)}")
             }
         }
 
         sb.appendLine(DIVIDER)
-        sb.appendLine("PAUTANG TOTAL: $pautangTotalGals ${formatUnit(pautangTotalGals)}")
-        sb.append("GRAND TOTAL: $grandTotalGals ${formatUnit(grandTotalGals)}")
+        sb.appendLine("PAUTANG DELIVERED TOTAL: $pautangDeliveredTotalGals ${formatUnit(pautangDeliveredTotalGals)}")
+        sb.appendLine()
+        sb.appendLine("✅ PAUTANG NA NAGBAYAD TODAY")
+        sb.appendLine(DIVIDER)
+
+        if (orderedPautangPaidRows.isEmpty()) {
+            sb.appendLine("(Walang pautang na nagbayad today)")
+        } else {
+            orderedPautangPaidRows.forEach { row ->
+                val origin = formatUtangOriginLabel(row.originDateKey)
+                sb.appendLine("• ${row.customerName} — ${row.gallons} ${formatUnit(row.gallons)}$origin")
+            }
+        }
+
+        sb.appendLine(DIVIDER)
+        sb.appendLine("PAUTANG PAID TOTAL: $pautangPaidTotalGals ${formatUnit(pautangPaidTotalGals)}")
+        sb.appendLine()
+        sb.appendLine(DIVIDER)
+        sb.appendLine("GRAND TOTAL: $grandTotalGals ${formatUnit(grandTotalGals)}")
+        sb.append("TOTAL MAY COMMISSION: $mayCommissionGals ${formatUnit(mayCommissionGals)}")
 
         return DailyHakotReport(
             paidGallons = paidTotalGals,
-            unpaidPautangGallons = pautangTotalGals,
+            unpaidPautangGallons = pautangDeliveredTotalGals,
+            pautangPaidGallons = pautangPaidTotalGals,
             grandTotalGallons = grandTotalGals,
+            mayCommissionGallons = mayCommissionGals,
             message = sb.toString(),
         )
     }

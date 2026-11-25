@@ -74,6 +74,7 @@ object SundayMakeupHelper {
             expenses = daily.expensesTotal,
             pickupGallons = daily.pickupGallons,
             cashAdvance = daily.cashAdvanceTotal,
+            bossRemitAdvance = daily.bossRemitAdvanceTotal,
         )
     }
 
@@ -94,6 +95,7 @@ object SundayMakeupHelper {
             totalExpenses = days.sumOf { it.expenses },
             days = days,
             totalCashAdvance = days.sumOf { it.cashAdvance },
+            totalBossRemitAdvance = days.sumOf { it.bossRemitAdvance },
         )
     }
 }

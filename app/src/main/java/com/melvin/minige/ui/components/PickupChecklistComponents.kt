@@ -20,7 +20,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.CloudDone
 import androidx.compose.material.icons.rounded.CloudUpload
@@ -48,6 +47,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -71,23 +71,120 @@ import com.melvin.minige.util.CustomerDirectoryHelper
 import com.melvin.minige.util.DeliveryVoiceParser
 import com.melvin.minige.util.PaidChannel
 import com.melvin.minige.util.PaymentBreakdownHelper
+import com.melvin.minige.util.SmallGallonHelper
 import kotlin.math.roundToInt
 
+@Immutable
+data class PickupDialogInitialPrices(
+    val isMixedOrder: Boolean,
+    val isPurifiedOnly: Boolean,
+    val isAlkalineOnly: Boolean,
+    val purifiedPrice: Double,
+    val alkalinePrice: Double,
+    val singleUnitPrice: Double,
+)
+
 object PickupChecklistHelper {
+    fun filterPendingPickupsForDay(
+        deliveriesForDay: List<DeliveryRecord>,
+        searchQuery: String = "",
+        selectedChip: DeliveryFilterChip = DeliveryFilterChip.ALL,
+    ): List<DeliveryRecord> {
+        return DeliveryFilterHelper.filterDeliveries(
+            deliveries = deliveriesForDay,
+            searchQuery = searchQuery,
+            selectedChip = selectedChip,
+        ).filter { it.paymentType == PaymentType.PICK_UP }
+    }
+
+    fun resolveInitialPrices(
+        delivery: DeliveryRecord,
+        settings: MinigeSettings,
+        matchedCustomer: CustomerRecord?,
+        isSmallGallon: Boolean,
+        smallGallonPrice: Double = SmallGallonHelper.DEFAULT_PRICE,
+    ): PickupDialogInitialPrices {
+        val isMixed = delivery.purifiedGallons > 0 && delivery.alkalineGallons > 0
+        val isAlkalineOnly = delivery.alkalineGallons > 0 && delivery.purifiedGallons == 0
+        val isPurifiedOnly = delivery.purifiedGallons > 0 && delivery.alkalineGallons == 0
+        if (isSmallGallon) {
+            return PickupDialogInitialPrices(
+                isMixedOrder = isMixed,
+                isPurifiedOnly = isPurifiedOnly,
+                isAlkalineOnly = isAlkalineOnly,
+                purifiedPrice = smallGallonPrice,
+                alkalinePrice = smallGallonPrice,
+                singleUnitPrice = smallGallonPrice,
+            )
+        }
+        val savedCustomerPurified = matchedCustomer?.lastUnitPrice?.takeIf { it >= 0.0 }
+        val resolvedPurified = savedCustomerPurified
+            ?: delivery.purifiedUnitPrice.takeIf { it > 0 }?.toDouble()
+            ?: settings.purifiedPrice.toDouble()
+        val resolvedAlkaline = delivery.alkalineUnitPrice.takeIf { it > 0 }?.toDouble()
+            ?: settings.alkalinePrice.toDouble()
+        val resolvedSingle = if (isAlkalineOnly) resolvedAlkaline else resolvedPurified
+        return PickupDialogInitialPrices(
+            isMixedOrder = isMixed,
+            isPurifiedOnly = isPurifiedOnly,
+            isAlkalineOnly = isAlkalineOnly,
+            purifiedPrice = resolvedPurified,
+            alkalinePrice = resolvedAlkaline,
+            singleUnitPrice = resolvedSingle,
+        )
+    }
+
+    fun computePreviewBill(
+        delivery: DeliveryRecord,
+        paymentType: PaymentType,
+        purifiedUnitPrice: Double,
+        alkalineUnitPrice: Double,
+    ): Int {
+        if (paymentType == PaymentType.PAID_WALK_IN || paymentType == PaymentType.PICK_UP) return 0
+        val safePurified = purifiedUnitPrice.coerceAtLeast(0.0)
+        val safeAlkaline = alkalineUnitPrice.coerceAtLeast(0.0)
+        return ((delivery.purifiedGallons * safePurified) + (delivery.alkalineGallons * safeAlkaline)).roundToInt()
+    }
+
+    fun computePreviewCommission(
+        delivery: DeliveryRecord,
+        paymentType: PaymentType,
+        commissionRate: Double,
+        hasPaidWalkInCommission: Boolean,
+    ): Int {
+        val totalGals = delivery.totalGallons
+        return when (paymentType) {
+            PaymentType.CASH, PaymentType.BANK_DEPOSIT ->
+                CommissionRateHistory.calculateCommissionAmount(totalGals, commissionRate)
+            PaymentType.PAID_WALK_IN -> if (hasPaidWalkInCommission) {
+                CommissionRateHistory.calculateCommissionAmount(totalGals, commissionRate)
+            } else {
+                0
+            }
+            PaymentType.PAUTANG, PaymentType.PICK_UP -> 0
+        }
+    }
+
     fun buildConvertedDeliveryNotes(
         existingNotes: String,
         targetPaymentType: PaymentType,
         hasCommission: Boolean,
+        isSmallGallon: Boolean? = null,
     ): String {
         val withChannel = when (targetPaymentType) {
             PaymentType.CASH -> PaymentBreakdownHelper.applyChannelTag(existingNotes, PaidChannel.CASH)
             PaymentType.BANK_DEPOSIT -> PaymentBreakdownHelper.applyChannelTag(existingNotes, PaidChannel.BANK_ONLINE)
             else -> PaymentBreakdownHelper.stripChannelTags(existingNotes)
         }
-        return if (targetPaymentType == PaymentType.PAID_WALK_IN) {
+        val withWalkIn = if (targetPaymentType == PaymentType.PAID_WALK_IN) {
             PaymentBreakdownHelper.applyPaidWalkInTags(withChannel, hasCommission = hasCommission)
         } else {
             PaymentBreakdownHelper.stripPaidWalkInTags(withChannel)
+        }
+        return if (isSmallGallon != null) {
+            SmallGallonHelper.applyMaliitTag(withWalkIn, isSmallGallon)
+        } else {
+            withWalkIn
         }
     }
 }
@@ -271,12 +368,6 @@ fun TodayPickupChecklistSheet(
                     .height(52.dp)
                     .testTag("new_direct_delivery_button"),
             ) {
-                Icon(
-                    imageVector = Icons.Rounded.Add,
-                    contentDescription = null,
-                    modifier = Modifier.size(20.dp),
-                )
-                Spacer(modifier = Modifier.width(8.dp))
                 Text(
                     text = "+ Bagong Direct Delivery",
                     style = MaterialTheme.typography.labelLarge,
@@ -295,11 +386,15 @@ fun ConfirmPickupDeliveredDialog(
     settings: MinigeSettings,
     customers: List<CustomerRecord>,
     activeCommissionRate: Double,
+    smallGallonPrice: Double = SmallGallonHelper.DEFAULT_PRICE,
+    smallGallonCommissionRate: Double = SmallGallonHelper.DEFAULT_COMMISSION_RATE,
     onDismiss: () -> Unit,
     onConfirm: (
         paymentType: PaymentType,
         notes: String,
         customUnitPrice: Double?,
+        customPurifiedUnitPrice: Double?,
+        customAlkalineUnitPrice: Double?,
         hasCommission: Boolean,
     ) -> Unit,
 ) {
@@ -309,47 +404,63 @@ fun ConfirmPickupDeliveredDialog(
     val matchedCustomer = remember(customerId, customers) {
         if (customerId.isEmpty()) null else customers.firstOrNull { it.id == customerId }
     }
-    val defaultUnitPrice = remember(delivery.purifiedGallons, delivery.alkalineGallons, settings) {
-        if (delivery.alkalineGallons > 0 && delivery.purifiedGallons == 0) settings.alkalinePrice
-        else settings.purifiedPrice
+    var isSmallGallon by remember(delivery.id) {
+        mutableStateOf(SmallGallonHelper.isMaliitTagged(delivery.notes))
     }
-    val initialPriceText = remember(delivery.id, matchedCustomer?.lastUnitPrice, defaultUnitPrice) {
-        val saved = matchedCustomer?.lastUnitPrice
-        if (saved != null && saved >= 0.0) MinigeCustomerUtils.formatPrice(saved)
-        else defaultUnitPrice.toString()
+    val initialPrices = remember(
+        delivery.id,
+        matchedCustomer?.lastUnitPrice,
+        delivery.purifiedUnitPrice,
+        delivery.alkalineUnitPrice,
+        settings,
+        smallGallonPrice,
+    ) {
+        PickupChecklistHelper.resolveInitialPrices(
+            delivery = delivery,
+            settings = settings,
+            matchedCustomer = matchedCustomer,
+            isSmallGallon = SmallGallonHelper.isMaliitTagged(delivery.notes),
+            smallGallonPrice = smallGallonPrice,
+        )
     }
 
     var selectedPaymentType by remember(delivery.id) { mutableStateOf(PaymentType.CASH) }
     var hasPaidWalkInCommission by remember(delivery.id) { mutableStateOf(true) }
-    var unitPriceText by remember(delivery.id, initialPriceText) { mutableStateOf(initialPriceText) }
-    var hasManualPriceOverride by remember(delivery.id) {
-        mutableStateOf(matchedCustomer?.lastUnitPrice != null)
+    var singlePriceText by remember(delivery.id, initialPrices.singleUnitPrice) {
+        mutableStateOf(MinigeCustomerUtils.formatPrice(initialPrices.singleUnitPrice))
+    }
+    var purifiedPriceText by remember(delivery.id, initialPrices.purifiedPrice) {
+        mutableStateOf(MinigeCustomerUtils.formatPrice(initialPrices.purifiedPrice))
+    }
+    var alkalinePriceText by remember(delivery.id, initialPrices.alkalinePrice) {
+        mutableStateOf(MinigeCustomerUtils.formatPrice(initialPrices.alkalinePrice))
     }
     var formError by remember(delivery.id) { mutableStateOf<String?>(null) }
 
-    val totalGals = delivery.totalGallons
-    val isMixedDefault = delivery.purifiedGallons > 0 &&
-        delivery.alkalineGallons > 0 &&
-        matchedCustomer?.lastUnitPrice == null &&
-        !hasManualPriceOverride
-    val parsedPrice = unitPriceText.toDoubleOrNull()?.takeIf { it >= 0.0 } ?: defaultUnitPrice.toDouble()
-    val previewBill = when {
-        selectedPaymentType == PaymentType.PAID_WALK_IN -> 0
-        isMixedDefault -> (delivery.purifiedGallons * settings.purifiedPrice) +
-            (delivery.alkalineGallons * settings.alkalinePrice)
-        else -> (totalGals * parsedPrice).roundToInt()
+    val parsedPurified = if (initialPrices.isMixedOrder) {
+        purifiedPriceText.toDoubleOrNull()?.takeIf { it >= 0.0 } ?: initialPrices.purifiedPrice
+    } else {
+        singlePriceText.toDoubleOrNull()?.takeIf { it >= 0.0 } ?: initialPrices.singleUnitPrice
     }
-    val previewCommission = when (selectedPaymentType) {
-        PaymentType.CASH, PaymentType.BANK_DEPOSIT ->
-            CommissionRateHistory.calculateCommissionAmount(totalGals, activeCommissionRate)
-        PaymentType.PAID_WALK_IN -> if (hasPaidWalkInCommission) {
-            CommissionRateHistory.calculateCommissionAmount(totalGals, activeCommissionRate)
-        } else {
-            0
-        }
-        PaymentType.PAUTANG, PaymentType.PICK_UP -> 0
+    val parsedAlkaline = if (initialPrices.isMixedOrder) {
+        alkalinePriceText.toDoubleOrNull()?.takeIf { it >= 0.0 } ?: initialPrices.alkalinePrice
+    } else {
+        singlePriceText.toDoubleOrNull()?.takeIf { it >= 0.0 } ?: initialPrices.singleUnitPrice
     }
-    val rateFormatted = CommissionRateHistory.formatRate(activeCommissionRate)
+    val previewBill = PickupChecklistHelper.computePreviewBill(
+        delivery = delivery,
+        paymentType = selectedPaymentType,
+        purifiedUnitPrice = parsedPurified,
+        alkalineUnitPrice = parsedAlkaline,
+    )
+    val effectiveRate = if (isSmallGallon) smallGallonCommissionRate else activeCommissionRate
+    val previewCommission = PickupChecklistHelper.computePreviewCommission(
+        delivery = delivery,
+        paymentType = selectedPaymentType,
+        commissionRate = effectiveRate,
+        hasPaidWalkInCommission = hasPaidWalkInCommission,
+    )
+    val rateFormatted = CommissionRateHistory.formatRate(effectiveRate)
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -413,6 +524,26 @@ fun ConfirmPickupDeliveredDialog(
                         label = { Text(PaymentType.PAUTANG.label) },
                         modifier = Modifier.testTag("confirm_pickup_type_PAUTANG"),
                     )
+                    FilterChip(
+                        selected = isSmallGallon,
+                        onClick = {
+                            val next = !isSmallGallon
+                            isSmallGallon = next
+                            val updatedPrices = PickupChecklistHelper.resolveInitialPrices(
+                                delivery = delivery,
+                                settings = settings,
+                                matchedCustomer = matchedCustomer,
+                                isSmallGallon = next,
+                                smallGallonPrice = smallGallonPrice,
+                            )
+                            singlePriceText = MinigeCustomerUtils.formatPrice(updatedPrices.singleUnitPrice)
+                            purifiedPriceText = MinigeCustomerUtils.formatPrice(updatedPrices.purifiedPrice)
+                            alkalinePriceText = MinigeCustomerUtils.formatPrice(updatedPrices.alkalinePrice)
+                            formError = null
+                        },
+                        label = { Text("Maliit (₱${MinigeCustomerUtils.formatPrice(smallGallonPrice)})") },
+                        modifier = Modifier.testTag("confirm_pickup_maliit_chip"),
+                    )
                 }
 
                 if (selectedPaymentType == PaymentType.PAID_WALK_IN) {
@@ -444,12 +575,45 @@ fun ConfirmPickupDeliveredDialog(
                                 .testTag("confirm_pickup_walkin_comm_switch"),
                         )
                     }
+                } else if (initialPrices.isMixedOrder) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        OutlinedTextField(
+                            value = purifiedPriceText,
+                            onValueChange = { raw ->
+                                purifiedPriceText = sanitizePickupPrice(raw)
+                                formError = null
+                            },
+                            label = { Text("Purified Price (₱)") },
+                            supportingText = { Text("${delivery.purifiedGallons} gal") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("confirm_pickup_purified_price_input"),
+                        )
+                        OutlinedTextField(
+                            value = alkalinePriceText,
+                            onValueChange = { raw ->
+                                alkalinePriceText = sanitizePickupPrice(raw)
+                                formError = null
+                            },
+                            label = { Text("Alkaline Price (₱)") },
+                            supportingText = { Text("${delivery.alkalineGallons} gal") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("confirm_pickup_alkaline_price_input"),
+                        )
+                    }
                 } else {
                     OutlinedTextField(
-                        value = unitPriceText,
+                        value = singlePriceText,
                         onValueChange = { raw ->
-                            unitPriceText = sanitizePickupPrice(raw)
-                            hasManualPriceOverride = true
+                            singlePriceText = sanitizePickupPrice(raw)
                             formError = null
                         },
                         label = { Text("Unit Price (₱/gal)") },
@@ -502,24 +666,45 @@ fun ConfirmPickupDeliveredDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    val priceToSave = when {
-                        selectedPaymentType == PaymentType.PAID_WALK_IN -> null
-                        isMixedDefault -> null
-                        else -> unitPriceText.toDoubleOrNull()?.takeIf { it >= 0.0 }
-                    }
-                    if (selectedPaymentType != PaymentType.PAID_WALK_IN && !isMixedDefault && priceToSave == null) {
-                        formError = "Please enter a valid unit price."
-                        return@Button
+                    val singleToSave: Double?
+                    val purifiedToSave: Double?
+                    val alkalineToSave: Double?
+                    if (selectedPaymentType == PaymentType.PAID_WALK_IN) {
+                        singleToSave = null
+                        purifiedToSave = null
+                        alkalineToSave = null
+                    } else if (initialPrices.isMixedOrder) {
+                        val validPurified = purifiedPriceText.toDoubleOrNull()?.takeIf { it >= 0.0 }
+                        val validAlkaline = alkalinePriceText.toDoubleOrNull()?.takeIf { it >= 0.0 }
+                        if (validPurified == null || validAlkaline == null) {
+                            formError = "Please enter valid Purified and Alkaline unit prices."
+                            return@Button
+                        }
+                        singleToSave = null
+                        purifiedToSave = validPurified
+                        alkalineToSave = validAlkaline
+                    } else {
+                        val validSingle = singlePriceText.toDoubleOrNull()?.takeIf { it >= 0.0 }
+                        if (validSingle == null) {
+                            formError = "Please enter a valid unit price."
+                            return@Button
+                        }
+                        singleToSave = validSingle
+                        purifiedToSave = null
+                        alkalineToSave = null
                     }
                     val finalNotes = PickupChecklistHelper.buildConvertedDeliveryNotes(
                         existingNotes = delivery.notes,
                         targetPaymentType = selectedPaymentType,
                         hasCommission = if (selectedPaymentType == PaymentType.PAID_WALK_IN) hasPaidWalkInCommission else true,
+                        isSmallGallon = isSmallGallon,
                     )
                     onConfirm(
                         selectedPaymentType,
                         finalNotes,
-                        priceToSave,
+                        singleToSave,
+                        purifiedToSave,
+                        alkalineToSave,
                         if (selectedPaymentType == PaymentType.PAID_WALK_IN) hasPaidWalkInCommission else true,
                     )
                 },
@@ -598,6 +783,20 @@ fun PinnedPickupDeliveryCard(
                             color = MaterialTheme.colorScheme.onTertiaryContainer,
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
                         )
+                    }
+                    if (SmallGallonHelper.isMaliitTagged(delivery.notes)) {
+                        Surface(
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.secondaryContainer,
+                            modifier = Modifier.align(Alignment.CenterVertically),
+                        ) {
+                            Text(
+                                text = "Maliit",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                            )
+                        }
                     }
                     if (classification != null) {
                         Surface(

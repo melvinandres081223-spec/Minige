@@ -92,6 +92,7 @@ fun SettingsScreen(
     uiState: MinigeUiState,
     userEmail: String?,
     onSaveSettings: (purified: Int, alkaline: Int, rate: Int, defaultSukli: Int) -> Unit,
+    onSaveSmallGallonSettings: (smallPrice: Double, smallCommissionRate: Double) -> Unit = { _, _ -> },
     onScheduleCommissionRate: (ratePerGallon: Double, effectiveDate: LocalDate) -> Unit,
     onUpdateQuotaTarget: (Int) -> Unit = {},
     onToggleSundayMakeup: (Boolean) -> Unit = {},
@@ -166,7 +167,7 @@ fun SettingsScreen(
 
     val showDiagnosticsCategory = matches("logs", "diagnostics", "health", "check", "report", "redact", "bug")
 
-    val showPricingRow = matches("pricing", "purified", "alkaline", "sukli", "commission", "preferences")
+    val showPricingRow = matches("pricing", "purified", "alkaline", "sukli", "commission", "maliit", "small", "galon", "preferences")
     val showCommissionScheduleRow = matches("commission", "rate", "schedule", "history", "preferences")
     val showQuotaRow = matches("quota", "target", "gallons", "daily", "preferences")
     val showSundayRow = matches("sunday", "makeup", "weekly", "preferences")
@@ -461,7 +462,7 @@ fun SettingsScreen(
                         SettingsActionRow(
                             icon = Icons.Rounded.Payments,
                             title = "Pricing & Default Sukli",
-                            subtitle = "Purified ₱${uiState.settings.purifiedPrice} • Alkaline ₱${uiState.settings.alkalinePrice} • Rate ₱${uiState.settings.commissionRate}/gal • Sukli ₱${uiState.settings.defaultSukli}",
+                            subtitle = "Purified ₱${uiState.settings.purifiedPrice} • Alkaline ₱${uiState.settings.alkalinePrice} • Maliit ₱${com.melvin.minige.domain.MinigeCustomerUtils.formatPrice(uiState.smallGallonPrice)} (₱${CommissionRateHistory.formatRate(uiState.smallGallonCommissionRate)}/g) • Sukli ₱${uiState.settings.defaultSukli}",
                             onClick = { showPricingDialog = true },
                             modifier = Modifier.testTag("settings_pricing_row"),
                         )
@@ -663,8 +664,11 @@ fun SettingsScreen(
             initialAlkaline = uiState.settings.alkalinePrice,
             initialRate = uiState.settings.commissionRate,
             initialSukli = uiState.settings.defaultSukli,
+            initialSmallGallonPrice = uiState.smallGallonPrice,
+            initialSmallGallonCommissionRate = uiState.smallGallonCommissionRate,
             onDismiss = { showPricingDialog = false },
             onSave = onSaveSettings,
+            onSaveSmallGallon = onSaveSmallGallonSettings,
         )
     }
 

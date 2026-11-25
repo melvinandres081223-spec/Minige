@@ -27,11 +27,13 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.CreditScore
 import androidx.compose.material.icons.rounded.DateRange
 import androidx.compose.material.icons.rounded.LocalShipping
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Today
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FloatingActionButton
@@ -236,6 +238,32 @@ fun MinigeMainShell(
         snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
         topBar = {
             CenterAlignedTopAppBar(
+                navigationIcon = {
+                    if (selectedTab == MinigeTab.TODAY) {
+                        MinigeTooltipWrapper(label = "Refresh today's deliveries") {
+                            IconButton(
+                                onClick = viewModel::refreshTodayData,
+                                enabled = !uiState.isRefreshingToday,
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .testTag("top_bar_refresh_button"),
+                            ) {
+                                if (uiState.isRefreshingToday) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(18.dp),
+                                        strokeWidth = 2.dp,
+                                        color = MaterialTheme.colorScheme.primary,
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Refresh,
+                                        contentDescription = "Refresh today deliveries",
+                                    )
+                                }
+                            }
+                        }
+                    }
+                },
                 title = {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -403,6 +431,9 @@ fun MinigeMainShell(
                     onMarkPickupDelivered = { pickup ->
                         confirmingPickupDelivery = pickup
                     },
+                    onSearchQueryChange = viewModel::setTodaySearchQuery,
+                    onSelectFilterChip = viewModel::setTodayFilterChip,
+                    onRefreshToday = viewModel::refreshTodayData,
                 )
                 MinigeTab.PAUTANG -> PautangScreen(
                     uiState = uiState,
@@ -430,6 +461,7 @@ fun MinigeMainShell(
                     uiState = uiState,
                     userEmail = userEmail,
                     onSaveSettings = viewModel::updateSettings,
+                    onSaveSmallGallonSettings = viewModel::updateSmallGallonSettings,
                     onScheduleCommissionRate = viewModel::scheduleCommissionRate,
                     onUpdateQuotaTarget = viewModel::updateDailyQuotaTarget,
                     onToggleSundayMakeup = viewModel::setSundayMakeupMode,
@@ -493,8 +525,10 @@ fun MinigeMainShell(
             settings = uiState.settings,
             customers = uiState.customers,
             activeCommissionRate = uiState.activeCommissionRate,
+            smallGallonPrice = uiState.smallGallonPrice,
+            smallGallonCommissionRate = uiState.smallGallonCommissionRate,
             onDismiss = { confirmingPickupDelivery = null },
-            onConfirm = { paymentType, notes, customUnitPrice, hasCommission ->
+            onConfirm = { paymentType, notes, customUnitPrice, customPurifiedUnitPrice, customAlkalineUnitPrice, hasCommission ->
                 viewModel.updateDelivery(
                     deliveryId = pickupToConfirm.id,
                     customerName = pickupToConfirm.customerName,
@@ -504,6 +538,8 @@ fun MinigeMainShell(
                     notes = notes,
                     customUnitPrice = customUnitPrice,
                     hasCommission = hasCommission,
+                    customPurifiedUnitPrice = customPurifiedUnitPrice,
+                    customAlkalineUnitPrice = customAlkalineUnitPrice,
                 )
                 confirmingPickupDelivery = null
             },
@@ -517,6 +553,8 @@ fun MinigeMainShell(
             sukiDirectory = uiState.sukiDirectory,
             inactiveAlertsByCustomerId = uiState.inactiveAlertsByCustomerId,
             activeCommissionRate = uiState.activeCommissionRate,
+            smallGallonPrice = uiState.smallGallonPrice,
+            smallGallonCommissionRate = uiState.smallGallonCommissionRate,
             initialDelivery = editingDelivery,
             reorderPrefill = reorderPrefill,
             initialPaymentType = initialPaymentTypeForSheet,

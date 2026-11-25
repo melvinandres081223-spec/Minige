@@ -366,7 +366,7 @@ object AppDiagnosticsRunner {
                 }
                 .sumOf { it.amount }
             val expectedCashCollected = directCashSales + nonTurnedOverPautangCash
-            val expectedNetRemit = expectedCashCollected - daily.expensesTotal - daily.cashAdvanceTotal
+            val expectedNetRemit = expectedCashCollected - daily.expensesTotal - daily.cashAdvanceTotal - daily.bossRemitAdvanceTotal
             if (daily.cashCollected != expectedCashCollected ||
                 breakdown.cashCollected != expectedCashCollected ||
                 daily.netCashRemit != expectedNetRemit ||
@@ -385,7 +385,7 @@ object AppDiagnosticsRunner {
                 title = "Ledger & Remittance Math Integrity",
                 status = DiagnosticStatus.PASS,
                 summary = "All ${allDates.size} ledger day(s) pass remittance, commission, and balance checks.",
-                detail = "Verified: Net Cash to Remit == (Cash Sales + Non-Turned-Over Pautang Payments) - Route Expenses - Cash Advance across ${deliveries.size} deliveries.",
+                detail = "Verified: Net Cash to Remit == (Cash Sales + Non-Turned-Over Pautang Payments) - Route Expenses - Cash Advance - Kinuha ni Boss across ${deliveries.size} deliveries.",
             )
         } else {
             DiagnosticCheckItem(

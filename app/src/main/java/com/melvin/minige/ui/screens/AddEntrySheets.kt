@@ -81,6 +81,7 @@ import com.melvin.minige.util.CustomerDirectoryHelper
 import com.melvin.minige.util.DeliveryVoiceParser
 import com.melvin.minige.util.PaidChannel
 import com.melvin.minige.util.PaymentBreakdownHelper
+import com.melvin.minige.util.SmallGallonHelper
 import com.melvin.minige.util.SukiCustomerProfile
 import kotlinx.coroutines.delay
 import java.util.Locale
@@ -94,6 +95,8 @@ fun AddDeliverySheet(
     sukiDirectory: List<SukiCustomerProfile> = emptyList(),
     inactiveAlertsByCustomerId: Map<String, InactiveSukiAlert> = emptyMap(),
     activeCommissionRate: Double = settings.commissionRate.toDouble(),
+    smallGallonPrice: Double = SmallGallonHelper.DEFAULT_PRICE,
+    smallGallonCommissionRate: Double = SmallGallonHelper.DEFAULT_COMMISSION_RATE,
     initialDelivery: DeliveryRecord? = null,
     reorderPrefill: InactiveSukiAlert? = null,
     initialPaymentType: PaymentType? = null,
@@ -185,6 +188,10 @@ fun AddDeliverySheet(
             }
         )
     }
+    var isSmallGallon by remember(formKey) {
+        val sourceNotes = initialDelivery?.notes ?: reorderPrefill?.lastNotes
+        mutableStateOf(sourceNotes?.let { SmallGallonHelper.isMaliitTagged(it) } ?: false)
+    }
     var classification by remember(formKey) {
         val sourceNotes = initialDelivery?.notes ?: reorderPrefill?.lastNotes
         mutableStateOf(sourceNotes?.let { DeliveryVoiceParser.extractClassification(it) })
@@ -195,9 +202,11 @@ fun AddDeliverySheet(
     }
     val initialCleanNotes = remember(formKey) {
         initialDelivery?.notes?.let {
-            CustomerDirectoryHelper.stripRouteAreaTag(
-                PaymentBreakdownHelper.stripPaidWalkInTags(
-                    PaymentBreakdownHelper.stripChannelTags(DeliveryVoiceParser.stripClassificationTag(it))
+            SmallGallonHelper.stripMaliitTag(
+                CustomerDirectoryHelper.stripRouteAreaTag(
+                    PaymentBreakdownHelper.stripPaidWalkInTags(
+                        PaymentBreakdownHelper.stripChannelTags(DeliveryVoiceParser.stripClassificationTag(it))
+                    )
                 )
             )
         } ?: ""
@@ -205,7 +214,11 @@ fun AddDeliverySheet(
     var notes by remember(formKey) { mutableStateOf(initialCleanNotes) }
     var unitPriceText by remember(formKey) { mutableStateOf(initialPriceText) }
     var hasManualPriceOverride by remember(formKey) {
-        mutableStateOf(initialDelivery != null || reorderPrefill?.lastUnitPrice != null)
+        mutableStateOf(
+            initialDelivery != null ||
+                reorderPrefill?.lastUnitPrice != null ||
+                isSmallGallon
+        )
     }
     var formError by remember { mutableStateOf<String?>(null) }
 
@@ -249,8 +262,14 @@ fun AddDeliverySheet(
         if (alkalineQty > 0 && purifiedQty == 0) settings.alkalinePrice else settings.purifiedPrice
     }
 
-    LaunchedEffect(matchedCustomer?.id, matchedCustomer?.lastUnitPrice, defaultUnitPriceForSelection, hasManualPriceOverride) {
-        if (!hasManualPriceOverride) {
+    LaunchedEffect(
+        matchedCustomer?.id,
+        matchedCustomer?.lastUnitPrice,
+        defaultUnitPriceForSelection,
+        hasManualPriceOverride,
+        isSmallGallon,
+    ) {
+        if (!hasManualPriceOverride && !isSmallGallon) {
             val remembered = matchedCustomer?.lastUnitPrice
             unitPriceText = if (remembered != null && remembered >= 0.0) {
                 MinigeCustomerUtils.formatPrice(remembered)
@@ -324,7 +343,8 @@ fun AddDeliverySheet(
         }
     }
 
-    val isMixedDefaultPrice = purifiedQty > 0 &&
+    val isMixedDefaultPrice = !isSmallGallon &&
+        purifiedQty > 0 &&
         alkalineQty > 0 &&
         matchedCustomer?.lastUnitPrice == null &&
         !hasManualPriceOverride
@@ -336,12 +356,13 @@ fun AddDeliverySheet(
         isMixedDefaultPrice -> (purifiedQty * settings.purifiedPrice) + (alkalineQty * settings.alkalinePrice)
         else -> (totalGallons * parsedUnitPrice).roundToInt()
     }
-    val rateFormatted = CommissionRateHistory.formatRate(activeCommissionRate)
+    val effectiveCommissionRate = if (isSmallGallon) smallGallonCommissionRate else activeCommissionRate
+    val rateFormatted = CommissionRateHistory.formatRate(effectiveCommissionRate)
     val previewCommission = when (paymentType) {
         PaymentType.CASH, PaymentType.BANK_DEPOSIT ->
-            CommissionRateHistory.calculateCommissionAmount(totalGallons, activeCommissionRate)
+            CommissionRateHistory.calculateCommissionAmount(totalGallons, effectiveCommissionRate)
         PaymentType.PAID_WALK_IN -> if (hasPaidWalkInCommission) {
-            CommissionRateHistory.calculateCommissionAmount(totalGallons, activeCommissionRate)
+            CommissionRateHistory.calculateCommissionAmount(totalGallons, effectiveCommissionRate)
         } else {
             0
         }
@@ -514,11 +535,13 @@ fun AddDeliverySheet(
                         if (!profile.routeArea.isNullOrBlank()) {
                             routeArea = profile.routeArea
                         }
-                        hasManualPriceOverride = false
-                        unitPriceText = profile.savedUnitPrice
-                            ?.takeIf { it >= 0.0 }
-                            ?.let { MinigeCustomerUtils.formatPrice(it) }
-                            ?: defaultUnitPriceForSelection.toString()
+                        if (!isSmallGallon) {
+                            hasManualPriceOverride = false
+                            unitPriceText = profile.savedUnitPrice
+                                ?.takeIf { it >= 0.0 }
+                                ?.let { MinigeCustomerUtils.formatPrice(it) }
+                                ?: defaultUnitPriceForSelection.toString()
+                        }
                         formError = null
                     },
                 )
@@ -554,6 +577,38 @@ fun AddDeliverySheet(
                 testTagPrefix = "alkaline",
             )
 
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                FilterChip(
+                    selected = isSmallGallon,
+                    onClick = {
+                        val next = !isSmallGallon
+                        isSmallGallon = next
+                        if (next) {
+                            unitPriceText = MinigeCustomerUtils.formatPrice(smallGallonPrice)
+                            hasManualPriceOverride = true
+                        } else {
+                            hasManualPriceOverride = false
+                            val remembered = matchedCustomer?.lastUnitPrice
+                            unitPriceText = if (remembered != null && remembered >= 0.0) {
+                                MinigeCustomerUtils.formatPrice(remembered)
+                            } else {
+                                defaultUnitPriceForSelection.toString()
+                            }
+                        }
+                        formError = null
+                    },
+                    label = {
+                        Text(
+                            "Maliit na Galon (₱${MinigeCustomerUtils.formatPrice(smallGallonPrice)} • ₱${CommissionRateHistory.formatRate(smallGallonCommissionRate)}/g)"
+                        )
+                    },
+                    modifier = Modifier.testTag("maliit_na_galon_chip"),
+                )
+            }
+
             OutlinedTextField(
                 value = unitPriceText,
                 onValueChange = { raw ->
@@ -568,6 +623,7 @@ fun AddDeliverySheet(
                     val hint = when {
                         paymentType == PaymentType.PICK_UP -> "Pick-up entries earn ₱0 remittance & commission"
                         paymentType == PaymentType.PAID_WALK_IN -> "Paid at station — ₱0 to collect/remit"
+                        isSmallGallon -> "Maliit na Galon active — customer regular price preserved"
                         savedPrice != null && !hasManualPriceOverride ->
                             "Auto-filled from ${matchedCustomer.name}'s saved rate (₱${MinigeCustomerUtils.formatPrice(savedPrice)}/gal)"
                         isMixedDefaultPrice ->
@@ -829,9 +885,13 @@ fun AddDeliverySheet(
                                 notes = withWalkIn,
                                 classification = classification,
                             )
-                            val finalNotes = CustomerDirectoryHelper.applyRouteAreaTag(
+                            val withRouteArea = CustomerDirectoryHelper.applyRouteAreaTag(
                                 notes = withClassification,
                                 routeArea = routeArea,
+                            )
+                            val finalNotes = SmallGallonHelper.applyMaliitTag(
+                                notes = withRouteArea,
+                                isMaliit = isSmallGallon,
                             )
                             onSave(
                                 customerName.trim(),
@@ -948,7 +1008,11 @@ fun AddExpenseSheet(
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Text(
-                text = if (category.isCashAdvance) "Log Cash Advance" else "Log Route Expense",
+                text = when {
+                    category.isCashAdvance -> "Log Cash Advance"
+                    category.isBossRemitAdvance -> "Log Kinuha ni Boss (Remit Advance)"
+                    else -> "Log Route Expense"
+                },
                 style = MaterialTheme.typography.titleLarge,
             )
 
@@ -966,14 +1030,18 @@ fun AddExpenseSheet(
                 }
             }
 
-            if (category.isCashAdvance) {
+            if (category.isCashAdvance || category.isBossRemitAdvance) {
                 Surface(
                     shape = RoundedCornerShape(12.dp),
                     color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(
-                        text = "Ibebawas ang Cash Advance sa Net Cash to Remit ngayong araw at sa Net Remaining Commission sa Weekly Summary.",
+                        text = if (category.isBossRemitAdvance) {
+                            "Paunang remit kay boss — ibabawas sa Net Cash to Remit, hindi sa commission"
+                        } else {
+                            "Ibebawas ang Cash Advance sa Net Cash to Remit ngayong araw at sa Net Remaining Commission sa Weekly Summary."
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSecondaryContainer,
                         modifier = Modifier.padding(10.dp),
@@ -1027,7 +1095,11 @@ fun AddExpenseSheet(
                     .testTag("save_expense_button"),
             ) {
                 Text(
-                    text = if (category.isCashAdvance) "Save Cash Advance" else "Save Expense",
+                    text = when {
+                        category.isCashAdvance -> "Save Cash Advance"
+                        category.isBossRemitAdvance -> "Save Kinuha ni Boss"
+                        else -> "Save Expense"
+                    },
                     style = MaterialTheme.typography.labelLarge,
                 )
             }

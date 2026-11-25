@@ -160,6 +160,37 @@ fun RemittanceSummaryCard(
                     )
                 }
             }
+            if (breakdown.bossRemitAdvanceTotal > 0) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("remittance_kinuha_ni_boss_row"),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Payments,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.secondary,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Text(
+                            text = "Less Kinuha ni Boss",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                    Text(
+                        text = "-₱${breakdown.bossRemitAdvanceTotal}",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
 
             Surface(
                 shape = RoundedCornerShape(12.dp),

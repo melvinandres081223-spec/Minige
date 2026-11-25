@@ -68,6 +68,7 @@ data class DailyClosingData(
     val netCashToRemitToBoss: Int,
     val cashOnHand: Int,
     val pautangTurnedOverToRefilling: Int = 0,
+    val bossRemitAdvanceTotal: Int = 0,
 )
 
 object DailyClosingHelper {
@@ -101,6 +102,7 @@ object DailyClosingHelper {
             netCashToRemitToBoss = breakdown.cashToRemit,
             cashOnHand = summary.cashOnHand,
             pautangTurnedOverToRefilling = breakdown.pautangTurnedOverToRefilling,
+            bossRemitAdvanceTotal = breakdown.bossRemitAdvanceTotal,
         )
     }
 
@@ -116,7 +118,8 @@ object DailyClosingHelper {
             if (data.pautangTurnedOverToRefilling > 0) {
                 appendLine("Pautang Turned Over to Refilling: ₱${data.pautangTurnedOverToRefilling}")
             }
-            appendLine("Cash Collected: ₱${data.cashCollected} | Expenses: -₱${data.expensesTotal} | Cash Advance: -₱${data.cashAdvanceTotal}")
+            val bossAdvancePart = if (data.bossRemitAdvanceTotal > 0) " | Kinuha ni Boss: -₱${data.bossRemitAdvanceTotal}" else ""
+            appendLine("Cash Collected: ₱${data.cashCollected} | Expenses: -₱${data.expensesTotal} | Cash Advance: -₱${data.cashAdvanceTotal}$bossAdvancePart")
             appendLine("Retained Sukli: ₱${data.retainedSukli} (Default ₱${data.defaultStartingSukli})")
             append("Net Cash to Remit to Boss: ₱${data.netCashToRemitToBoss}")
         }
@@ -213,8 +216,9 @@ fun DailyClosingSheet(
                         style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Bold),
                         color = MaterialTheme.colorScheme.onPrimaryContainer,
                     )
+                    val bossSubText = if (closingData.bossRemitAdvanceTotal > 0) " − Boss ₱${closingData.bossRemitAdvanceTotal}" else ""
                     Text(
-                        text = "Cash ₱${closingData.cashCollected} − Exp ₱${closingData.expensesTotal} − Adv ₱${closingData.cashAdvanceTotal} • On Hand ₱${closingData.cashOnHand}",
+                        text = "Cash ₱${closingData.cashCollected} − Exp ₱${closingData.expensesTotal} − Adv ₱${closingData.cashAdvanceTotal}$bossSubText • On Hand ₱${closingData.cashOnHand}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f),
                     )
@@ -244,6 +248,9 @@ fun DailyClosingSheet(
                 }
                 ClosingLine("Route Expenses", "-₱${closingData.expensesTotal}")
                 ClosingLine("Cash Advance", "-₱${closingData.cashAdvanceTotal}")
+                if (closingData.bossRemitAdvanceTotal > 0) {
+                    ClosingLine("Less Kinuha ni Boss", "-₱${closingData.bossRemitAdvanceTotal}")
+                }
                 ClosingLine("Retained Customer Sukli", "₱${closingData.retainedSukli}")
                 ClosingLine("Default Starting Sukli", "₱${closingData.defaultStartingSukli}")
                 HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))

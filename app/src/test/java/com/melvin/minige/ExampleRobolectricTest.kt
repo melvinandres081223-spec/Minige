@@ -23,12 +23,16 @@ import android.content.Intent
 import com.melvin.minige.auth.DriveAuthResult
 import com.melvin.minige.auth.GoogleAuthManager
 import com.melvin.minige.domain.BossPickupFormatter
+import com.melvin.minige.domain.CustomerRecord
 import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.ExpenseCategory
 import com.melvin.minige.domain.ExpenseRecord
 import com.melvin.minige.domain.InactiveSeverity
 import com.melvin.minige.domain.InactiveSukiAlertHelper
 import com.melvin.minige.domain.MinigeCalculator
+import com.melvin.minige.domain.MinigeCustomerUtils
+import com.melvin.minige.domain.MinigeDateUtils
+import com.melvin.minige.domain.MinigeSettings
 import com.melvin.minige.domain.PaymentType
 import com.melvin.minige.domain.UtangMethod
 import com.melvin.minige.domain.UtangPaymentRecord
@@ -43,6 +47,8 @@ import com.melvin.minige.sync.DriveConsentRequiredException
 import com.melvin.minige.sync.DriveTokenProvider
 import com.melvin.minige.sync.GitHubAppUpdater
 import com.melvin.minige.sync.MinigeBackupData
+import com.melvin.minige.ui.components.DailyClosingHelper
+import com.melvin.minige.ui.components.DeliveryFilterChip
 import com.melvin.minige.ui.components.PickupChecklistHelper
 import com.melvin.minige.util.AppDiagnosticsRunner
 import com.melvin.minige.util.BossReceivablesPrefs
@@ -52,14 +58,21 @@ import com.melvin.minige.util.DiagnosticStatus
 import com.melvin.minige.util.PaidChannel
 import com.melvin.minige.util.PartialPaymentHelper
 import com.melvin.minige.util.PaymentBreakdownHelper
+import com.melvin.minige.util.SmallGallonHelper
+import com.melvin.minige.util.SmallGallonPrefs
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.charset.StandardCharsets
 import java.time.LocalDate
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -724,31 +737,37 @@ class ExampleRobolectricTest {
         val report = BossPickupFormatter.buildReport(date, entries, payments)
         val formatted = report.message
 
-        assertEquals(21, report.paidGallons) // 10 + 5 + 3 + 2 + 1
+        assertEquals(15, report.paidGallons) // 10 (Alpha) + 5 (Beta)
         assertEquals(6, report.unpaidPautangGallons) // 4 (Ate Rosa) + 2 remaining (Kuya Joel)
+        assertEquals(6, report.pautangPaidGallons) // 3 (Kuya Ben) + 2 (Mang Tomas) + 1 (Kuya Joel)
         assertEquals(27, report.grandTotalGallons)
+        assertEquals(21, report.mayCommissionGallons)
 
         assertTrue(formatted.contains("🚚 DAILY HAKOT (DELIVERED)"))
         assertTrue(formatted.contains("📅 Petsa: Nov 23, 2026 (Lunes)"))
         assertTrue(formatted.contains("• Store Alpha — 10 gals"))
         assertTrue(formatted.contains("• Store Beta — 5 gals"))
-        assertTrue(formatted.contains("• Kuya Ben Settled — 3 gals"))
-        assertTrue(formatted.contains("• Mang Tomas Partial — 2 gals"))
-        assertTrue(formatted.contains("• Kuya Joel Split — 1 gal"))
-        assertTrue(formatted.contains("DELIVERED PAID TOTAL: 21 gals"))
+        assertTrue(formatted.contains("DELIVERED PAID TOTAL: 15 gals"))
 
         assertTrue(formatted.contains("📋 PAUTANG DELIVERED TODAY"))
         assertTrue(formatted.contains("• Ate Rosa Unpaid — 4 gals"))
         assertTrue(formatted.contains("• Kuya Joel Split — 2 gals"))
-        assertTrue(formatted.contains("PAUTANG TOTAL: 6 gals"))
+        assertTrue(formatted.contains("PAUTANG DELIVERED TOTAL: 6 gals"))
+
+        assertTrue(formatted.contains("✅ PAUTANG NA NAGBAYAD TODAY"))
+        assertTrue(formatted.contains("• Kuya Ben Settled — 3 gals (utang Nov 19)"))
+        assertTrue(formatted.contains("• Mang Tomas Partial — 2 gals (utang Nov 20)"))
+        assertTrue(formatted.contains("• Kuya Joel Split — 1 gal"))
+        assertTrue(formatted.contains("PAUTANG PAID TOTAL: 6 gals"))
         assertTrue(formatted.contains("GRAND TOTAL: 27 gals"))
+        assertTrue(formatted.trimEnd().endsWith("TOTAL MAY COMMISSION: 21 gals"))
 
         // Verify PICK_UP and older unpaid Pautang are excluded, and zero peso/money figures appear
         assertFalse(formatted.contains("Nene Pickup"))
         assertFalse(formatted.contains("Old Unpaid Customer"))
         assertFalse(formatted.contains("₱"))
         assertFalse(formatted.contains("320"))
-        assertFalse(formatted.contains("Commission", ignoreCase = true))
+        assertFalse(formatted.contains("168"))
         assertFalse(formatted.contains("Remit", ignoreCase = true))
 
         // Verify Tagalog day names and empty state
@@ -756,6 +775,7 @@ class ExampleRobolectricTest {
         assertTrue(emptySunday.contains("Nov 22, 2026 (Linggo)"))
         assertTrue(emptySunday.contains("(Wala pang paid delivery ngayon)"))
         assertTrue(emptySunday.contains("(Walang pautang delivered today)"))
+        assertTrue(emptySunday.contains("(Walang pautang na nagbayad today)"))
         assertEquals("Martes", BossPickupFormatter.tagalogDayName(java.time.DayOfWeek.TUESDAY))
         assertEquals("Miyerkules", BossPickupFormatter.tagalogDayName(java.time.DayOfWeek.WEDNESDAY))
         assertEquals("Huwebes", BossPickupFormatter.tagalogDayName(java.time.DayOfWeek.THURSDAY))
@@ -2181,6 +2201,883 @@ class ExampleRobolectricTest {
             db.close()
         }
     }
+
+    @Test
+    fun `unsynced local PICK_UP entries persist across Room restart and survive Firestore snapshot merges`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        if (FirebaseApp.getApps(context).isEmpty()) {
+            FirebaseApp.initializeApp(
+                context,
+                FirebaseOptions.Builder()
+                    .setProjectId("minige-f6338")
+                    .setApplicationId("1:466130893778:android:c5d0d190ec29d4fb2be60b")
+                    .setApiKey("AIzaSyFakeKeyForRobolectricTest")
+                    .build()
+            )
+        }
+        val dbFile = File(context.cacheDir, "minige_restart_test_${System.nanoTime()}.db")
+        if (dbFile.exists()) dbFile.delete()
+
+        val firestore = FirebaseFirestore.getInstance()
+        val remote = MinigeFirestoreDataSource(db = firestore, appContext = context)
+        val userId = "rider_restart_pickup"
+        val dateKey = "2026-11-26"
+        val bgScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+        val db1 = Room.databaseBuilder(context, MinigeDatabase::class.java, dbFile.absolutePath)
+            .allowMainThreadQueries()
+            .build()
+        try {
+            val dao1 = db1.minigeDao()
+            val repo1 = MinigeRepository(
+                dao = dao1,
+                remote = remote,
+                pricingRepository = PricingRepository(dao1, remote),
+                backgroundSyncScope = bgScope,
+            )
+
+            // Add two PICK_UP entries while offline/unauthenticated (must commit synchronously to Room)
+            val r1 = repo1.addDelivery(userId, dateKey, "Kuya Mario", 6, 0, PaymentType.PICK_UP, "[Outlet]")
+            val r2 = repo1.addDelivery(userId, dateKey, "Ate Tess", 3, 1, PaymentType.PICK_UP, "[Residential]")
+            assertTrue(r1.isSuccess)
+            assertTrue(r2.isSuccess)
+        } finally {
+            bgScope.cancel()
+            db1.close()
+        }
+
+        // Re-open the same SQLite database file (simulates force-closing & relaunching Minige)
+        val db2 = Room.databaseBuilder(context, MinigeDatabase::class.java, dbFile.absolutePath)
+            .allowMainThreadQueries()
+            .build()
+        try {
+            val dao2 = db2.minigeDao()
+            val reloadedPickups = dao2.getDeliveriesForDateOnce(userId, dateKey)
+            assertEquals(2, reloadedPickups.size)
+            assertTrue(reloadedPickups.all { it.paymentType == PaymentType.PICK_UP.name && it.pendingSync })
+
+            val mario = reloadedPickups.first { it.customerName == "Kuya Mario" }
+            val tess = reloadedPickups.first { it.customerName == "Ate Tess" }
+
+            // Simulate an incoming Firestore snapshot that omits Tess AND tries to overwrite Mario with stale data
+            val incomingRemote = listOf(
+                mario.copy(
+                    purifiedGallons = 1,
+                    paymentType = PaymentType.CASH.name,
+                    pendingSync = false,
+                    updatedAtEpochMs = 1L,
+                ),
+                DeliveryEntity(
+                    id = "remote_confirmed_1",
+                    userId = userId,
+                    dateKey = dateKey,
+                    customerName = "Cloud Customer",
+                    purifiedGallons = 2,
+                    alkalineGallons = 0,
+                    purifiedUnitPrice = 30,
+                    alkalineUnitPrice = 40,
+                    totalAmount = 60,
+                    amountPaid = 60,
+                    paymentType = PaymentType.CASH.name,
+                    commissionRate = 8,
+                    commissionEarned = 16,
+                    settledDateKey = dateKey,
+                    notes = "",
+                    calendarEventId = null,
+                    pendingSync = false,
+                    isDeleted = false,
+                    createdAtEpochMs = 100L,
+                    updatedAtEpochMs = 100L,
+                ),
+            )
+
+            // Verify companion protection helpers
+            val filtered = MinigeFirestoreDataSource.filterIncomingDeliveriesProtectingUnsynced(
+                remoteDeliveries = incomingRemote,
+                localDeliveries = reloadedPickups,
+            )
+            assertEquals(listOf("remote_confirmed_1"), filtered.map { it.id })
+
+            val mergedMemory = MinigeFirestoreDataSource.mergeRemoteDeliveriesProtectingUnsynced(
+                localDeliveries = reloadedPickups,
+                remoteDeliveries = incomingRemote,
+            )
+            assertEquals(3, mergedMemory.size)
+            assertEquals(6, mergedMemory.first { it.id == mario.id }.purifiedGallons)
+            assertEquals(PaymentType.PICK_UP.name, mergedMemory.first { it.id == mario.id }.paymentType)
+            assertTrue(mergedMemory.any { it.id == tess.id && it.pendingSync })
+
+            // Verify atomic Room @Transaction merge protects both pending local rows
+            dao2.mergeRemoteDeliveriesSafely(userId, incomingRemote)
+            val afterMerge = dao2.getDeliveriesForDateOnce(userId, dateKey)
+            assertEquals(3, afterMerge.size)
+
+            val marioAfter = afterMerge.first { it.id == mario.id }
+            assertEquals(PaymentType.PICK_UP.name, marioAfter.paymentType)
+            assertEquals(6, marioAfter.purifiedGallons)
+            assertTrue(marioAfter.pendingSync)
+
+            val tessAfter = afterMerge.first { it.id == tess.id }
+            assertEquals(PaymentType.PICK_UP.name, tessAfter.paymentType)
+            assertEquals(4, tessAfter.purifiedGallons + tessAfter.alkalineGallons)
+            assertTrue(tessAfter.pendingSync)
+
+            val remoteAfter = afterMerge.first { it.id == "remote_confirmed_1" }
+            assertFalse(remoteAfter.pendingSync)
+        } finally {
+            db2.close()
+            dbFile.delete()
+        }
+    }
+
+    @Test
+    fun `FAB badge checklist sheet and pinned FOR DELIVERY section share the exact filtered PICK_UP list`() {
+        val selectedDateKey = "2026-11-26"
+        val yesterdayKey = "2026-11-25"
+        val allDeliveries = listOf(
+            DeliveryRecord(
+                id = "p_market",
+                userId = "u1",
+                dateKey = selectedDateKey,
+                customerName = "Aling Rosa",
+                purifiedGallons = 4,
+                alkalineGallons = 0,
+                purifiedUnitPrice = 30,
+                alkalineUnitPrice = 40,
+                totalAmount = 0,
+                amountPaid = 0,
+                paymentType = PaymentType.PICK_UP,
+                commissionRate = 8,
+                commissionEarned = 0,
+                settledDateKey = null,
+                notes = "[Outlet] [Area: Market]",
+                calendarEventId = null,
+                pendingSync = true,
+                createdAtEpochMs = 10L,
+                updatedAtEpochMs = 10L,
+            ),
+            DeliveryRecord(
+                id = "p_pob",
+                userId = "u1",
+                dateKey = selectedDateKey,
+                customerName = "Mang Ben",
+                purifiedGallons = 2,
+                alkalineGallons = 1,
+                purifiedUnitPrice = 30,
+                alkalineUnitPrice = 40,
+                totalAmount = 0,
+                amountPaid = 0,
+                paymentType = PaymentType.PICK_UP,
+                commissionRate = 8,
+                commissionEarned = 0,
+                settledDateKey = null,
+                notes = "[Residential] [Area: Poblacion]",
+                calendarEventId = null,
+                pendingSync = false,
+                createdAtEpochMs = 20L,
+                updatedAtEpochMs = 20L,
+            ),
+            DeliveryRecord(
+                id = "d_cash",
+                userId = "u1",
+                dateKey = selectedDateKey,
+                customerName = "Paid Cash Suki",
+                purifiedGallons = 3,
+                alkalineGallons = 0,
+                purifiedUnitPrice = 30,
+                alkalineUnitPrice = 40,
+                totalAmount = 90,
+                amountPaid = 90,
+                paymentType = PaymentType.CASH,
+                commissionRate = 8,
+                commissionEarned = 24,
+                settledDateKey = selectedDateKey,
+                notes = "[Outlet] [Area: Market]",
+                calendarEventId = null,
+                pendingSync = false,
+                createdAtEpochMs = 30L,
+                updatedAtEpochMs = 30L,
+            ),
+            DeliveryRecord(
+                id = "p_yesterday",
+                userId = "u1",
+                dateKey = yesterdayKey,
+                customerName = "Yesterday Pickup",
+                purifiedGallons = 5,
+                alkalineGallons = 0,
+                purifiedUnitPrice = 30,
+                alkalineUnitPrice = 40,
+                totalAmount = 0,
+                amountPaid = 0,
+                paymentType = PaymentType.PICK_UP,
+                commissionRate = 8,
+                commissionEarned = 0,
+                settledDateKey = null,
+                notes = "[Outlet]",
+                calendarEventId = null,
+                pendingSync = true,
+                createdAtEpochMs = 5L,
+                updatedAtEpochMs = 5L,
+            ),
+        )
+
+        val deliveriesForSelectedDate = allDeliveries.filter { it.dateKey == selectedDateKey }
+
+        // Default unfiltered view: 2 pending pick-ups for selectedDate (excludes CASH & yesterday)
+        val unfilteredPickups = PickupChecklistHelper.filterPendingPickupsForDay(
+            deliveriesForDay = deliveriesForSelectedDate,
+            searchQuery = "",
+            selectedChip = DeliveryFilterChip.ALL,
+        )
+        assertEquals(listOf("p_market", "p_pob"), unfilteredPickups.map { it.id })
+        assertEquals(2, unfilteredPickups.size)
+
+        // Search query narrows FAB badge, checklist sheet, and pinned section identically
+        val marketPickups = PickupChecklistHelper.filterPendingPickupsForDay(
+            deliveriesForDay = deliveriesForSelectedDate,
+            searchQuery = "Market",
+            selectedChip = DeliveryFilterChip.ALL,
+        )
+        assertEquals(listOf("p_market"), marketPickups.map { it.id })
+
+        // Chip filter (RESIDENTIAL) narrows to Mang Ben only
+        val residentialPickups = PickupChecklistHelper.filterPendingPickupsForDay(
+            deliveriesForDay = deliveriesForSelectedDate,
+            searchQuery = "",
+            selectedChip = DeliveryFilterChip.RESIDENTIAL,
+        )
+        assertEquals(listOf("p_pob"), residentialPickups.map { it.id })
+
+        // Chip filter (PAUTANG) leaves 0 pending pick-ups -> FAB badge hides cleanly
+        val pautangPickups = PickupChecklistHelper.filterPendingPickupsForDay(
+            deliveriesForDay = deliveriesForSelectedDate,
+            searchQuery = "",
+            selectedChip = DeliveryFilterChip.PAUTANG,
+        )
+        assertTrue(pautangPickups.isEmpty())
+    }
+
+    @Test
+    fun maliitNaGalonAppliesCustomPriceAndCommissionWithoutOverwritingCustomerPriceAndBackupsCleanly() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        if (FirebaseApp.getApps(context).isEmpty()) {
+            FirebaseApp.initializeApp(
+                context,
+                FirebaseOptions.Builder()
+                    .setProjectId("minige-f6338")
+                    .setApplicationId("1:466130893778:android:c5d0d190ec29d4fb2be60b")
+                    .setApiKey("AIzaSyFakeKeyForRobolectricTest")
+                    .build()
+            )
+        }
+        val db = Room.inMemoryDatabaseBuilder(context, MinigeDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        val bgScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val dao = db.minigeDao()
+            val firestore = FirebaseFirestore.getInstance()
+            val remote = MinigeFirestoreDataSource(db = firestore, appContext = context.applicationContext)
+            val pricingRepo = PricingRepository(dao, remote)
+            val repo = MinigeRepository(
+                dao = dao,
+                remote = remote,
+                pricingRepository = pricingRepo,
+                backgroundSyncScope = bgScope,
+            )
+
+            // Save custom small gallon price & commission rate
+            SmallGallonPrefs.savePrice(context, "u_maliit", 25.0)
+            SmallGallonPrefs.saveCommissionRate(context, "u_maliit", 6.0)
+            assertEquals(25.0, SmallGallonPrefs.loadPrice(context, "u_maliit"), 0.001)
+            assertEquals(6.0, SmallGallonPrefs.loadCommissionRate(context, "u_maliit"), 0.001)
+
+            // Regular delivery sets customer's saved unit price to ₱32
+            repo.addDelivery(
+                userId = "u_maliit",
+                dateKey = "2026-11-23",
+                customerName = "Ate Beth",
+                purifiedGallons = 2,
+                alkalineGallons = 0,
+                paymentType = PaymentType.CASH,
+                notes = "[Cash]",
+                customUnitPrice = 32.0,
+                overrideCommissionRate = 8.0,
+            )
+            assertEquals(32.0, dao.getCustomerById("ate_beth")?.lastUnitPrice ?: 0.0, 0.001)
+
+            // Small gallon delivery uses ₱25 and ₱6/gal commission, and preserves Ate Beth's ₱32 regular price
+            repo.addDelivery(
+                userId = "u_maliit",
+                dateKey = "2026-11-23",
+                customerName = "Ate Beth",
+                purifiedGallons = 3,
+                alkalineGallons = 0,
+                paymentType = PaymentType.CASH,
+                notes = SmallGallonHelper.applyMaliitTag("[Cash]", isMaliit = true),
+                customUnitPrice = 25.0,
+                overrideCommissionRate = 6.0,
+            )
+            assertEquals(32.0, dao.getCustomerById("ate_beth")?.lastUnitPrice ?: 0.0, 0.001)
+
+            val allDeliveries = dao.observeDeliveries("u_maliit").first()
+            val maliitEntry = allDeliveries.first { SmallGallonHelper.isMaliitTagged(it.notes) }
+            assertEquals(75, maliitEntry.totalAmount)
+            assertEquals(18, maliitEntry.commissionEarned)
+            assertEquals(6, maliitEntry.commissionRate)
+
+            // Toggling Maliit OFF via updateDelivery recalculates commission & price back to regular ₱32 & ₱8/gal
+            repo.updateDelivery(
+                userId = "u_maliit",
+                deliveryId = maliitEntry.id,
+                customerName = "Ate Beth",
+                purifiedGallons = 3,
+                alkalineGallons = 0,
+                paymentType = PaymentType.CASH,
+                notes = SmallGallonHelper.applyMaliitTag(maliitEntry.notes, isMaliit = false),
+                customUnitPrice = 32.0,
+                overrideCommissionRate = 8.0,
+            )
+            val updatedEntry = dao.getDeliveryById(maliitEntry.id)!!
+            assertFalse(SmallGallonHelper.isMaliitTagged(updatedEntry.notes))
+            assertEquals(96, updatedEntry.totalAmount)
+            assertEquals(24, updatedEntry.commissionEarned)
+
+            // Drive JSON serialization preserves smallGallonPrice & smallGallonCommissionRate and tolerates legacy JSON
+            val payload = MinigeBackupData(
+                backupTimestamp = 123456L,
+                userId = "u_maliit",
+                metadata = BackupMetadata(
+                    appVersion = "1.0.99",
+                    versionCode = 99,
+                ),
+                preferences = BackupAppPreferences(
+                    dailyQuotaTarget = 50,
+                    commissionRate = 8,
+                    smallGallonPrice = 25.0,
+                    smallGallonCommissionRate = 6.0,
+                ),
+            )
+            val json = DriveBackupManager.serializeBackupPayload(payload)
+            val decoded = DriveBackupManager.deserializeBackupPayload(json)
+            assertEquals(25.0, decoded.preferences.smallGallonPrice, 0.001)
+            assertEquals(6.0, decoded.preferences.smallGallonCommissionRate, 0.001)
+
+            val legacyObj = org.json.JSONObject(json)
+            legacyObj.getJSONObject("preferences").apply {
+                remove("smallGallonPrice")
+                remove("smallGallonCommissionRate")
+            }
+            val decodedLegacy = DriveBackupManager.deserializeBackupPayload(legacyObj.toString())
+            assertEquals(SmallGallonHelper.DEFAULT_PRICE, decodedLegacy.preferences.smallGallonPrice, 0.001)
+            assertEquals(SmallGallonHelper.DEFAULT_COMMISSION_RATE, decodedLegacy.preferences.smallGallonCommissionRate, 0.001)
+        } finally {
+            bgScope.cancel()
+            db.close()
+        }
+    }
+
+    @Test
+    fun bossRemitAdvanceDeductsRemitOnlyLeavesCommissionUntouchedAndRoundTripsFirestore() {
+        val date = LocalDate.of(2026, 11, 23)
+        val dateKey = "2026-11-23"
+        val cashDelivery = DeliveryRecord(
+            id = "d_cash_1",
+            userId = "u_boss",
+            dateKey = dateKey,
+            customerName = "Kuya Jo",
+            purifiedGallons = 10,
+            alkalineGallons = 0,
+            purifiedUnitPrice = 30,
+            alkalineUnitPrice = 40,
+            totalAmount = 300,
+            amountPaid = 300,
+            paymentType = PaymentType.CASH,
+            commissionRate = 8,
+            commissionEarned = 80,
+            settledDateKey = dateKey,
+            notes = "[Cash]",
+            calendarEventId = null,
+            pendingSync = false,
+            createdAtEpochMs = 100L,
+            updatedAtEpochMs = 100L,
+        )
+        val routeExpense = ExpenseRecord(
+            id = "e_gas",
+            userId = "u_boss",
+            dateKey = dateKey,
+            category = ExpenseCategory.GAS,
+            amount = 50,
+            notes = "Gasolina",
+            pendingSync = false,
+            createdAtEpochMs = 200L,
+            updatedAtEpochMs = 200L,
+        )
+        val cashAdvance = ExpenseRecord(
+            id = "e_ca",
+            userId = "u_boss",
+            dateKey = dateKey,
+            category = ExpenseCategory.CASH_ADVANCE,
+            amount = 30,
+            notes = "Personal advance",
+            pendingSync = false,
+            createdAtEpochMs = 250L,
+            updatedAtEpochMs = 250L,
+        )
+        val bossRemitAdvance = ExpenseRecord(
+            id = "e_boss_remit",
+            userId = "u_boss",
+            dateKey = dateKey,
+            category = ExpenseCategory.BOSS_REMIT_ADVANCE,
+            amount = 100,
+            notes = "Kinuha ni Boss sa kanto",
+            pendingSync = false,
+            createdAtEpochMs = 300L,
+            updatedAtEpochMs = 300L,
+        )
+
+        val expenses = listOf(routeExpense, cashAdvance, bossRemitAdvance)
+        val daily = MinigeCalculator.calculateDailySummary(
+            dateKey = dateKey,
+            deliveries = listOf(cashDelivery),
+            utangPayments = emptyList(),
+            expenses = expenses,
+            startingSukli = 200,
+        )
+        // Net Cash to Remit = 300 - 50 (route) - 30 (cash advance) - 100 (Kinuha ni Boss) = 120
+        assertEquals(50, daily.expensesTotal)
+        assertEquals(30, daily.cashAdvanceTotal)
+        assertEquals(100, daily.bossRemitAdvanceTotal)
+        assertEquals(120, daily.netCashRemit)
+        assertEquals(80, daily.dailyCommission)
+
+        val breakdown = PaymentBreakdownHelper.calculateBreakdown(
+            dateKey = dateKey,
+            deliveries = listOf(cashDelivery),
+            utangPayments = emptyList(),
+            expenses = expenses,
+        )
+        assertEquals(50, breakdown.cashExpenses)
+        assertEquals(30, breakdown.cashAdvanceTotal)
+        assertEquals(100, breakdown.bossRemitAdvanceTotal)
+        assertEquals(120, breakdown.cashToRemit)
+
+        // Weekly commission only deducts Cash Advance (₱30), NOT Kinuha ni Boss (₱100)
+        val weekly = MinigeCalculator.calculateWeeklySummary(
+            anchorDate = date,
+            deliveries = listOf(cashDelivery),
+            utangPayments = emptyList(),
+            expenses = expenses,
+        )
+        assertEquals(80, weekly.totalCommission)
+        assertEquals(30, weekly.totalCashAdvance)
+        assertEquals(100, weekly.totalBossRemitAdvance)
+        assertEquals(50, weekly.netRemainingCommission)
+
+        // Private closing summary includes Kinuha ni Boss
+        val closingData = DailyClosingHelper.compute(
+            dateKey = dateKey,
+            summary = daily,
+            breakdown = breakdown,
+            activeCommissionRate = 8.0,
+            defaultStartingSukli = 200,
+        )
+        val closingText = DailyClosingHelper.formatPrivateClosingText(closingData)
+        assertTrue(closingText.contains("Kinuha ni Boss: -₱100"))
+        assertTrue(closingText.contains("Net Cash to Remit to Boss: ₱120"))
+
+        // Firestore round-trip maps BOSS_REMIT_ADVANCE to rule-allowed category "FOOD" + [Kinuha ni Boss] tag
+        val entity = ExpenseEntity(
+            id = bossRemitAdvance.id,
+            userId = bossRemitAdvance.userId,
+            dateKey = bossRemitAdvance.dateKey,
+            category = ExpenseCategory.BOSS_REMIT_ADVANCE.name,
+            amount = bossRemitAdvance.amount,
+            notes = bossRemitAdvance.notes,
+            pendingSync = true,
+            isDeleted = false,
+            createdAtEpochMs = 300L,
+            updatedAtEpochMs = 300L,
+        )
+        val firestoreMap = entity.toFirestoreCreateMap(uid = entity.userId)
+        assertEquals("FOOD", firestoreMap["category"])
+        assertTrue((firestoreMap["notes"] as String).contains(PaymentBreakdownHelper.TAG_BOSS_REMIT_ADVANCE))
+
+        val restoredEntity = FirestoreExpense(
+            id = entity.id,
+            userId = entity.userId,
+            dateKey = entity.dateKey,
+            category = firestoreMap["category"] as String,
+            amount = entity.amount.toLong(),
+            notes = firestoreMap["notes"] as String,
+        ).toEntity()
+        assertEquals(ExpenseCategory.BOSS_REMIT_ADVANCE.name, restoredEntity.category)
+        assertEquals("Kinuha ni Boss sa kanto", restoredEntity.notes)
+
+        // AppDiagnosticsRunner ledger math check passes cleanly
+        val report = AppDiagnosticsRunner.evaluate(
+            env = DiagnosticEnvironmentSnapshot(
+                isFirebaseSignedIn = true,
+                accountLabelMasked = "ri***@minige.ph",
+                pendingSyncCount = 0,
+                hasDrivePermission = true,
+                hasDriveCachedToken = true,
+                driveBackupStatus = DriveBackupStatus.ACTIVE,
+                lastDriveBackupTimestamp = 1_000L,
+                backupMetadataSummary = null,
+                hasMicPermission = true,
+                hasCalendarPermission = true,
+                canRequestPackageInstalls = true,
+                versionName = "1.0.99",
+                versionCode = 99,
+            ),
+            selectedDateKey = dateKey,
+            deliveries = listOf(cashDelivery),
+            utangPayments = emptyList(),
+            expenses = expenses,
+            dailyLedgers = emptyList(),
+            customers = emptyList(),
+            defaultSukli = 200,
+        )
+        val mathCheck = report.items.first { it.id == "ledger_math_integrity" }
+        assertEquals(DiagnosticStatus.PASS, mathCheck.status)
+    }
+
+    @Test
+    fun `confirm pickup dialog computes mixed purified and alkaline bill separately and persists exact amounts`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        if (FirebaseApp.getApps(context).isEmpty()) {
+            FirebaseApp.initializeApp(
+                context,
+                FirebaseOptions.Builder()
+                    .setApplicationId("1:1234567890:android:testappid")
+                    .setApiKey("AIzaSyTestDummyKeyForUnitTest12345")
+                    .setProjectId("minige-unit-test")
+                    .build(),
+            )
+        }
+        val db = Room.inMemoryDatabaseBuilder(context, MinigeDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        try {
+            val dao = db.minigeDao()
+            val userId = "user-mixed-pickup"
+            val date = LocalDate.of(2026, 7, 15)
+            val dateKey = MinigeDateUtils.toKey(date)
+            val settings = MinigeSettings(
+                purifiedPrice = 30,
+                alkalinePrice = 45,
+                commissionRate = 8,
+            )
+            dao.upsertSettings(
+                AppSettingsEntity(
+                    id = "default",
+                    userId = userId,
+                    purifiedPrice = 30,
+                    alkalinePrice = 45,
+                    commissionRate = 8,
+                    defaultSukli = 0,
+                    pendingSync = false,
+                    updatedAtEpochMs = 1L,
+                )
+            )
+
+            val remote = MinigeFirestoreDataSource(FirebaseFirestore.getInstance())
+            val pricingRepo = PricingRepository(dao = dao, remote = remote)
+            val repo = MinigeRepository(
+                dao = dao,
+                remote = remote,
+                pricingRepository = pricingRepo,
+            )
+
+            // Save customer purified price = ₱30 so mixed order previously collapsed to 7 * 30 = 210
+            val savedSuki = CustomerRecord(
+                id = MinigeCustomerUtils.normalizeCustomerId("Suki Mixed"),
+                userId = userId,
+                name = "Suki Mixed",
+                lastUnitPrice = 30.0,
+                updatedAtEpochMs = 100L,
+            )
+            dao.upsertCustomer(
+                CustomerEntity(
+                    id = savedSuki.id,
+                    userId = userId,
+                    name = savedSuki.name,
+                    lastUnitPrice = savedSuki.lastUnitPrice,
+                    pendingSync = false,
+                    updatedAtEpochMs = 100L,
+                )
+            )
+
+            // 1. Mixed PICK_UP: 6 Purified + 1 Alkaline
+            repo.addDelivery(
+                userId = userId,
+                dateKey = dateKey,
+                customerName = "Suki Mixed",
+                purifiedGallons = 6,
+                alkalineGallons = 1,
+                paymentType = PaymentType.PICK_UP,
+                notes = "[Residential]",
+                customUnitPrice = null,
+            )
+            val mixedPickup = dao.getAllDeliveriesOnce(userId).first().toDomain()
+
+            val mixedInitial = PickupChecklistHelper.resolveInitialPrices(
+                delivery = mixedPickup,
+                settings = settings,
+                matchedCustomer = savedSuki,
+                isSmallGallon = false,
+            )
+            assertTrue(mixedInitial.isMixedOrder)
+            assertEquals(30.0, mixedInitial.purifiedPrice, 0.001)
+            assertEquals(45.0, mixedInitial.alkalinePrice, 0.001)
+
+            // Preview Total Bill: (6 * 30) + (1 * 45) = ₱225, Commission: 7 * 8 = ₱56
+            assertEquals(
+                225,
+                PickupChecklistHelper.computePreviewBill(
+                    delivery = mixedPickup,
+                    paymentType = PaymentType.CASH,
+                    purifiedUnitPrice = mixedInitial.purifiedPrice,
+                    alkalineUnitPrice = mixedInitial.alkalinePrice,
+                ),
+            )
+            assertEquals(
+                56,
+                PickupChecklistHelper.computePreviewCommission(
+                    delivery = mixedPickup,
+                    paymentType = PaymentType.CASH,
+                    commissionRate = 8.0,
+                    hasPaidWalkInCommission = true,
+                ),
+            )
+
+            // Paid Walk-in sets Total Bill to ₱0 while keeping ₱56 commission (or ₱0 when toggled off)
+            assertEquals(
+                0,
+                PickupChecklistHelper.computePreviewBill(
+                    delivery = mixedPickup,
+                    paymentType = PaymentType.PAID_WALK_IN,
+                    purifiedUnitPrice = mixedInitial.purifiedPrice,
+                    alkalineUnitPrice = mixedInitial.alkalinePrice,
+                ),
+            )
+            assertEquals(
+                56,
+                PickupChecklistHelper.computePreviewCommission(
+                    delivery = mixedPickup,
+                    paymentType = PaymentType.PAID_WALK_IN,
+                    commissionRate = 8.0,
+                    hasPaidWalkInCommission = true,
+                ),
+            )
+            assertEquals(
+                0,
+                PickupChecklistHelper.computePreviewCommission(
+                    delivery = mixedPickup,
+                    paymentType = PaymentType.PAID_WALK_IN,
+                    commissionRate = 8.0,
+                    hasPaidWalkInCommission = false,
+                ),
+            )
+
+            // Confirm mixed PICK_UP as CASH with separate purified=30 and alkaline=45
+            val confirmResult = repo.updateDelivery(
+                userId = userId,
+                deliveryId = mixedPickup.id,
+                customerName = mixedPickup.customerName,
+                purifiedGallons = mixedPickup.purifiedGallons,
+                alkalineGallons = mixedPickup.alkalineGallons,
+                paymentType = PaymentType.CASH,
+                notes = PickupChecklistHelper.buildConvertedDeliveryNotes(mixedPickup.notes, PaymentType.CASH, true),
+                customUnitPrice = null,
+                hasCommission = true,
+                overrideCommissionRate = 8.0,
+                customPurifiedUnitPrice = mixedInitial.purifiedPrice,
+                customAlkalineUnitPrice = mixedInitial.alkalinePrice,
+            )
+            assertTrue(confirmResult.isSuccess)
+
+            val savedMixed = dao.getDeliveryById(mixedPickup.id)?.toDomain()!!
+            assertEquals(225, savedMixed.totalAmount)
+            assertEquals(225, savedMixed.amountPaid)
+            assertEquals(30, savedMixed.purifiedUnitPrice)
+            assertEquals(45, savedMixed.alkalineUnitPrice)
+            assertEquals(56, savedMixed.commissionEarned)
+
+            val summary = MinigeCalculator.calculateDailySummary(
+                dateKey = dateKey,
+                deliveries = listOf(savedMixed),
+                utangPayments = emptyList(),
+                expenses = emptyList(),
+                startingSukli = 0,
+            )
+            assertEquals(225, summary.cashCollected)
+            assertEquals(225, summary.netCashRemit)
+            assertEquals(56, summary.dailyCommission)
+
+            // 2. Alkaline-only (0 Purified + 2 Alkaline) must pre-fill alkalinePrice (45) instead of customer's purified lastUnitPrice (30)
+            val alkalineOnlyPickup = DeliveryRecord(
+                id = "alk-only-1",
+                userId = userId,
+                dateKey = dateKey,
+                customerName = "Suki Mixed",
+                purifiedGallons = 0,
+                alkalineGallons = 2,
+                purifiedUnitPrice = 30,
+                alkalineUnitPrice = 45,
+                totalAmount = 0,
+                amountPaid = 0,
+                paymentType = PaymentType.PICK_UP,
+                commissionRate = 8,
+                commissionEarned = 0,
+                settledDateKey = null,
+                notes = "",
+                calendarEventId = null,
+                pendingSync = false,
+                createdAtEpochMs = 1L,
+                updatedAtEpochMs = 1L,
+            )
+            val alkalineInitial = PickupChecklistHelper.resolveInitialPrices(
+                delivery = alkalineOnlyPickup,
+                settings = settings,
+                matchedCustomer = savedSuki,
+                isSmallGallon = false,
+            )
+            assertFalse(alkalineInitial.isMixedOrder)
+            assertTrue(alkalineInitial.isAlkalineOnly)
+            assertEquals(45.0, alkalineInitial.singleUnitPrice, 0.001)
+            assertEquals(
+                90,
+                PickupChecklistHelper.computePreviewBill(
+                    delivery = alkalineOnlyPickup,
+                    paymentType = PaymentType.CASH,
+                    purifiedUnitPrice = alkalineInitial.singleUnitPrice,
+                    alkalineUnitPrice = alkalineInitial.singleUnitPrice,
+                ),
+            )
+
+            // 3. Purified-only (4 Purified + 0 Alkaline) keeps customer's saved purified price (30)
+            val purifiedOnlyPickup = alkalineOnlyPickup.copy(
+                id = "pur-only-1",
+                purifiedGallons = 4,
+                alkalineGallons = 0,
+            )
+            val purifiedInitial = PickupChecklistHelper.resolveInitialPrices(
+                delivery = purifiedOnlyPickup,
+                settings = settings,
+                matchedCustomer = savedSuki.copy(lastUnitPrice = 28.0),
+                isSmallGallon = false,
+            )
+            assertFalse(purifiedInitial.isMixedOrder)
+            assertTrue(purifiedInitial.isPurifiedOnly)
+            assertEquals(28.0, purifiedInitial.singleUnitPrice, 0.001)
+            assertEquals(
+                112,
+                PickupChecklistHelper.computePreviewBill(
+                    delivery = purifiedOnlyPickup,
+                    paymentType = PaymentType.CASH,
+                    purifiedUnitPrice = purifiedInitial.singleUnitPrice,
+                    alkalineUnitPrice = purifiedInitial.singleUnitPrice,
+                ),
+            )
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun `daily hakot separates same day deliveries from settled prior day pautang and appends total may commission gallons`() {
+        val date = LocalDate.of(2026, 11, 25)
+        val todayKey = "2026-11-25"
+        val nov23Key = "2026-11-23"
+
+        val entries = listOf(
+            DeliveryRecord(
+                id = "d_pards",
+                userId = "u1",
+                dateKey = todayKey,
+                customerName = "pards",
+                purifiedGallons = 3,
+                alkalineGallons = 0,
+                purifiedUnitPrice = 30,
+                alkalineUnitPrice = 45,
+                totalAmount = 90,
+                amountPaid = 90,
+                paymentType = PaymentType.CASH,
+                commissionRate = 8,
+                commissionEarned = 24,
+                settledDateKey = todayKey,
+                notes = "",
+                calendarEventId = null,
+                pendingSync = false,
+                createdAtEpochMs = 100L,
+                updatedAtEpochMs = 100L,
+            ),
+            DeliveryRecord(
+                id = "d_baingan",
+                userId = "u1",
+                dateKey = todayKey,
+                customerName = "baingan",
+                purifiedGallons = 2,
+                alkalineGallons = 0,
+                purifiedUnitPrice = 30,
+                alkalineUnitPrice = 45,
+                totalAmount = 60,
+                amountPaid = 60,
+                paymentType = PaymentType.CASH,
+                commissionRate = 8,
+                commissionEarned = 16,
+                settledDateKey = todayKey,
+                notes = "",
+                calendarEventId = null,
+                pendingSync = false,
+                createdAtEpochMs = 200L,
+                updatedAtEpochMs = 200L,
+            ),
+            DeliveryRecord(
+                id = "d_mnb",
+                userId = "u1",
+                dateKey = nov23Key,
+                customerName = "mnb",
+                purifiedGallons = 4,
+                alkalineGallons = 0,
+                purifiedUnitPrice = 30,
+                alkalineUnitPrice = 45,
+                totalAmount = 120,
+                amountPaid = 120,
+                paymentType = PaymentType.PAUTANG,
+                commissionRate = 8,
+                commissionEarned = 32,
+                settledDateKey = todayKey,
+                notes = "",
+                calendarEventId = null,
+                pendingSync = false,
+                createdAtEpochMs = 50L,
+                updatedAtEpochMs = 300L,
+            ),
+        )
+
+        val hakot = BossPickupFormatter.buildReport(date = date, deliveries = entries)
+        val report = hakot.message
+
+        assertEquals(5, hakot.paidGallons)
+        assertEquals(0, hakot.unpaidPautangGallons)
+        assertEquals(4, hakot.pautangPaidGallons)
+        assertEquals(9, hakot.grandTotalGallons)
+        assertEquals(9, hakot.mayCommissionGallons)
+
+        assertTrue(report.contains("DELIVERED PAID TOTAL: 5 gals"))
+        assertTrue(report.contains("PAUTANG DELIVERED TOTAL: 0 gals"))
+        assertTrue(report.contains("✅ PAUTANG NA NAGBAYAD TODAY"))
+        assertTrue(report.contains("• mnb — 4 gals (utang Nov 23)"))
+        assertTrue(report.contains("PAUTANG PAID TOTAL: 4 gals"))
+        assertTrue(report.contains("GRAND TOTAL: 9 gals"))
+        assertTrue(report.trimEnd().endsWith("TOTAL MAY COMMISSION: 9 gals"))
+        assertFalse(report.contains("₱"))
+        assertFalse(report.contains("72"))
+    }
 }
+
 
 

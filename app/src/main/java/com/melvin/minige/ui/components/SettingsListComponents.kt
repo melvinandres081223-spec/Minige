@@ -532,13 +532,22 @@ fun PricingSettingsDialog(
     initialAlkaline: Int,
     initialRate: Int,
     initialSukli: Int,
+    initialSmallGallonPrice: Double = com.melvin.minige.util.SmallGallonHelper.DEFAULT_PRICE,
+    initialSmallGallonCommissionRate: Double = com.melvin.minige.util.SmallGallonHelper.DEFAULT_COMMISSION_RATE,
     onDismiss: () -> Unit,
     onSave: (purified: Int, alkaline: Int, rate: Int, defaultSukli: Int) -> Unit,
+    onSaveSmallGallon: (smallPrice: Double, smallCommissionRate: Double) -> Unit = { _, _ -> },
 ) {
     var purifiedText by remember(initialPurified) { mutableStateOf(initialPurified.toString()) }
     var alkalineText by remember(initialAlkaline) { mutableStateOf(initialAlkaline.toString()) }
     var rateText by remember(initialRate) { mutableStateOf(initialRate.toString()) }
     var sukliText by remember(initialSukli) { mutableStateOf(initialSukli.toString()) }
+    var smallPriceText by remember(initialSmallGallonPrice) {
+        mutableStateOf(com.melvin.minige.domain.MinigeCustomerUtils.formatPrice(initialSmallGallonPrice))
+    }
+    var smallCommText by remember(initialSmallGallonCommissionRate) {
+        mutableStateOf(com.melvin.minige.util.CommissionRateHistory.formatRate(initialSmallGallonCommissionRate))
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -587,6 +596,28 @@ fun PricingSettingsDialog(
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     modifier = Modifier.fillMaxWidth().testTag("settings_sukli_input"),
                 )
+                HorizontalDivider(modifier = Modifier.padding(vertical = 2.dp))
+                Text(
+                    text = "Maliit na Galon (Small Gallon)",
+                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                OutlinedTextField(
+                    value = smallPriceText,
+                    onValueChange = { smallPriceText = sanitizeDecimalSetting(it) },
+                    label = { Text("Maliit na Galon Price (₱)") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth().testTag("settings_maliit_price_input"),
+                )
+                OutlinedTextField(
+                    value = smallCommText,
+                    onValueChange = { smallCommText = sanitizeDecimalSetting(it) },
+                    label = { Text("Maliit Commission Rate (₱/gal)") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth().testTag("settings_maliit_comm_input"),
+                )
             }
         },
         confirmButton = {
@@ -597,6 +628,10 @@ fun PricingSettingsDialog(
                         alkalineText.toIntOrNull() ?: initialAlkaline,
                         rateText.toIntOrNull() ?: initialRate,
                         sukliText.toIntOrNull() ?: initialSukli,
+                    )
+                    onSaveSmallGallon(
+                        smallPriceText.toDoubleOrNull()?.takeIf { it >= 0.0 } ?: initialSmallGallonPrice,
+                        smallCommText.toDoubleOrNull()?.takeIf { it >= 0.0 } ?: initialSmallGallonCommissionRate,
                     )
                     onDismiss()
                 },
@@ -618,6 +653,22 @@ fun PricingSettingsDialog(
             }
         },
     )
+}
+
+private fun sanitizeDecimalSetting(raw: String): String {
+    val sb = StringBuilder()
+    var hasDot = false
+    for (ch in raw) {
+        if (ch.isDigit()) {
+            sb.append(ch)
+        } else if (ch == '.' && !hasDot) {
+            if (sb.isEmpty()) sb.append('0')
+            sb.append('.')
+            hasDot = true
+        }
+        if (sb.length >= 6) break
+    }
+    return sb.toString()
 }
 
 @Composable

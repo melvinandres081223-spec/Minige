@@ -104,7 +104,7 @@ data class ExpenseEntity(
         dateKey = dateKey,
         category = ExpenseCategory.fromEntityRaw(category, notes),
         amount = amount,
-        notes = PaymentBreakdownHelper.stripCashAdvanceTag(notes),
+        notes = PaymentBreakdownHelper.stripExpenseCategoryTags(notes),
         pendingSync = pendingSync,
         createdAtEpochMs = createdAtEpochMs,
         updatedAtEpochMs = updatedAtEpochMs,

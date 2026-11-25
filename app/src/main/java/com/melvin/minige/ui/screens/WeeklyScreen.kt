@@ -123,8 +123,13 @@ fun WeeklyScreen(
                                 modifier = Modifier.testTag("weekly_net_remaining_commission"),
                             )
                         }
+                        val bossRemitSegment = if (weekly.totalBossRemitAdvance > 0) {
+                            " • Kinuha ni Boss: ₱${weekly.totalBossRemitAdvance}"
+                        } else {
+                            ""
+                        }
                         Text(
-                            text = "Cash: ₱${weekly.totalCashCollected} • Bank / Online: ₱${weekly.totalBankDeposit} • Exp: ₱${weekly.totalExpenses}",
+                            text = "Cash: ₱${weekly.totalCashCollected} • Bank / Online: ₱${weekly.totalBankDeposit} • Exp: ₱${weekly.totalExpenses}$bossRemitSegment",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.9f),
                         )

@@ -46,6 +46,7 @@ data class PaymentChannelBreakdown(
     val commissionFromPaidWalkIn: Int = 0,
     val cashAdvanceTotal: Int = 0,
     val pautangTurnedOverToRefilling: Int = 0,
+    val bossRemitAdvanceTotal: Int = 0,
 )
 
 object PaymentBreakdownHelper {
@@ -56,6 +57,7 @@ object PaymentBreakdownHelper {
     const val TAG_PAID_WALK_IN = "[Paid Walk-in]"
     const val TAG_NO_COMMISSION = "[No Commission]"
     const val TAG_CASH_ADVANCE = "[Cash Advance]"
+    const val TAG_BOSS_REMIT_ADVANCE = "[Kinuha ni Boss]"
     const val TAG_TURNED_OVER_REFILLING = "[Turned Over to Refilling]"
 
     fun resolveDeliveryChannel(delivery: DeliveryRecord): PaidChannel? {
@@ -133,8 +135,31 @@ object PaymentBreakdownHelper {
     }
 
     fun applyCashAdvanceTag(notes: String): String {
-        val cleaned = stripCashAdvanceTag(notes)
+        val cleaned = stripExpenseCategoryTags(notes)
         return if (cleaned.isEmpty()) TAG_CASH_ADVANCE else "$TAG_CASH_ADVANCE $cleaned".take(300)
+    }
+
+    fun isBossRemitAdvanceTagged(notes: String): Boolean =
+        notes.contains(TAG_BOSS_REMIT_ADVANCE, ignoreCase = true)
+
+    fun stripBossRemitAdvanceTag(notes: String): String {
+        return notes
+            .replace(TAG_BOSS_REMIT_ADVANCE, "", ignoreCase = true)
+            .replace(Regex("\\s{2,}"), " ")
+            .trim()
+    }
+
+    fun applyBossRemitAdvanceTag(notes: String): String {
+        val cleaned = stripExpenseCategoryTags(notes)
+        return if (cleaned.isEmpty()) TAG_BOSS_REMIT_ADVANCE else "$TAG_BOSS_REMIT_ADVANCE $cleaned".take(300)
+    }
+
+    fun stripExpenseCategoryTags(notes: String): String {
+        return notes
+            .replace(TAG_CASH_ADVANCE, "", ignoreCase = true)
+            .replace(TAG_BOSS_REMIT_ADVANCE, "", ignoreCase = true)
+            .replace(Regex("\\s{2,}"), " ")
+            .trim()
     }
 
     fun isTurnedOverToRefilling(notes: String): Boolean =
@@ -175,10 +200,13 @@ object PaymentBreakdownHelper {
         val paymentsForDate = utangPayments.filter { it.dateKey == dateKey }
         val expenseEntriesForDate = expenses.filter { it.dateKey == dateKey }
         val routeExpensesTotal = expenseEntriesForDate
-            .filter { !it.category.isCashAdvance }
+            .filter { !it.category.isCashAdvance && !it.category.isBossRemitAdvance }
             .sumOf { it.amount }
         val cashAdvanceTotal = expenseEntriesForDate
             .filter { it.category.isCashAdvance }
+            .sumOf { it.amount }
+        val bossRemitAdvanceTotal = expenseEntriesForDate
+            .filter { it.category.isBossRemitAdvance }
             .sumOf { it.amount }
 
         val directCash = deliveriesForDate.filter { resolveDeliveryChannel(it) == PaidChannel.CASH }
@@ -260,7 +288,7 @@ object PaymentBreakdownHelper {
             bankDepositGallons = bankOnlineGallons,
             cashCollected = cashCollected,
             cashExpenses = routeExpensesTotal,
-            cashToRemit = cashCollected - routeExpensesTotal - cashAdvanceTotal,
+            cashToRemit = cashCollected - routeExpensesTotal - cashAdvanceTotal - bossRemitAdvanceTotal,
             bankTransferAmount = 0,
             bankDepositAmount = bankPaidTotal,
             bankPaidTotal = bankPaidTotal,
@@ -272,6 +300,7 @@ object PaymentBreakdownHelper {
             commissionFromPaidWalkIn = commissionFromPaidWalkIn,
             cashAdvanceTotal = cashAdvanceTotal,
             pautangTurnedOverToRefilling = pautangTurnedOverToRefilling,
+            bossRemitAdvanceTotal = bossRemitAdvanceTotal,
         )
     }
 }

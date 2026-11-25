@@ -23,6 +23,7 @@ import com.melvin.minige.domain.ExpenseRecord
 import com.melvin.minige.domain.InactiveSukiAlert
 import com.melvin.minige.domain.InactiveSukiAlertHelper
 import com.melvin.minige.domain.MinigeCalculator
+import com.melvin.minige.domain.MinigeCustomerUtils
 import com.melvin.minige.domain.MinigeDateUtils
 import com.melvin.minige.domain.MinigeSettings
 import com.melvin.minige.domain.PaymentType
@@ -40,6 +41,9 @@ import com.melvin.minige.sync.BackupMetadataSummary
 import com.melvin.minige.sync.DriveBackupStatus
 import com.melvin.minige.sync.DriveConsentRequiredException
 import com.melvin.minige.ui.components.DailyQuotaPrefs
+import com.melvin.minige.ui.components.DeliveryFilterChip
+import com.melvin.minige.ui.components.DeliveryFilterHelper
+import com.melvin.minige.ui.components.PickupChecklistHelper
 import com.melvin.minige.ui.components.SukiAnalyticsHelper
 import com.melvin.minige.ui.components.SundayMakeupHelper
 import com.melvin.minige.ui.components.WeeklySukiAnalytics
@@ -54,6 +58,8 @@ import com.melvin.minige.util.CustomerDirectoryHelper
 import com.melvin.minige.util.PaidChannel
 import com.melvin.minige.util.PaymentBreakdownHelper
 import com.melvin.minige.util.PaymentChannelBreakdown
+import com.melvin.minige.util.SmallGallonHelper
+import com.melvin.minige.util.SmallGallonPrefs
 import com.melvin.minige.util.SukiCustomerProfile
 import com.melvin.minige.util.UndoStateHelper
 import com.melvin.minige.util.UndoableAction
@@ -83,7 +89,11 @@ data class MinigeUiState(
     val selectedDateKey: String = MinigeDateUtils.toKey(LocalDate.now()),
     val settings: MinigeSettings = MinigeSettings(),
     val deliveriesForDay: List<DeliveryRecord> = emptyList(),
+    val todaySearchQuery: String = "",
+    val todayFilterChip: DeliveryFilterChip = DeliveryFilterChip.ALL,
+    val filteredDeliveriesForDay: List<DeliveryRecord> = emptyList(),
     val pickupsForDay: List<DeliveryRecord> = emptyList(),
+    val completedDeliveriesForDay: List<DeliveryRecord> = emptyList(),
     val expensesForDay: List<ExpenseRecord> = emptyList(),
     val activeUtangList: List<DeliveryRecord> = emptyList(),
     val settledUtangList: List<DeliveryRecord> = emptyList(),
@@ -117,14 +127,19 @@ data class MinigeUiState(
     val bossPickupMessage: String = "",
     val bossHakotPaidGallons: Int = 0,
     val bossHakotPautangGallons: Int = 0,
+    val bossHakotPautangPaidGallons: Int = 0,
+    val bossHakotMayCommissionGallons: Int = 0,
     val customers: List<CustomerRecord> = emptyList(),
     val sukiDirectory: List<SukiCustomerProfile> = emptyList(),
     val commissionRateHistory: List<CommissionRateEntry> = emptyList(),
     val activeCommissionRate: Double = CommissionRateHistory.DEFAULT_RATE,
+    val smallGallonPrice: Double = SmallGallonHelper.DEFAULT_PRICE,
+    val smallGallonCommissionRate: Double = SmallGallonHelper.DEFAULT_COMMISSION_RATE,
     val dailyQuotaTarget: Int = DailyQuotaPrefs.DEFAULT_QUOTA_GALLONS,
     val weeklySukiAnalytics: WeeklySukiAnalytics = WeeklySukiAnalytics(),
     val pendingSyncCount: Int = 0,
     val isSyncing: Boolean = false,
+    val isRefreshingToday: Boolean = false,
     val isCalendarSyncing: Boolean = false,
     val statusMessage: String? = null,
     val driveBackupStatus: DriveBackupStatus = DriveBackupStatus.NEEDS_PERMISSION,
@@ -174,7 +189,19 @@ class MinigeViewModel(
         appContext?.let { DailyQuotaPrefs.loadQuotaTarget(it, currentUserId) }
             ?: DailyQuotaPrefs.DEFAULT_QUOTA_GALLONS
     )
+    private val _smallGallonPrice = MutableStateFlow(
+        appContext?.let { SmallGallonPrefs.loadPrice(it, currentUserId) }
+            ?: SmallGallonHelper.DEFAULT_PRICE
+    )
+    private val _smallGallonCommissionRate = MutableStateFlow(
+        appContext?.let { SmallGallonPrefs.loadCommissionRate(it, currentUserId) }
+            ?: SmallGallonHelper.DEFAULT_COMMISSION_RATE
+    )
     private val _isSyncing = MutableStateFlow(false)
+    private val _isRefreshingToday = MutableStateFlow(false)
+    private val _refreshNonce = MutableStateFlow(0L)
+    private val _todaySearchQuery = MutableStateFlow("")
+    private val _todayFilterChip = MutableStateFlow(DeliveryFilterChip.ALL)
     private val _isCalendarSyncing = MutableStateFlow(false)
     private val _statusMessage = MutableStateFlow<String?>(null)
     private val _driveBackupStatus = MutableStateFlow(
@@ -297,6 +324,8 @@ class MinigeViewModel(
         val quotaTarget: Int,
         val autoBackupBeforeUpdate: Boolean,
         val lastLocalBackupPath: String,
+        val smallGallonPrice: Double,
+        val smallGallonCommissionRate: Double,
     )
 
     private data class DriveBackupSnapshot(
@@ -313,24 +342,46 @@ class MinigeViewModel(
             _sundayMakeupEnabled,
             _commissionRateHistory,
             _dailyQuotaTarget,
-            combine(_autoBackupBeforeUpdate, _lastLocalBackupPath) { autoBackup, localPath ->
-                autoBackup to localPath
+            combine(
+                _autoBackupBeforeUpdate,
+                _lastLocalBackupPath,
+                _smallGallonPrice,
+                _smallGallonCommissionRate,
+            ) { autoBackup, localPath, smallPrice, smallRate ->
+                Pair(autoBackup to localPath, smallPrice to smallRate)
             },
-        ) { date, sundayEnabled, rateHist, quotaTarget, backupPrefPair ->
+        ) { date, sundayEnabled, rateHist, quotaTarget, backupAndSmall ->
             ViewPrefsSnapshot(
                 date = date,
                 sundayEnabled = sundayEnabled,
                 rateHistory = rateHist,
                 quotaTarget = quotaTarget,
-                autoBackupBeforeUpdate = backupPrefPair.first,
-                lastLocalBackupPath = backupPrefPair.second,
+                autoBackupBeforeUpdate = backupAndSmall.first.first,
+                lastLocalBackupPath = backupAndSmall.first.second,
+                smallGallonPrice = backupAndSmall.second.first,
+                smallGallonCommissionRate = backupAndSmall.second.second,
             )
         },
         localDataFlow,
         combine(_driveBackupStatus, _driveLastBackupTimestamp, _isDriveBackingUp, _driveBackupPreview, _showRestorePreviewDialog) { status, lastTs, backingUp, preview, showPreview ->
             DriveBackupSnapshot(status, lastTs, backingUp, preview, showPreview)
         },
-        combine(_isSyncing, _bossReceivables) { syncing, receivables -> syncing to receivables },
+        combine(
+            _isSyncing,
+            _bossReceivables,
+            _todaySearchQuery,
+            _todayFilterChip,
+            combine(_isRefreshingToday, _refreshNonce) { refreshing, nonce -> refreshing to nonce },
+        ) { syncing, receivables, searchQuery, filterChip, refreshPair ->
+            SyncFilterSnapshot(
+                syncing = syncing,
+                bossReceivables = receivables,
+                todaySearchQuery = searchQuery,
+                todayFilterChip = filterChip,
+                isRefreshingToday = refreshPair.first,
+                refreshNonce = refreshPair.second,
+            )
+        },
         combine(
             _isCalendarSyncing,
             _statusMessage,
@@ -340,9 +391,12 @@ class MinigeViewModel(
         ) { calSyncing, status, bulkSummary, diagReport, runningDiag ->
             UiExtrasSnapshot(calSyncing, status, bulkSummary, diagReport, runningDiag)
         },
-    ) { prefs, bundle, driveSnap, syncAndReceivables, extras ->
-        val syncing = syncAndReceivables.first
-        val bossReceivables = syncAndReceivables.second
+    ) { prefs, bundle, driveSnap, syncAndFilters, extras ->
+        val syncing = syncAndFilters.syncing
+        val bossReceivables = syncAndFilters.bossReceivables
+        val todaySearchQuery = syncAndFilters.todaySearchQuery
+        val todayFilterChip = syncAndFilters.todayFilterChip
+        val isRefreshingToday = syncAndFilters.isRefreshingToday
         val calSyncing = extras.calSyncing
         val status = extras.status
         val bulkSummary = extras.bulkSummary
@@ -353,7 +407,17 @@ class MinigeViewModel(
         latestBundle = bundle
         val dateKey = MinigeDateUtils.toKey(date)
         val deliveriesForDay = bundle.deliveries.filter { it.dateKey == dateKey }
-        val pickupsForDay = deliveriesForDay.filter { it.paymentType == PaymentType.PICK_UP }
+        val filteredDeliveriesForDay = DeliveryFilterHelper.filterDeliveries(
+            deliveries = deliveriesForDay,
+            searchQuery = todaySearchQuery,
+            selectedChip = todayFilterChip,
+        )
+        val pickupsForDay = PickupChecklistHelper.filterPendingPickupsForDay(
+            deliveriesForDay = deliveriesForDay,
+            searchQuery = todaySearchQuery,
+            selectedChip = todayFilterChip,
+        )
+        val completedDeliveriesForDay = filteredDeliveriesForDay.filter { it.paymentType != PaymentType.PICK_UP }
         val expensesForDay = bundle.expenses.filter { it.dateKey == dateKey }
 
         val ledgerSukli = bundle.ledgers
@@ -441,7 +505,11 @@ class MinigeViewModel(
             selectedDateKey = dateKey,
             settings = bundle.settings,
             deliveriesForDay = deliveriesForDay,
+            todaySearchQuery = todaySearchQuery,
+            todayFilterChip = todayFilterChip,
+            filteredDeliveriesForDay = filteredDeliveriesForDay,
             pickupsForDay = pickupsForDay,
+            completedDeliveriesForDay = completedDeliveriesForDay,
             expensesForDay = expensesForDay,
             activeUtangList = activeUtang,
             settledUtangList = settledUtang,
@@ -454,14 +522,19 @@ class MinigeViewModel(
             bossPickupMessage = hakotReport.message,
             bossHakotPaidGallons = hakotReport.paidGallons,
             bossHakotPautangGallons = hakotReport.unpaidPautangGallons,
+            bossHakotPautangPaidGallons = hakotReport.pautangPaidGallons,
+            bossHakotMayCommissionGallons = hakotReport.mayCommissionGallons,
             customers = mergedCustomers,
             sukiDirectory = sukiDirectory,
             commissionRateHistory = rateHist,
             activeCommissionRate = activeRate,
+            smallGallonPrice = prefs.smallGallonPrice,
+            smallGallonCommissionRate = prefs.smallGallonCommissionRate,
             dailyQuotaTarget = quotaTarget,
             weeklySukiAnalytics = weeklySukiAnalytics,
             pendingSyncCount = pendingCount,
             isSyncing = syncing,
+            isRefreshingToday = isRefreshingToday,
             isCalendarSyncing = calSyncing,
             statusMessage = status,
             driveBackupStatus = driveSnap.status,
@@ -497,6 +570,34 @@ class MinigeViewModel(
         _selectedDate.value = LocalDate.now()
     }
 
+    fun setTodaySearchQuery(query: String) {
+        _todaySearchQuery.value = query
+    }
+
+    fun setTodayFilterChip(chip: DeliveryFilterChip) {
+        _todayFilterChip.value = chip
+    }
+
+    fun refreshTodayData() {
+        if (_isRefreshingToday.value) return
+        val dateKey = MinigeDateUtils.toKey(_selectedDate.value)
+        viewModelScope.launch {
+            _isRefreshingToday.value = true
+            try {
+                _refreshNonce.value = _refreshNonce.value + 1L
+                val result = repository.refreshTodayData(currentUserId, dateKey)
+                _refreshNonce.value = _refreshNonce.value + 1L
+                if (result.isFailure) {
+                    _events.tryEmit(MinigeEvent.ShowMessage("Showing saved offline entries."))
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } finally {
+                _isRefreshingToday.value = false
+            }
+        }
+    }
+
     fun setSundayMakeupMode(enabled: Boolean) {
         _sundayMakeupEnabled.value = enabled
         appContext?.let { com.melvin.minige.ui.components.SundayMakeupPrefs.setEnabled(it, currentUserId, enabled) }
@@ -508,6 +609,21 @@ class MinigeViewModel(
             ?: targetGallons.coerceIn(DailyQuotaPrefs.MIN_QUOTA_GALLONS, DailyQuotaPrefs.MAX_QUOTA_GALLONS)
         _dailyQuotaTarget.value = saved
         _events.tryEmit(MinigeEvent.ShowMessage("Daily hakot quota set to $saved gal"))
+        scheduleAutoBackup()
+    }
+
+    fun updateSmallGallonSettings(price: Double, commissionRate: Double) {
+        val savedPrice = appContext?.let { SmallGallonPrefs.savePrice(it, currentUserId, price) }
+            ?: price.coerceAtLeast(0.0)
+        val savedRate = appContext?.let { SmallGallonPrefs.saveCommissionRate(it, currentUserId, commissionRate) }
+            ?: commissionRate.coerceAtLeast(0.0)
+        _smallGallonPrice.value = savedPrice
+        _smallGallonCommissionRate.value = savedRate
+        _events.tryEmit(
+            MinigeEvent.ShowMessage(
+                "Maliit na galon updated: ₱${MinigeCustomerUtils.formatPrice(savedPrice)}/gal • Comm ₱${CommissionRateHistory.formatRate(savedRate)}/gal"
+            )
+        )
         scheduleAutoBackup()
     }
 
@@ -562,7 +678,12 @@ class MinigeViewModel(
         hasCommission: Boolean = true,
     ) {
         val dateKey = MinigeDateUtils.toKey(_selectedDate.value)
-        val activeRate = uiState.value.activeCommissionRate
+        val snapshot = uiState.value
+        val activeRate = if (SmallGallonHelper.isMaliitTagged(notes)) {
+            snapshot.smallGallonCommissionRate
+        } else {
+            snapshot.activeCommissionRate
+        }
         viewModelScope.launch {
             val result = repository.addDelivery(
                 userId = currentUserId,
@@ -595,7 +716,15 @@ class MinigeViewModel(
         notes: String,
         customUnitPrice: Double? = null,
         hasCommission: Boolean = true,
+        customPurifiedUnitPrice: Double? = null,
+        customAlkalineUnitPrice: Double? = null,
     ) {
+        val snapshot = uiState.value
+        val rateForOrder = if (SmallGallonHelper.isMaliitTagged(notes)) {
+            snapshot.smallGallonCommissionRate
+        } else {
+            snapshot.activeCommissionRate
+        }
         viewModelScope.launch {
             val previousSnapshot = repository.getDeliverySnapshot(deliveryId)
             val result = repository.updateDelivery(
@@ -608,6 +737,9 @@ class MinigeViewModel(
                 notes = notes,
                 customUnitPrice = customUnitPrice,
                 hasCommission = hasCommission,
+                overrideCommissionRate = rateForOrder,
+                customPurifiedUnitPrice = customPurifiedUnitPrice,
+                customAlkalineUnitPrice = customAlkalineUnitPrice,
             )
             if (previousSnapshot != null) {
                 val actionMsg = if (previousSnapshot.paymentType != paymentType) {
@@ -659,7 +791,13 @@ class MinigeViewModel(
         notes: String,
     ) {
         val paymentDateKey = MinigeDateUtils.toKey(_selectedDate.value)
-        val activeRate = uiState.value.activeCommissionRate
+        val snapshot = uiState.value
+        val existingNotes = latestBundle?.deliveries?.firstOrNull { it.id == deliveryId }?.notes.orEmpty()
+        val activeRate = if (SmallGallonHelper.isMaliitTagged(existingNotes)) {
+            snapshot.smallGallonCommissionRate
+        } else {
+            snapshot.activeCommissionRate
+        }
         val paymentId = UUID.randomUUID().toString()
         viewModelScope.launch {
             val previousDelivery = repository.getDeliverySnapshot(deliveryId)
@@ -710,7 +848,13 @@ class MinigeViewModel(
         notes: String,
     ) {
         val paymentDateKey = MinigeDateUtils.toKey(_selectedDate.value)
-        val activeRate = uiState.value.activeCommissionRate
+        val snapshot = uiState.value
+        val existingNotes = latestBundle?.deliveries?.firstOrNull { it.id == deliveryId }?.notes.orEmpty()
+        val activeRate = if (SmallGallonHelper.isMaliitTagged(existingNotes)) {
+            snapshot.smallGallonCommissionRate
+        } else {
+            snapshot.activeCommissionRate
+        }
         val immediateComm = CommissionRateHistory.calculateCommissionAmount(paidGallons, activeRate)
         val paymentId = UUID.randomUUID().toString()
         viewModelScope.launch {
@@ -1278,6 +1422,8 @@ class MinigeViewModel(
                     _driveBackupStatus.value = DriveBackupStatus.ACTIVE
                     summary.restoredQuota?.let { q -> _dailyQuotaTarget.value = q }
                     summary.restoredSundayMakeup?.let { sm -> _sundayMakeupEnabled.value = sm }
+                    summary.restoredSmallGallonPrice?.let { sp -> _smallGallonPrice.value = sp }
+                    summary.restoredSmallGallonCommissionRate?.let { sc -> _smallGallonCommissionRate.value = sc }
                     _commissionRateHistory.value = CommissionRateHistory.loadHistory(context, currentUserId)
                     _bossReceivables.value = BossReceivablesPrefs.loadEntries(context, currentUserId)
                     _events.tryEmit(
@@ -1446,6 +1592,15 @@ class MinigeViewModel(
             }
         }
     }
+
+    private data class SyncFilterSnapshot(
+        val syncing: Boolean,
+        val bossReceivables: List<BossReceivableEntry>,
+        val todaySearchQuery: String,
+        val todayFilterChip: DeliveryFilterChip,
+        val isRefreshingToday: Boolean,
+        val refreshNonce: Long,
+    )
 
     private data class UiExtrasSnapshot(
         val calSyncing: Boolean,
