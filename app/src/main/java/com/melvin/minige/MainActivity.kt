@@ -422,12 +422,6 @@ fun MinigeMainShell(
                         scope.launch { snackbarHostState.showSnackbar(msg) }
                     },
                     onUpdateQuotaTarget = viewModel::updateDailyQuotaTarget,
-                    onReorderInactiveSuki = { alert ->
-                        editingDelivery = null
-                        initialPaymentTypeForSheet = null
-                        reorderPrefill = alert
-                        showAddDeliverySheet = true
-                    },
                     onMarkPickupDelivered = { pickup ->
                         confirmingPickupDelivery = pickup
                     },
@@ -441,6 +435,7 @@ fun MinigeMainShell(
                     onRecordPartialGallonPayment = viewModel::recordPartialGallonPayment,
                     onRecordBulkPayment = viewModel::onRecordBulkUtangPayment,
                     onDismissBulkSettlementConfirmation = viewModel::dismissBulkSettlementConfirmation,
+                    onUndoSettledUtang = viewModel::undoSettledUtang,
                 )
                 MinigeTab.WEEKLY -> WeeklyScreen(
                     uiState = uiState,
@@ -465,6 +460,15 @@ fun MinigeMainShell(
                     onScheduleCommissionRate = viewModel::scheduleCommissionRate,
                     onUpdateQuotaTarget = viewModel::updateDailyQuotaTarget,
                     onToggleSundayMakeup = viewModel::setSundayMakeupMode,
+                    onToggleInactiveAlerts = viewModel::setInactiveAlertsEnabled,
+                    onUpdateInactiveThresholdDays = viewModel::setInactiveThresholdDays,
+                    onReorderInactiveSuki = { alert ->
+                        editingDelivery = null
+                        initialPaymentTypeForSheet = null
+                        reorderPrefill = alert
+                        selectedTab = MinigeTab.TODAY
+                        showAddDeliverySheet = true
+                    },
                     onSyncNow = viewModel::syncNow,
                     onGrantDriveAccess = { viewModel.triggerDriveConsent(context) },
                     onBackupToDriveNow = { viewModel.manualBackupNow(context) },

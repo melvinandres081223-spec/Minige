@@ -15,6 +15,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
@@ -22,12 +24,15 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
+import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Android
 import androidx.compose.material.icons.rounded.AutoMode
 import androidx.compose.material.icons.rounded.Backup
+import androidx.compose.material.icons.rounded.CheckCircleOutline
 import androidx.compose.material.icons.rounded.CloudSync
 import androidx.compose.material.icons.rounded.CloudUpload
 import androidx.compose.material.icons.rounded.Code
@@ -39,14 +44,19 @@ import androidx.compose.material.icons.rounded.HealthAndSafety
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.NewReleases
+import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.Payments
 import androidx.compose.material.icons.rounded.Percent
+import androidx.compose.material.icons.rounded.Remove
 import androidx.compose.material.icons.rounded.Restore
+import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.material.icons.rounded.TrackChanges
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -54,14 +64,17 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.melvin.minige.BuildConfig
+import com.melvin.minige.domain.InactiveSukiAlert
 import com.melvin.minige.sync.DriveBackupManager
 import com.melvin.minige.sync.DriveBackupStatus
 import com.melvin.minige.sync.GitHubAppUpdater
@@ -74,6 +87,8 @@ import com.melvin.minige.ui.components.DailyQuotaDialog
 import com.melvin.minige.ui.components.DeveloperSignatureCard
 import com.melvin.minige.ui.components.DeveloperSignatureConfig
 import com.melvin.minige.ui.components.DiagnosticStatusBadge
+import com.melvin.minige.ui.components.InactiveSukiAlertCard
+import com.melvin.minige.ui.components.InactiveSukiAlertPrefs
 import com.melvin.minige.ui.components.PricingSettingsDialog
 import com.melvin.minige.ui.components.SettingsActionRow
 import com.melvin.minige.ui.components.SettingsCategoryHeader
@@ -96,6 +111,9 @@ fun SettingsScreen(
     onScheduleCommissionRate: (ratePerGallon: Double, effectiveDate: LocalDate) -> Unit,
     onUpdateQuotaTarget: (Int) -> Unit = {},
     onToggleSundayMakeup: (Boolean) -> Unit = {},
+    onToggleInactiveAlerts: (Boolean) -> Unit = {},
+    onUpdateInactiveThresholdDays: (Int) -> Unit = {},
+    onReorderInactiveSuki: (InactiveSukiAlert) -> Unit = {},
     onSyncNow: () -> Unit,
     onGrantDriveAccess: () -> Unit = {},
     onBackupToDriveNow: () -> Unit = {},
@@ -127,6 +145,7 @@ fun SettingsScreen(
 
     var showWhatsNew by remember { mutableStateOf(true) }
     var showDiagnostics by remember { mutableStateOf(false) }
+    var isInactiveAlertExpanded by rememberSaveable { mutableStateOf(true) }
     var showPricingDialog by remember { mutableStateOf(false) }
     var showCommissionDialog by remember { mutableStateOf(false) }
     var showQuotaDialog by remember { mutableStateOf(false) }
@@ -167,6 +186,13 @@ fun SettingsScreen(
 
     val showDiagnosticsCategory = matches("logs", "diagnostics", "health", "check", "report", "redact", "bug")
 
+    val showInactiveAlertsToggleRow = matches("walang karga", "inactive", "suki", "overdue", "customer", "alerts", "days")
+    val showInactiveThresholdRow = uiState.inactiveAlertsEnabled &&
+        matches("threshold", "days", "walang karga", "inactive", "suki", "overdue", "customer", "alerts")
+    val showInactiveListCard = uiState.inactiveAlertsEnabled &&
+        matches("walang karga", "inactive", "suki", "overdue", "customer", "alerts", "reorder")
+    val showCustomerAlertsCategory = showInactiveAlertsToggleRow || showInactiveThresholdRow || showInactiveListCard
+
     val showPricingRow = matches("pricing", "purified", "alkaline", "sukli", "commission", "maliit", "small", "galon", "preferences")
     val showCommissionScheduleRow = matches("commission", "rate", "schedule", "history", "preferences")
     val showQuotaRow = matches("quota", "target", "gallons", "daily", "preferences")
@@ -191,7 +217,8 @@ fun SettingsScreen(
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .widthIn(max = 600.dp),
+                .widthIn(max = 600.dp)
+                .testTag("settings_lazy_column"),
             contentPadding = PaddingValues(top = 12.dp, bottom = 96.dp),
         ) {
             item(key = "settings_search_bar", contentType = "search_bar") {
@@ -452,6 +479,151 @@ fun SettingsScreen(
                 }
             }
 
+            if (showCustomerAlertsCategory) {
+                item(key = "header_customer_alerts", contentType = "category_header") {
+                    SettingsCategoryHeader(title = "Customer Alerts")
+                }
+
+                if (showInactiveAlertsToggleRow) {
+                    item(key = "row_inactive_alerts_toggle", contentType = "switch_row") {
+                        SettingsSwitchRow(
+                            icon = Icons.Rounded.NotificationsActive,
+                            title = "${uiState.inactiveThresholdDays}+ Days Walang Karga Alerts",
+                            subtitle = "Track suki customers who haven't ordered recently",
+                            checked = uiState.inactiveAlertsEnabled,
+                            onCheckedChange = onToggleInactiveAlerts,
+                            switchTestTag = "inactive_alerts_enabled_switch",
+                        )
+                    }
+                }
+
+                if (showInactiveThresholdRow) {
+                    item(key = "row_inactive_threshold", contentType = "threshold_stepper_row") {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .defaultMinSize(minHeight = 60.dp)
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Schedule,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(24.dp),
+                            )
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(2.dp),
+                            ) {
+                                Text(
+                                    text = "Overdue Threshold",
+                                    style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Medium),
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                )
+                                Text(
+                                    text = "Flag suki after ${uiState.inactiveThresholdDays} day(s) without an order",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                FilledTonalIconButton(
+                                    onClick = {
+                                        onUpdateInactiveThresholdDays(
+                                            (uiState.inactiveThresholdDays - 1)
+                                                .coerceAtLeast(InactiveSukiAlertPrefs.MIN_THRESHOLD_DAYS)
+                                        )
+                                    },
+                                    enabled = uiState.inactiveThresholdDays > InactiveSukiAlertPrefs.MIN_THRESHOLD_DAYS,
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .testTag("inactive_threshold_minus_button"),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Remove,
+                                        contentDescription = "Decrease overdue days threshold",
+                                    )
+                                }
+                                Text(
+                                    text = "${uiState.inactiveThresholdDays}d",
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                    modifier = Modifier
+                                        .padding(horizontal = 6.dp)
+                                        .testTag("inactive_threshold_value_text"),
+                                )
+                                FilledTonalIconButton(
+                                    onClick = {
+                                        onUpdateInactiveThresholdDays(
+                                            (uiState.inactiveThresholdDays + 1)
+                                                .coerceAtMost(InactiveSukiAlertPrefs.MAX_THRESHOLD_DAYS)
+                                        )
+                                    },
+                                    enabled = uiState.inactiveThresholdDays < InactiveSukiAlertPrefs.MAX_THRESHOLD_DAYS,
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .testTag("inactive_threshold_plus_button"),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Add,
+                                        contentDescription = "Increase overdue days threshold",
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (showInactiveListCard) {
+                    item(key = "row_inactive_suki_list", contentType = "inactive_suki_alert") {
+                        if (uiState.inactiveSukiAlerts.isNotEmpty()) {
+                            InactiveSukiAlertCard(
+                                alerts = uiState.inactiveSukiAlerts,
+                                expanded = isInactiveAlertExpanded || normalizedQuery.isNotEmpty(),
+                                onToggleExpanded = { isInactiveAlertExpanded = !isInactiveAlertExpanded },
+                                onReorderClick = onReorderInactiveSuki,
+                                thresholdDays = uiState.inactiveThresholdDays,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                            )
+                        } else {
+                            Surface(
+                                shape = RoundedCornerShape(16.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 6.dp)
+                                    .testTag("inactive_suki_all_active_row"),
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(14.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.CheckCircleOutline,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                    )
+                                    Text(
+                                        text = "All suki are active — no ${uiState.inactiveThresholdDays}+ day overdue customers.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                item(key = "divider_customer_alerts", contentType = "divider") {
+                    SettingsDivider(modifier = Modifier.padding(top = 6.dp))
+                }
+            }
+
             if (showPreferencesCategory) {
                 item(key = "header_preferences", contentType = "category_header") {
                     SettingsCategoryHeader(title = "Preferences")
@@ -627,7 +799,7 @@ fun SettingsScreen(
             }
 
             if (!showUpdatingCategory && !showBackupCategory && !showDiagnosticsCategory &&
-                !showPreferencesCategory && !showAboutCategory
+                !showCustomerAlertsCategory && !showPreferencesCategory && !showAboutCategory
             ) {
                 item(key = "settings_no_match", contentType = "empty_search") {
                     Column(

@@ -1,5 +1,6 @@
 package com.melvin.minige.ui.components
 
+import android.content.Context
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
@@ -45,6 +46,39 @@ import androidx.compose.ui.unit.dp
 import com.melvin.minige.domain.InactiveSeverity
 import com.melvin.minige.domain.InactiveSukiAlert
 import com.melvin.minige.domain.MinigeCustomerUtils
+
+object InactiveSukiAlertPrefs {
+    const val DEFAULT_ENABLED = true
+    const val DEFAULT_THRESHOLD_DAYS = 3
+    const val MIN_THRESHOLD_DAYS = 1
+    const val MAX_THRESHOLD_DAYS = 30
+    private const val PREFS_NAME = "minige_inactive_suki_prefs"
+    private const val KEY_ENABLED_PREFIX = "enabled_"
+    private const val KEY_THRESHOLD_PREFIX = "threshold_days_"
+
+    fun isEnabled(context: Context, userId: String): Boolean {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean("$KEY_ENABLED_PREFIX$userId", DEFAULT_ENABLED)
+    }
+
+    fun setEnabled(context: Context, userId: String, enabled: Boolean) {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putBoolean("$KEY_ENABLED_PREFIX$userId", enabled).apply()
+    }
+
+    fun loadThresholdDays(context: Context, userId: String): Int {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getInt("$KEY_THRESHOLD_PREFIX$userId", DEFAULT_THRESHOLD_DAYS)
+            .coerceIn(MIN_THRESHOLD_DAYS, MAX_THRESHOLD_DAYS)
+    }
+
+    fun saveThresholdDays(context: Context, userId: String, days: Int): Int {
+        val clamped = days.coerceIn(MIN_THRESHOLD_DAYS, MAX_THRESHOLD_DAYS)
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putInt("$KEY_THRESHOLD_PREFIX$userId", clamped).apply()
+        return clamped
+    }
+}
 
 @Composable
 fun InactiveSukiHeaderBadge(
@@ -169,6 +203,7 @@ fun InactiveSukiAlertCard(
     onToggleExpanded: () -> Unit,
     onReorderClick: (InactiveSukiAlert) -> Unit,
     modifier: Modifier = Modifier,
+    thresholdDays: Int = InactiveSukiAlertPrefs.DEFAULT_THRESHOLD_DAYS,
 ) {
     if (alerts.isEmpty()) return
 
@@ -212,7 +247,7 @@ fun InactiveSukiAlertCard(
                     Box(contentAlignment = Alignment.Center) {
                         Icon(
                             imageVector = Icons.Rounded.WarningAmber,
-                            contentDescription = "3+ days walang karga warning",
+                            contentDescription = "${thresholdDays}+ days walang karga warning",
                             tint = if (criticalCount > 0) {
                                 MaterialTheme.colorScheme.onError
                             } else {
@@ -228,7 +263,7 @@ fun InactiveSukiAlertCard(
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
                     Text(
-                        text = "⚠️ 3+ DAYS WALANG KARGA",
+                        text = "⚠️ ${thresholdDays}+ DAYS WALANG KARGA",
                         style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
                         color = MaterialTheme.colorScheme.onSurface,
                         maxLines = 1,

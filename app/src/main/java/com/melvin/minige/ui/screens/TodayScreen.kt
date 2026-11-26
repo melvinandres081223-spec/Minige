@@ -78,8 +78,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.melvin.minige.domain.DeliveryRecord
 import com.melvin.minige.domain.ExpenseRecord
-import com.melvin.minige.domain.InactiveSeverity
-import com.melvin.minige.domain.InactiveSukiAlert
 import com.melvin.minige.domain.MinigeCustomerUtils
 import com.melvin.minige.domain.MinigeDateUtils
 import com.melvin.minige.domain.PaymentType
@@ -91,8 +89,6 @@ import com.melvin.minige.ui.components.DeliveredTodayDrawerHeader
 import com.melvin.minige.ui.components.DeliveryFilterBar
 import com.melvin.minige.ui.components.DeliveryFilterChip
 import com.melvin.minige.ui.components.DeliveryFilterHelper
-import com.melvin.minige.ui.components.InactiveSukiAlertCard
-import com.melvin.minige.ui.components.InactiveSukiHeaderBadge
 import com.melvin.minige.ui.components.MinigeTooltipWrapper
 import com.melvin.minige.ui.components.PinnedPickupDeliveryCard
 import com.melvin.minige.ui.components.RemittanceSummaryCard
@@ -120,7 +116,6 @@ fun TodayScreen(
     onSyncCalendarClick: () -> Unit,
     onBossSendTriggered: (String) -> Unit,
     onUpdateQuotaTarget: (Int) -> Unit = {},
-    onReorderInactiveSuki: (InactiveSukiAlert) -> Unit = {},
     onMarkPickupDelivered: (DeliveryRecord) -> Unit = {},
     onSearchQueryChange: (String) -> Unit = {},
     onSelectFilterChip: (DeliveryFilterChip) -> Unit = {},
@@ -134,7 +129,6 @@ fun TodayScreen(
     val selectedFilter = uiState.todayFilterChip
     var groupByArea by remember { mutableStateOf(false) }
     var showClosingSheet by remember { mutableStateOf(false) }
-    var isInactiveAlertExpanded by remember { mutableStateOf(true) }
     var isDeliveredDrawerExpanded by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(uiState.todaySearchQuery) {
@@ -203,33 +197,12 @@ fun TodayScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             item(key = "daily_quota_bar", contentType = "quota_bar") {
-                Row(
+                DailyQuotaBar(
+                    summary = uiState.dailySummary,
+                    targetGallons = uiState.dailyQuotaTarget,
+                    onUpdateTarget = onUpdateQuotaTarget,
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    DailyQuotaBar(
-                        summary = uiState.dailySummary,
-                        targetGallons = uiState.dailyQuotaTarget,
-                        onUpdateTarget = onUpdateQuotaTarget,
-                        modifier = Modifier.weight(1f),
-                    )
-                    if (uiState.inactiveSukiAlerts.isNotEmpty()) {
-                        val hasCritical = uiState.inactiveSukiAlerts.any {
-                            it.severity == InactiveSeverity.RED_CRITICAL
-                        }
-                        InactiveSukiHeaderBadge(
-                            count = uiState.inactiveSukiCount,
-                            hasCritical = hasCritical,
-                            onClick = {
-                                isInactiveAlertExpanded = true
-                                scope.launch {
-                                    listState.animateScrollToItem(index = 2)
-                                }
-                            },
-                        )
-                    }
-                }
+                )
             }
 
             item(key = "date_navigator_bar", contentType = "date_nav") {
@@ -239,17 +212,6 @@ fun TodayScreen(
                     onNext = { onShiftDate(1) },
                     onToday = onJumpToday,
                 )
-            }
-
-            if (uiState.inactiveSukiAlerts.isNotEmpty()) {
-                item(key = "inactive_suki_alert_card", contentType = "inactive_suki_alert") {
-                    InactiveSukiAlertCard(
-                        alerts = uiState.inactiveSukiAlerts,
-                        expanded = isInactiveAlertExpanded,
-                        onToggleExpanded = { isInactiveAlertExpanded = !isInactiveAlertExpanded },
-                        onReorderClick = onReorderInactiveSuki,
-                    )
-                }
             }
 
             item(key = "commission_hero_card", contentType = "commission_hero") {
@@ -343,8 +305,7 @@ fun TodayScreen(
                             onSearchFocusChanged = { focused ->
                                 if (focused) {
                                     scope.launch {
-                                        val stickyIndex = if (uiState.inactiveSukiAlerts.isNotEmpty()) 6 else 5
-                                        listState.animateScrollToItem(index = stickyIndex)
+                                        listState.animateScrollToItem(index = 5)
                                     }
                                 }
                             },

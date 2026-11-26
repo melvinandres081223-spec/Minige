@@ -687,7 +687,12 @@ object InactiveSukiAlertHelper {
         customers: List<CustomerRecord>,
         deliveries: List<DeliveryRecord>,
         referenceDate: LocalDate = LocalDate.now(),
+        thresholdDays: Long = INACTIVE_THRESHOLD_DAYS,
+        enabled: Boolean = true,
     ): List<InactiveSukiAlert> {
+        if (!enabled) return emptyList()
+        val safeThreshold = thresholdDays.coerceAtLeast(1L)
+        val criticalThreshold = maxOf(safeThreshold + 2L, CRITICAL_THRESHOLD_DAYS)
         val referenceKey = MinigeDateUtils.toKey(referenceDate)
         val customersById = customers.associateBy { customer ->
             MinigeCustomerUtils.normalizeCustomerId(customer.name)
@@ -718,7 +723,7 @@ object InactiveSukiAlertHelper {
             val lastDate = runCatching { LocalDate.parse(latestDelivery.dateKey) }.getOrNull()
                 ?: return@mapNotNull null
             val daysElapsed = ChronoUnit.DAYS.between(lastDate, referenceDate)
-            if (daysElapsed < INACTIVE_THRESHOLD_DAYS) return@mapNotNull null
+            if (daysElapsed < safeThreshold) return@mapNotNull null
 
             val displayName = customerRecord?.name?.takeIf { it.isNotBlank() }
                 ?: latestDelivery.customerName.trim().ifEmpty { return@mapNotNull null }
@@ -726,7 +731,7 @@ object InactiveSukiAlertHelper {
             val derivedUnitPrice = customerRecord?.lastUnitPrice
                 ?: deriveUnitPrice(latestDelivery)
 
-            val severity = if (daysElapsed >= CRITICAL_THRESHOLD_DAYS) {
+            val severity = if (daysElapsed >= criticalThreshold) {
                 InactiveSeverity.RED_CRITICAL
             } else {
                 InactiveSeverity.AMBER_WARNING

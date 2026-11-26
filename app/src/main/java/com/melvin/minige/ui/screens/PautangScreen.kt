@@ -15,6 +15,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -24,6 +26,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Undo
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.CreditScore
 import androidx.compose.material3.AlertDialog
@@ -86,6 +89,7 @@ fun PautangScreen(
     onRecordPartialGallonPayment: (deliveryId: String, paidGallons: Int, amount: Int, channel: PaidChannel, notes: String) -> Unit,
     onRecordBulkPayment: (customerName: String, amount: Int, method: UtangMethod, notes: String) -> Unit = { _, _, _, _ -> },
     onDismissBulkSettlementConfirmation: () -> Unit = {},
+    onUndoSettledUtang: (deliveryId: String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
@@ -93,6 +97,7 @@ fun PautangScreen(
     var selectedUtang by remember { mutableStateOf<DeliveryRecord?>(null) }
     var partialPayTarget by remember { mutableStateOf<DeliveryRecord?>(null) }
     var bulkPayTargetGroup by remember { mutableStateOf<CustomerOpenUtangGroup?>(null) }
+    var undoSettledTarget by remember { mutableStateOf<DeliveryRecord?>(null) }
     var searchQuery by remember { mutableStateOf("") }
     var debouncedSearchQuery by remember { mutableStateOf("") }
     var selectedFilter by remember { mutableStateOf(DeliveryFilterChip.ALL) }
@@ -148,7 +153,8 @@ fun PautangScreen(
             state = listState,
             modifier = Modifier
                 .fillMaxSize()
-                .widthIn(max = 600.dp),
+                .widthIn(max = 600.dp)
+                .testTag("pautang_lazy_column"),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 96.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
@@ -288,7 +294,10 @@ fun PautangScreen(
                     key = { "settled_utang_${it.id}" },
                     contentType = { "settled_utang_card" },
                 ) { settled ->
-                    SettledUtangCard(item = settled)
+                    SettledUtangCard(
+                        item = settled,
+                        onUndoClick = { undoSettledTarget = settled },
+                    )
                 }
             }
         }
@@ -338,6 +347,37 @@ fun PautangScreen(
         BulkSettlementConfirmationDialog(
             summary = summary,
             onDismiss = onDismissBulkSettlementConfirmation,
+        )
+    }
+
+    undoSettledTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = { undoSettledTarget = null },
+            title = { Text("Ibalik sa Unpaid Utang si ${target.customerName}?") },
+            text = {
+                Text(
+                    "Mabubura ang bayad na ₱${target.amountPaid} at babalik sa ₱${target.totalAmount} Unpaid Utang. Mawawala rin ang +₱${target.commissionEarned} commission sa ${target.settledDateKey ?: target.dateKey}."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onUndoSettledUtang(target.id)
+                        undoSettledTarget = null
+                    },
+                    modifier = Modifier.testTag("confirm_undo_settled_utang_button"),
+                ) {
+                    Text("Ibalik sa Unpaid")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { undoSettledTarget = null },
+                    modifier = Modifier.testTag("cancel_undo_settled_utang_button"),
+                ) {
+                    Text("Cancel")
+                }
+            },
         )
     }
 }
@@ -500,34 +540,66 @@ private fun ActiveUtangCard(
 }
 
 @Composable
-private fun SettledUtangCard(item: DeliveryRecord) {
+private fun SettledUtangCard(
+    item: DeliveryRecord,
+    onUndoClick: () -> Unit,
+) {
     OutlinedCard(
         shape = RoundedCornerShape(16.dp),
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("settled_utang_card_${item.id}"),
     ) {
         Row(
-            modifier = Modifier.padding(14.dp),
+            modifier = Modifier.padding(start = 14.dp, top = 12.dp, bottom = 12.dp, end = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Icon(
                 imageVector = Icons.Rounded.CheckCircle,
                 contentDescription = "Fully paid",
                 tint = MaterialTheme.colorScheme.primary,
             )
-            Column(modifier = Modifier.weight(1f)) {
-                Text(item.customerName, style = MaterialTheme.typography.titleMedium)
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(
+                    text = item.customerName,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
                 Text(
                     text = "${item.totalGallons} gals • Settled ${item.settledDateKey ?: item.dateKey}",
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = "+₱${item.commissionEarned} commission",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                    softWrap = false,
                 )
             }
-            Text(
-                text = "+₱${item.commissionEarned}",
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.primary,
-            )
+            OutlinedButton(
+                onClick = onUndoClick,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                modifier = Modifier
+                    .defaultMinSize(minHeight = 48.dp)
+                    .testTag("undo_settled_utang_${item.id}"),
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Rounded.Undo,
+                    contentDescription = "Undo settled utang for ${item.customerName}",
+                    modifier = Modifier.size(16.dp),
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("Undo", maxLines = 1, softWrap = false)
+            }
         }
     }
 }

@@ -69,6 +69,20 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.charset.StandardCharsets
 import java.time.LocalDate
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToNode
+import com.melvin.minige.domain.InactiveSukiAlert
+import com.melvin.minige.ui.MinigeUiState
+import com.melvin.minige.ui.components.InactiveSukiAlertPrefs
+import com.melvin.minige.ui.screens.PautangScreen
+import com.melvin.minige.ui.screens.SettingsScreen
+import com.melvin.minige.ui.screens.TodayScreen
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -79,6 +93,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -87,6 +102,9 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class ExampleRobolectricTest {
+
+    @get:Rule
+    val composeTestRule = createComposeRule()
 
     @Test
     fun `read string from context`() {
@@ -3077,7 +3095,324 @@ class ExampleRobolectricTest {
         assertFalse(report.contains("₱"))
         assertFalse(report.contains("72"))
     }
+
+    @Test
+    fun `inactive suki alerts moved from today screen to settings screen with prefs and reorder`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val alerts = listOf(
+            InactiveSukiAlert(
+                customerId = "dc",
+                customerName = "dc",
+                lastDeliveryDateKey = "2026-11-19",
+                daysSinceLastDelivery = 6,
+                severity = InactiveSeverity.RED_CRITICAL,
+                lastOrderGallons = 5,
+                lastPurifiedGallons = 5,
+                lastAlkalineGallons = 0,
+                lastUnitPrice = 30.0,
+            ),
+            InactiveSukiAlert(
+                customerId = "tapaoan",
+                customerName = "tapaoan",
+                lastDeliveryDateKey = "2026-11-21",
+                daysSinceLastDelivery = 4,
+                severity = InactiveSeverity.AMBER_WARNING,
+                lastOrderGallons = 3,
+                lastPurifiedGallons = 3,
+                lastAlkalineGallons = 0,
+                lastUnitPrice = 25.0,
+            ),
+        )
+
+        val state = MinigeUiState(
+            selectedDate = LocalDate.of(2026, 11, 25),
+            selectedDateKey = "2026-11-25",
+            inactiveSukiAlerts = alerts,
+            inactiveAlertsByCustomerId = alerts.associateBy { it.customerId },
+            inactiveAlertsEnabled = true,
+            inactiveThresholdDays = 3,
+        )
+
+        // 1. TodayScreen must NOT show inactive_suki_alert_card or inactive_suki_header_badge
+        composeTestRule.setContent {
+            MaterialTheme {
+                TodayScreen(
+                    uiState = state,
+                    onShiftDate = {},
+                    onJumpToday = {},
+                    onEditSukliClick = {},
+                    onEditDelivery = {},
+                    onDeleteDelivery = {},
+                    onAddExpenseClick = {},
+                    onDeleteExpense = {},
+                    onSyncCalendarClick = {},
+                    onBossSendTriggered = {},
+                )
+            }
+        }
+        composeTestRule.onNodeWithTag("inactive_suki_alert_card").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("inactive_suki_header_badge").assertDoesNotExist()
+
+        // 2. InactiveSukiAlertPrefs & InactiveSukiAlertHelper respect custom thresholdDays and enabled=false
+        val userId = "prefs_test_user"
+        assertTrue(InactiveSukiAlertPrefs.isEnabled(context, userId))
+        assertEquals(3, InactiveSukiAlertPrefs.loadThresholdDays(context, userId))
+        InactiveSukiAlertPrefs.setEnabled(context, userId, false)
+        assertEquals(7, InactiveSukiAlertPrefs.saveThresholdDays(context, userId, 7))
+        assertFalse(InactiveSukiAlertPrefs.isEnabled(context, userId))
+        assertEquals(7, InactiveSukiAlertPrefs.loadThresholdDays(context, userId))
+
+        val delivery4DaysAgo = DeliveryRecord(
+            id = "d_4days",
+            userId = userId,
+            dateKey = "2026-11-21",
+            customerName = "dc",
+            purifiedGallons = 5,
+            alkalineGallons = 0,
+            purifiedUnitPrice = 30,
+            alkalineUnitPrice = 40,
+            totalAmount = 150,
+            amountPaid = 150,
+            paymentType = PaymentType.CASH,
+            commissionRate = 8,
+            commissionEarned = 40,
+            settledDateKey = "2026-11-21",
+            notes = "",
+            calendarEventId = null,
+            pendingSync = false,
+            createdAtEpochMs = 1L,
+            updatedAtEpochMs = 1L,
+        )
+        assertTrue(
+            InactiveSukiAlertHelper.findInactiveCustomers(
+                customers = emptyList(),
+                deliveries = listOf(delivery4DaysAgo),
+                referenceDate = LocalDate.of(2026, 11, 25),
+                thresholdDays = 5L,
+                enabled = true,
+            ).isEmpty()
+        )
+        assertTrue(
+            InactiveSukiAlertHelper.findInactiveCustomers(
+                customers = emptyList(),
+                deliveries = listOf(delivery4DaysAgo),
+                referenceDate = LocalDate.of(2026, 11, 25),
+                thresholdDays = 3L,
+                enabled = false,
+            ).isEmpty()
+        )
+    }
+
+    @Test
+    fun `settings screen renders overdue suki card, threshold controls, and reorder callback`() {
+        val alerts = listOf(
+            InactiveSukiAlert(
+                customerId = "dc",
+                customerName = "dc",
+                lastDeliveryDateKey = "2026-11-19",
+                daysSinceLastDelivery = 6,
+                severity = InactiveSeverity.RED_CRITICAL,
+                lastOrderGallons = 5,
+                lastPurifiedGallons = 5,
+                lastAlkalineGallons = 0,
+                lastUnitPrice = 30.0,
+            ),
+            InactiveSukiAlert(
+                customerId = "tapaoan",
+                customerName = "tapaoan",
+                lastDeliveryDateKey = "2026-11-21",
+                daysSinceLastDelivery = 4,
+                severity = InactiveSeverity.AMBER_WARNING,
+                lastOrderGallons = 3,
+                lastPurifiedGallons = 3,
+                lastAlkalineGallons = 0,
+                lastUnitPrice = 25.0,
+            ),
+        )
+        var toggledEnabled: Boolean? = null
+        var updatedThreshold: Int? = null
+        var reorderedAlert: InactiveSukiAlert? = null
+
+        composeTestRule.setContent {
+            MaterialTheme {
+                SettingsScreen(
+                    uiState = MinigeUiState(
+                        selectedDate = LocalDate.of(2026, 11, 25),
+                        selectedDateKey = "2026-11-25",
+                        inactiveSukiAlerts = alerts,
+                        inactiveAlertsByCustomerId = alerts.associateBy { it.customerId },
+                        inactiveAlertsEnabled = true,
+                        inactiveThresholdDays = 3,
+                    ),
+                    userEmail = "rider@gmail.com",
+                    onSaveSettings = { _, _, _, _ -> },
+                    onScheduleCommissionRate = { _, _ -> },
+                    onToggleInactiveAlerts = { toggledEnabled = it },
+                    onUpdateInactiveThresholdDays = { updatedThreshold = it },
+                    onReorderInactiveSuki = { reorderedAlert = it },
+                    onSyncNow = {},
+                    onSignOut = {},
+                )
+            }
+        }
+
+        // Scroll to Customer Alerts section and verify controls + Re-order action
+        composeTestRule.onNodeWithTag("settings_search_input").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("settings_lazy_column")
+            .performScrollToNode(hasTestTag("inactive_threshold_plus_button"))
+        composeTestRule.onNodeWithTag("inactive_threshold_plus_button").performClick()
+        assertEquals(4, updatedThreshold)
+
+        composeTestRule.onNodeWithTag("settings_lazy_column")
+            .performScrollToNode(hasTestTag("inactive_alerts_enabled_switch"))
+        composeTestRule.onNodeWithTag("inactive_alerts_enabled_switch").performClick()
+        assertEquals(false, toggledEnabled)
+
+        composeTestRule.onNodeWithTag("settings_lazy_column")
+            .performScrollToNode(hasTestTag("inactive_suki_alert_card"))
+        composeTestRule.onNodeWithTag("inactive_suki_alert_card").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("settings_lazy_column")
+            .performScrollToNode(hasTestTag("reorder_inactive_dc"))
+        composeTestRule.onNodeWithTag("reorder_inactive_dc").performClick()
+        assertEquals("dc", reorderedAlert?.customerName)
+    }
+
+    @Test
+    fun `pautang undo settled utang deletes payment, restores unpaid balance, and reverses commission and cash remit`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, MinigeDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        val syncScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        try {
+            val dao = db.minigeDao()
+            if (FirebaseApp.getApps(context).isEmpty()) {
+                FirebaseApp.initializeApp(
+                    context,
+                    FirebaseOptions.Builder()
+                        .setApplicationId("1:123456789012:android:abcdef123456")
+                        .setApiKey("AIzaSyDummyApiKeyForRobolectricTests12345")
+                        .setProjectId("minige-test-project")
+                        .build(),
+                )
+            }
+            val remote = MinigeFirestoreDataSource(FirebaseFirestore.getInstance())
+            val repo = MinigeRepository(
+                dao = dao,
+                remote = remote,
+                pricingRepository = PricingRepository(dao, remote),
+                backgroundSyncScope = syncScope,
+            )
+
+            val userId = "undo_settled_rider"
+            dao.upsertSettings(
+                AppSettingsEntity(
+                    id = "default",
+                    userId = userId,
+                    purifiedPrice = 30,
+                    alkalinePrice = 40,
+                    commissionRate = 8,
+                    defaultSukli = 0,
+                    pendingSync = false,
+                    updatedAtEpochMs = 1L,
+                )
+            )
+
+            // 1. Add unpaid Pautang on Nov 23 (4 gals * ₱30 = ₱120)
+            repo.addDelivery(
+                userId = userId,
+                dateKey = "2026-11-23",
+                customerName = "Mang Jose",
+                purifiedGallons = 4,
+                alkalineGallons = 0,
+                paymentType = PaymentType.PAUTANG,
+                notes = "",
+            )
+            val created = dao.getAllDeliveriesOnce(userId).single()
+
+            // 2. Settle full ₱120 on Nov 25
+            repo.utangSyncOverrideForTest = { _, _, _ -> Result.success(Unit) to Result.success(Unit) }
+            repo.recordUtangPayment(
+                userId = userId,
+                deliveryId = created.id,
+                amount = 120,
+                method = UtangMethod.CASH,
+                paymentDateKey = "2026-11-25",
+                notes = "",
+            )
+
+            val settledDomain = dao.getDeliveryById(created.id)!!.toDomain()
+            assertTrue(settledDomain.isUtangFullyPaid)
+            assertEquals(32, settledDomain.commissionEarned)
+            assertEquals("2026-11-25", settledDomain.settledDateKey)
+            assertEquals(1, dao.getUtangPaymentsForDelivery(created.id).size)
+
+            val settledSummary = MinigeCalculator.calculateDailySummary(
+                dateKey = "2026-11-25",
+                deliveries = dao.getAllDeliveriesOnce(userId).map { it.toDomain() },
+                utangPayments = dao.getAllUtangPaymentsOnce(userId).map { it.toDomain() },
+                expenses = emptyList(),
+                startingSukli = 0,
+            )
+            assertEquals(120, settledSummary.cashCollected)
+            assertEquals(32, settledSummary.dailyCommission)
+
+            // 3. Verify PautangScreen Undo button + confirmation dialog triggers callback
+            var triggeredUndoId: String? = null
+            composeTestRule.setContent {
+                MaterialTheme {
+                    PautangScreen(
+                        uiState = MinigeUiState(
+                            selectedDate = LocalDate.of(2026, 11, 25),
+                            selectedDateKey = "2026-11-25",
+                            settledUtangList = listOf(settledDomain),
+                            utangPayments = dao.getAllUtangPaymentsOnce(userId).map { it.toDomain() },
+                        ),
+                        onRecordPayment = { _, _, _, _ -> },
+                        onRecordPartialGallonPayment = { _, _, _, _, _ -> },
+                        onUndoSettledUtang = { triggeredUndoId = it },
+                    )
+                }
+            }
+            composeTestRule.onNodeWithTag("pautang_lazy_column")
+                .performScrollToNode(hasTestTag("undo_settled_utang_${settledDomain.id}"))
+            composeTestRule.onNodeWithTag("undo_settled_utang_${settledDomain.id}").performClick()
+            composeTestRule.onNodeWithText("Ibalik sa Unpaid Utang si Mang Jose?").assertIsDisplayed()
+            composeTestRule.onNodeWithTag("confirm_undo_settled_utang_button").performClick()
+            assertEquals(settledDomain.id, triggeredUndoId)
+
+            // 4. Execute repository undoSettledUtang and verify database + math reversal
+            val undoRes = repo.undoSettledUtang(userId = userId, deliveryId = settledDomain.id)
+            assertTrue(undoRes.isSuccess)
+            assertEquals("Mang Jose", undoRes.getOrNull())
+
+            val reverted = dao.getDeliveryById(created.id)!!.toDomain()
+            assertFalse(reverted.isUtangFullyPaid)
+            assertEquals(0, reverted.amountPaid)
+            assertEquals(120, reverted.remainingBalance)
+            assertEquals(0, reverted.commissionEarned)
+            assertNull(reverted.settledDateKey)
+            assertTrue(reverted.pendingSync)
+            assertTrue(dao.getUtangPaymentsForDelivery(created.id).isEmpty())
+            assertTrue(dao.getAllUtangPaymentsOnce(userId).isEmpty())
+
+            val revertedSummary = MinigeCalculator.calculateDailySummary(
+                dateKey = "2026-11-25",
+                deliveries = dao.getAllDeliveriesOnce(userId).map { it.toDomain() },
+                utangPayments = dao.getAllUtangPaymentsOnce(userId).map { it.toDomain() },
+                expenses = emptyList(),
+                startingSukli = 0,
+            )
+            assertEquals(0, revertedSummary.cashCollected)
+            assertEquals(0, revertedSummary.netCashRemit)
+            assertEquals(0, revertedSummary.dailyCommission)
+        } finally {
+            syncScope.cancel()
+            db.close()
+        }
+    }
 }
+
 
 
 

@@ -968,6 +968,68 @@ class MinigeRepository(
         return if (restoreRes.isFailure) restoreRes else deleteRes
     }
 
+    suspend fun undoSettledUtang(
+        userId: String,
+        deliveryId: String,
+    ): Result<String> {
+        val existing = withContext(Dispatchers.IO) {
+            dao.getDeliveryById(deliveryId)
+        } ?: return Result.failure(IllegalArgumentException("Utang delivery not found."))
+
+        if (!existing.paymentType.equals(PaymentType.PAUTANG.name, ignoreCase = true)) {
+            return Result.failure(IllegalStateException("Entry is not a Pautang record."))
+        }
+
+        val paymentsToDelete = withContext(Dispatchers.IO) {
+            dao.getUtangPaymentsForDelivery(deliveryId)
+        }
+        val now = System.currentTimeMillis()
+        val revertedDelivery = existing.copy(
+            amountPaid = 0,
+            commissionEarned = 0,
+            settledDateKey = null,
+            pendingSync = true,
+            updatedAtEpochMs = now,
+        )
+
+        withContext(Dispatchers.IO + NonCancellable) {
+            paymentsToDelete.forEach { payment ->
+                dao.softDeleteUtangPayment(payment.id)
+            }
+            dao.upsertDelivery(revertedDelivery)
+        }
+
+        notifyLocalDataChanged()
+
+        backgroundSyncScope.launch {
+            try {
+                val deliverySync = remote.upsertDelivery(userId, revertedDelivery)
+                if (deliverySync.isSuccess) {
+                    withContext(Dispatchers.IO + NonCancellable) {
+                        val latest = dao.getDeliveryById(deliveryId)
+                        if (latest != null && latest.updatedAtEpochMs == now) {
+                            dao.markDeliverySynced(deliveryId)
+                        }
+                    }
+                }
+                paymentsToDelete.forEach { payment ->
+                    val deleteRes = remote.deleteUtangPayment(userId, payment.id)
+                    if (deleteRes.isSuccess) {
+                        withContext(Dispatchers.IO + NonCancellable) {
+                            dao.hardDeleteUtangPayment(payment.id)
+                        }
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Local Room revert already committed with pendingSync = true; background sync will retry.
+            }
+        }
+
+        return Result.success(existing.customerName)
+    }
+
     suspend fun deleteDelivery(userId: String, deliveryId: String): Result<Unit> {
         val now = System.currentTimeMillis()
         withContext(Dispatchers.IO + NonCancellable) {

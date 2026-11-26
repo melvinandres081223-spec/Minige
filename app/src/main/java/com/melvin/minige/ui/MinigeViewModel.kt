@@ -43,6 +43,7 @@ import com.melvin.minige.sync.DriveConsentRequiredException
 import com.melvin.minige.ui.components.DailyQuotaPrefs
 import com.melvin.minige.ui.components.DeliveryFilterChip
 import com.melvin.minige.ui.components.DeliveryFilterHelper
+import com.melvin.minige.ui.components.InactiveSukiAlertPrefs
 import com.melvin.minige.ui.components.PickupChecklistHelper
 import com.melvin.minige.ui.components.SukiAnalyticsHelper
 import com.melvin.minige.ui.components.SundayMakeupHelper
@@ -153,6 +154,8 @@ data class MinigeUiState(
     val bulkSettlementConfirmation: BulkUtangSettlementSummary? = null,
     val inactiveSukiAlerts: List<InactiveSukiAlert> = emptyList(),
     val inactiveAlertsByCustomerId: Map<String, InactiveSukiAlert> = emptyMap(),
+    val inactiveAlertsEnabled: Boolean = InactiveSukiAlertPrefs.DEFAULT_ENABLED,
+    val inactiveThresholdDays: Int = InactiveSukiAlertPrefs.DEFAULT_THRESHOLD_DAYS,
     val diagnosticReport: AppDiagnosticReport? = null,
     val isRunningDiagnostics: Boolean = false,
     val bossReceivables: List<BossReceivableEntry> = emptyList(),
@@ -196,6 +199,14 @@ class MinigeViewModel(
     private val _smallGallonCommissionRate = MutableStateFlow(
         appContext?.let { SmallGallonPrefs.loadCommissionRate(it, currentUserId) }
             ?: SmallGallonHelper.DEFAULT_COMMISSION_RATE
+    )
+    private val _inactiveAlertsEnabled = MutableStateFlow(
+        appContext?.let { InactiveSukiAlertPrefs.isEnabled(it, currentUserId) }
+            ?: InactiveSukiAlertPrefs.DEFAULT_ENABLED
+    )
+    private val _inactiveThresholdDays = MutableStateFlow(
+        appContext?.let { InactiveSukiAlertPrefs.loadThresholdDays(it, currentUserId) }
+            ?: InactiveSukiAlertPrefs.DEFAULT_THRESHOLD_DAYS
     )
     private val _isSyncing = MutableStateFlow(false)
     private val _isRefreshingToday = MutableStateFlow(false)
@@ -326,6 +337,8 @@ class MinigeViewModel(
         val lastLocalBackupPath: String,
         val smallGallonPrice: Double,
         val smallGallonCommissionRate: Double,
+        val inactiveAlertsEnabled: Boolean,
+        val inactiveThresholdDays: Int,
     )
 
     private data class DriveBackupSnapshot(
@@ -343,23 +356,24 @@ class MinigeViewModel(
             _commissionRateHistory,
             _dailyQuotaTarget,
             combine(
-                _autoBackupBeforeUpdate,
-                _lastLocalBackupPath,
-                _smallGallonPrice,
-                _smallGallonCommissionRate,
-            ) { autoBackup, localPath, smallPrice, smallRate ->
-                Pair(autoBackup to localPath, smallPrice to smallRate)
+                combine(_autoBackupBeforeUpdate, _lastLocalBackupPath) { a, b -> a to b },
+                combine(_smallGallonPrice, _smallGallonCommissionRate) { a, b -> a to b },
+                combine(_inactiveAlertsEnabled, _inactiveThresholdDays) { a, b -> a to b },
+            ) { backupPair, smallPair, inactivePair ->
+                Triple(backupPair, smallPair, inactivePair)
             },
-        ) { date, sundayEnabled, rateHist, quotaTarget, backupAndSmall ->
+        ) { date, sundayEnabled, rateHist, quotaTarget, extraPrefs ->
             ViewPrefsSnapshot(
                 date = date,
                 sundayEnabled = sundayEnabled,
                 rateHistory = rateHist,
                 quotaTarget = quotaTarget,
-                autoBackupBeforeUpdate = backupAndSmall.first.first,
-                lastLocalBackupPath = backupAndSmall.first.second,
-                smallGallonPrice = backupAndSmall.second.first,
-                smallGallonCommissionRate = backupAndSmall.second.second,
+                autoBackupBeforeUpdate = extraPrefs.first.first,
+                lastLocalBackupPath = extraPrefs.first.second,
+                smallGallonPrice = extraPrefs.second.first,
+                smallGallonCommissionRate = extraPrefs.second.second,
+                inactiveAlertsEnabled = extraPrefs.third.first,
+                inactiveThresholdDays = extraPrefs.third.second,
             )
         },
         localDataFlow,
@@ -497,6 +511,8 @@ class MinigeViewModel(
             customers = mergedCustomers,
             deliveries = bundle.deliveries,
             referenceDate = date,
+            thresholdDays = prefs.inactiveThresholdDays.toLong(),
+            enabled = prefs.inactiveAlertsEnabled,
         )
         val inactiveAlertsByCustomerId = inactiveSukiAlerts.associateBy { it.customerId }
 
@@ -548,6 +564,8 @@ class MinigeViewModel(
             bulkSettlementConfirmation = bulkSummary,
             inactiveSukiAlerts = inactiveSukiAlerts,
             inactiveAlertsByCustomerId = inactiveAlertsByCustomerId,
+            inactiveAlertsEnabled = prefs.inactiveAlertsEnabled,
+            inactiveThresholdDays = prefs.inactiveThresholdDays,
             diagnosticReport = extras.diagnosticReport,
             isRunningDiagnostics = extras.isRunningDiagnostics,
             bossReceivables = bossReceivables,
@@ -625,6 +643,25 @@ class MinigeViewModel(
             )
         )
         scheduleAutoBackup()
+    }
+
+    fun setInactiveAlertsEnabled(enabled: Boolean) {
+        _inactiveAlertsEnabled.value = enabled
+        appContext?.let { InactiveSukiAlertPrefs.setEnabled(it, currentUserId, enabled) }
+        _events.tryEmit(
+            MinigeEvent.ShowMessage(
+                if (enabled) "Customer inactivity alerts enabled" else "Customer inactivity alerts disabled"
+            )
+        )
+    }
+
+    fun setInactiveThresholdDays(days: Int) {
+        val saved = appContext?.let { InactiveSukiAlertPrefs.saveThresholdDays(it, currentUserId, days) }
+            ?: days.coerceIn(
+                InactiveSukiAlertPrefs.MIN_THRESHOLD_DAYS,
+                InactiveSukiAlertPrefs.MAX_THRESHOLD_DAYS,
+            )
+        _inactiveThresholdDays.value = saved
     }
 
     fun clearStatusMessage() {
@@ -937,6 +974,22 @@ class MinigeViewModel(
             }.onFailure { err ->
                 _events.tryEmit(
                     MinigeEvent.ShowMessage(err.localizedMessage ?: "Failed to record lump-sum payment.")
+                )
+            }
+        }
+    }
+
+    fun undoSettledUtang(deliveryId: String) {
+        viewModelScope.launch {
+            val result = repository.undoSettledUtang(currentUserId, deliveryId)
+            result.onSuccess { customerName ->
+                _events.tryEmit(
+                    MinigeEvent.ShowMessage("Ibinalik sa Unpaid Utang si $customerName")
+                )
+                scheduleAutoBackup()
+            }.onFailure { err ->
+                _events.tryEmit(
+                    MinigeEvent.ShowMessage(err.localizedMessage ?: "Failed to undo settled utang.")
                 )
             }
         }
