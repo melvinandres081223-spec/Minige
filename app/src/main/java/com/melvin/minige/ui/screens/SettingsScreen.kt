@@ -11,9 +11,16 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.defaultMinSize
@@ -27,23 +34,16 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Logout
-import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.Android
 import androidx.compose.material.icons.rounded.AutoMode
 import androidx.compose.material.icons.rounded.Backup
 import androidx.compose.material.icons.rounded.CheckCircleOutline
 import androidx.compose.material.icons.rounded.CloudSync
 import androidx.compose.material.icons.rounded.CloudUpload
-import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.EventAvailable
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
-import androidx.compose.material.icons.rounded.FolderOpen
-import androidx.compose.material.icons.rounded.HealthAndSafety
-import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Mic
-import androidx.compose.material.icons.rounded.NewReleases
 import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.Payments
 import androidx.compose.material.icons.rounded.Percent
@@ -54,8 +54,10 @@ import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.material.icons.rounded.TrackChanges
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -68,13 +70,17 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.melvin.minige.BuildConfig
+import com.melvin.minige.domain.InactiveSeverity
 import com.melvin.minige.domain.InactiveSukiAlert
+import com.melvin.minige.domain.MinigeCustomerUtils
 import com.melvin.minige.sync.DriveBackupManager
 import com.melvin.minige.sync.DriveBackupStatus
 import com.melvin.minige.sync.GitHubAppUpdater
@@ -85,13 +91,11 @@ import com.melvin.minige.ui.components.AppDiagnosticsPanel
 import com.melvin.minige.ui.components.CommissionScheduleDialog
 import com.melvin.minige.ui.components.DailyQuotaDialog
 import com.melvin.minige.ui.components.DeveloperSignatureCard
-import com.melvin.minige.ui.components.DeveloperSignatureConfig
 import com.melvin.minige.ui.components.DiagnosticStatusBadge
-import com.melvin.minige.ui.components.InactiveSukiAlertCard
 import com.melvin.minige.ui.components.InactiveSukiAlertPrefs
+import com.melvin.minige.ui.components.InactiveSukiAlertRow
 import com.melvin.minige.ui.components.PricingSettingsDialog
 import com.melvin.minige.ui.components.SettingsActionRow
-import com.melvin.minige.ui.components.SettingsCategoryHeader
 import com.melvin.minige.ui.components.SettingsDivider
 import com.melvin.minige.ui.components.SettingsSearchBar
 import com.melvin.minige.ui.components.SettingsSwitchRow
@@ -99,6 +103,7 @@ import com.melvin.minige.ui.components.UpdateAvailableDialog
 import com.melvin.minige.ui.components.VerifyDriveRestoreDialog
 import com.melvin.minige.ui.components.WhatsNewBlock
 import com.melvin.minige.util.CommissionRateHistory
+import com.melvin.minige.util.DiagnosticStatus
 import kotlinx.coroutines.launch
 import java.time.LocalDate
 
@@ -136,6 +141,13 @@ fun SettingsScreen(
         return keywords.any { it.contains(normalizedQuery, ignoreCase = true) }
     }
 
+    // Accordion states: Cards 1–4 collapsed by default, Card 5 expanded by default
+    var expandInactiveAccordion by rememberSaveable { mutableStateOf(false) }
+    var expandUpdatesAccordion by rememberSaveable { mutableStateOf(false) }
+    var expandBackupSyncAccordion by rememberSaveable { mutableStateOf(false) }
+    var expandDiagnosticsAccordion by rememberSaveable { mutableStateOf(false) }
+    var expandPreferencesAccordion by rememberSaveable { mutableStateOf(true) }
+
     var isCheckingOrDownloadingUpdate by remember { mutableStateOf(false) }
     var updateStatusText by remember { mutableStateOf<String?>(null) }
     var pendingUpdateRelease by remember { mutableStateOf<GitHubReleaseInfo?>(null) }
@@ -143,13 +155,9 @@ fun SettingsScreen(
     var downloadProgressPercent by remember { mutableIntStateOf(0) }
     var downloadProgressStatus by remember { mutableStateOf("Ready to download") }
 
-    var showWhatsNew by remember { mutableStateOf(true) }
-    var showDiagnostics by remember { mutableStateOf(false) }
-    var isInactiveAlertExpanded by rememberSaveable { mutableStateOf(true) }
     var showPricingDialog by remember { mutableStateOf(false) }
     var showCommissionDialog by remember { mutableStateOf(false) }
     var showQuotaDialog by remember { mutableStateOf(false) }
-    var versionTapCount by remember { mutableIntStateOf(0) }
 
     var hasMicPermission by remember {
         mutableStateOf(
@@ -172,41 +180,84 @@ fun SettingsScreen(
         GitHubAppUpdater.getCachedChangelogUrl(context)
     }
 
-    val showCheckUpdateRow = matches("check", "update", "apk", "version", "github", "updating")
-    val showWhatsNewRow = matches("what's new", "release notes", "vin", "changelog", "updating")
-    val showUpdatingCategory = showCheckUpdateRow || showWhatsNewRow
+    val showInactiveAccordion = matches(
+        "walang karga",
+        "inactive",
+        "suki",
+        "overdue",
+        "customer",
+        "alerts",
+        "days",
+        "threshold",
+        "reorder",
+        "re-order",
+    ) || uiState.inactiveSukiAlerts.any { it.customerName.contains(normalizedQuery, ignoreCase = true) }
 
-    val showDriveGrantRow = uiState.driveBackupStatus == DriveBackupStatus.NEEDS_PERMISSION &&
-        matches("grant", "drive", "permission", "backup")
-    val showBackupNowRow = matches("backup", "drive", "local", "json", "export", "auto")
-    val showRestoreRow = matches("restore", "drive", "backup", "verify", "import")
-    val showAutoBackupRow = matches("automatic backup", "auto", "update", "backup", "new version")
-    val showBackupPathRow = matches("backup path", "path", "folder", "download", "minige", "drive")
-    val showBackupCategory = showDriveGrantRow || showBackupNowRow || showRestoreRow || showAutoBackupRow || showBackupPathRow
+    val showUpdatesAccordion = matches(
+        "updates",
+        "update",
+        "check",
+        "apk",
+        "version",
+        "github",
+        "what's new",
+        "release notes",
+        "vin",
+        "changelog",
+    )
 
-    val showDiagnosticsCategory = matches("logs", "diagnostics", "health", "check", "report", "redact", "bug")
+    val showBackupSyncAccordion = matches(
+        "backup",
+        "restore",
+        "drive",
+        "cloud",
+        "sync",
+        "firebase",
+        "auto",
+        "automatic",
+        "offline",
+        "pending",
+        "grant",
+        "permission",
+    )
 
-    val showInactiveAlertsToggleRow = matches("walang karga", "inactive", "suki", "overdue", "customer", "alerts", "days")
-    val showInactiveThresholdRow = uiState.inactiveAlertsEnabled &&
-        matches("threshold", "days", "walang karga", "inactive", "suki", "overdue", "customer", "alerts")
-    val showInactiveListCard = uiState.inactiveAlertsEnabled &&
-        matches("walang karga", "inactive", "suki", "overdue", "customer", "alerts", "reorder")
-    val showCustomerAlertsCategory = showInactiveAlertsToggleRow || showInactiveThresholdRow || showInactiveListCard
+    val showDiagnosticsAccordion = matches(
+        "diagnostics",
+        "logs",
+        "health",
+        "check",
+        "report",
+        "redact",
+        "bug",
+    )
 
-    val showPricingRow = matches("pricing", "purified", "alkaline", "sukli", "commission", "maliit", "small", "galon", "preferences")
-    val showCommissionScheduleRow = matches("commission", "rate", "schedule", "history", "preferences")
-    val showQuotaRow = matches("quota", "target", "gallons", "daily", "preferences")
-    val showSundayRow = matches("sunday", "makeup", "weekly", "preferences")
-    val showCloudSyncRow = matches("cloud", "sync", "firebase", "account", "email", "preferences")
-    val showMicRow = !hasMicPermission && matches("mic", "microphone", "voice", "permission", "preferences")
-    val showSignOutRow = matches("sign out", "logout", "account", "preferences")
-    val showPreferencesCategory = showPricingRow || showCommissionScheduleRow || showQuotaRow ||
-        showSundayRow || showCloudSyncRow || showMicRow || showSignOutRow
+    val showPreferencesAccordion = matches(
+        "pricing",
+        "purified",
+        "alkaline",
+        "sukli",
+        "commission",
+        "maliit",
+        "small",
+        "galon",
+        "rate",
+        "schedule",
+        "quota",
+        "target",
+        "gallons",
+        "daily",
+        "sunday",
+        "makeup",
+        "weekly",
+        "mic",
+        "microphone",
+        "voice",
+        "preferences",
+    )
 
-    val showVersionRow = matches("about", "version", "build", "minige")
-    val showPackageRow = matches("about", "package", "com.melvin.minige", "id")
-    val showSourceRow = matches("about", "source", "github", "repo", "code", "open")
-    val showAboutCategory = showVersionRow || showPackageRow || showSourceRow
+    val showSignOutRow = matches("sign out", "logout", "account", userEmail ?: "")
+
+    val isSearching = normalizedQuery.isNotEmpty()
 
     Box(
         modifier = modifier
@@ -219,23 +270,188 @@ fun SettingsScreen(
                 .fillMaxSize()
                 .widthIn(max = 600.dp)
                 .testTag("settings_lazy_column"),
-            contentPadding = PaddingValues(top = 12.dp, bottom = 96.dp),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 96.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             item(key = "settings_search_bar", contentType = "search_bar") {
                 SettingsSearchBar(
                     query = searchQuery,
                     onQueryChange = { searchQuery = it },
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                    modifier = Modifier.padding(bottom = 2.dp),
                 )
             }
 
-            if (showUpdatingCategory) {
-                item(key = "header_updating", contentType = "category_header") {
-                    SettingsCategoryHeader(title = "Updating")
-                }
+            // 1. ⚠️ 3+ Days Walang Karga (X suki) — collapsed by default
+            if (showInactiveAccordion) {
+                item(key = "accordion_inactive_suki", contentType = "accordion_card") {
+                    val hasCritical = uiState.inactiveSukiAlerts.any {
+                        it.severity == InactiveSeverity.RED_CRITICAL
+                    }
+                    val borderColor = when {
+                        !uiState.inactiveAlertsEnabled -> MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
+                        hasCritical -> MaterialTheme.colorScheme.error.copy(alpha = 0.55f)
+                        uiState.inactiveSukiCount > 0 -> MaterialTheme.colorScheme.tertiary.copy(alpha = 0.65f)
+                        else -> MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
+                    }
+                    val subtitle = when {
+                        !uiState.inactiveAlertsEnabled ->
+                            "Alerts off • Threshold: ${uiState.inactiveThresholdDays}d"
+                        uiState.inactiveSukiCount > 0 -> {
+                            val longest = uiState.inactiveSukiAlerts.maxOf { it.daysSinceLastDelivery }
+                            "${uiState.inactiveSukiCount} suki overdue • Pinakamatagal: ${longest}d"
+                        }
+                        else -> "All suki active (${uiState.inactiveThresholdDays}d+ threshold)"
+                    }
 
-                if (showCheckUpdateRow) {
-                    item(key = "row_check_updates", contentType = "action_row") {
+                    SettingsAccordionCard(
+                        title = "⚠️ ${uiState.inactiveThresholdDays}+ Days Walang Karga (${uiState.inactiveSukiCount} suki)",
+                        subtitle = subtitle,
+                        expanded = expandInactiveAccordion || isSearching,
+                        onToggle = { expandInactiveAccordion = !expandInactiveAccordion },
+                        borderColor = borderColor,
+                        cardTestTag = "settings_accordion_inactive_suki",
+                        headerTestTag = "settings_accordion_inactive_suki_header",
+                    ) {
+                        SettingsSwitchRow(
+                            icon = Icons.Rounded.NotificationsActive,
+                            title = "Walang Karga Alerts",
+                            subtitle = "Flag suki without orders after threshold",
+                            checked = uiState.inactiveAlertsEnabled,
+                            onCheckedChange = onToggleInactiveAlerts,
+                            switchTestTag = "inactive_alerts_enabled_switch",
+                        )
+
+                        if (uiState.inactiveAlertsEnabled) {
+                            SettingsDivider()
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .defaultMinSize(minHeight = 56.dp)
+                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Schedule,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(22.dp),
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Overdue Threshold",
+                                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+                                    )
+                                    Text(
+                                        text = "Flag after ${uiState.inactiveThresholdDays} day(s)",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    FilledTonalIconButton(
+                                        onClick = {
+                                            onUpdateInactiveThresholdDays(
+                                                (uiState.inactiveThresholdDays - 1)
+                                                    .coerceAtLeast(InactiveSukiAlertPrefs.MIN_THRESHOLD_DAYS)
+                                            )
+                                        },
+                                        enabled = uiState.inactiveThresholdDays > InactiveSukiAlertPrefs.MIN_THRESHOLD_DAYS,
+                                        modifier = Modifier
+                                            .size(48.dp)
+                                            .testTag("inactive_threshold_minus_button"),
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Remove,
+                                            contentDescription = "Decrease overdue threshold",
+                                        )
+                                    }
+                                    Text(
+                                        text = "${uiState.inactiveThresholdDays}d",
+                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                        modifier = Modifier
+                                            .padding(horizontal = 4.dp)
+                                            .testTag("inactive_threshold_value_text"),
+                                    )
+                                    FilledTonalIconButton(
+                                        onClick = {
+                                            onUpdateInactiveThresholdDays(
+                                                (uiState.inactiveThresholdDays + 1)
+                                                    .coerceAtMost(InactiveSukiAlertPrefs.MAX_THRESHOLD_DAYS)
+                                            )
+                                        },
+                                        enabled = uiState.inactiveThresholdDays < InactiveSukiAlertPrefs.MAX_THRESHOLD_DAYS,
+                                        modifier = Modifier
+                                            .size(48.dp)
+                                            .testTag("inactive_threshold_plus_button"),
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Add,
+                                            contentDescription = "Increase overdue threshold",
+                                        )
+                                    }
+                                }
+                            }
+
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(start = 12.dp, end = 12.dp, bottom = 12.dp, top = 4.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                if (uiState.inactiveSukiAlerts.isNotEmpty()) {
+                                    uiState.inactiveSukiAlerts.forEach { alert ->
+                                        InactiveSukiAlertRow(
+                                            alert = alert,
+                                            onReorderClick = { onReorderInactiveSuki(alert) },
+                                        )
+                                    }
+                                } else {
+                                    Surface(
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("inactive_suki_all_active_row"),
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(12.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.CheckCircleOutline,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.primary,
+                                            )
+                                            Text(
+                                                text = "All suki are active — no ${uiState.inactiveThresholdDays}+ day overdue orders.",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. 🔄 Updates & What's New (vX.Y.Z) — collapsed by default
+            if (showUpdatesAccordion) {
+                item(key = "accordion_updates", contentType = "accordion_card") {
+                    SettingsAccordionCard(
+                        title = "🔄 Updates & What's New (v${BuildConfig.VERSION_NAME})",
+                        subtitle = updateStatusText ?: GitHubAppUpdater.RELEASE_NOTES_ATTRIBUTION,
+                        expanded = expandUpdatesAccordion || isSearching,
+                        onToggle = { expandUpdatesAccordion = !expandUpdatesAccordion },
+                        cardTestTag = "settings_accordion_updates",
+                        headerTestTag = "settings_accordion_updates_header",
+                    ) {
                         SettingsActionRow(
                             icon = Icons.Rounded.SystemUpdate,
                             title = "Check for App Updates",
@@ -279,82 +495,55 @@ fun SettingsScreen(
                             },
                             modifier = Modifier.testTag("check_updates_button"),
                         )
-                    }
-                }
-
-                if (showWhatsNewRow) {
-                    item(key = "row_whats_new", contentType = "whats_new_row") {
-                        Column(modifier = Modifier.fillMaxWidth()) {
-                            SettingsActionRow(
-                                icon = Icons.Rounded.NewReleases,
-                                title = "What's New in Minige",
-                                subtitle = GitHubAppUpdater.RELEASE_NOTES_ATTRIBUTION,
-                                onClick = { showWhatsNew = !showWhatsNew },
-                                trailingContent = {
-                                    Icon(
-                                        imageVector = if (showWhatsNew || normalizedQuery.isNotEmpty()) {
-                                            Icons.Rounded.ExpandLess
-                                        } else {
-                                            Icons.Rounded.ExpandMore
-                                        },
-                                        contentDescription = "Toggle release notes",
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                },
-                            )
-                            AnimatedVisibility(visible = showWhatsNew || normalizedQuery.isNotEmpty()) {
-                                WhatsNewBlock(
-                                    bullets = whatsNewBullets,
-                                    onViewFullChangelog = { openUrl(context, cachedChangelogUrl) },
-                                )
-                            }
-                        }
-                    }
-                }
-
-                item(key = "divider_updating", contentType = "divider") {
-                    SettingsDivider(modifier = Modifier.padding(top = 6.dp))
-                }
-            }
-
-            if (showBackupCategory) {
-                item(key = "header_backup", contentType = "category_header") {
-                    SettingsCategoryHeader(title = "Backup and restore")
-                }
-
-                if (showDriveGrantRow) {
-                    item(key = "row_grant_drive", contentType = "action_row") {
-                        SettingsActionRow(
-                            icon = Icons.Rounded.CloudUpload,
-                            title = "Grant Google Drive Access",
-                            subtitle = "Needed to save backups in My Drive '${DriveBackupManager.BACKUP_FOLDER_NAME}'",
-                            iconTint = MaterialTheme.colorScheme.tertiary,
-                            onClick = onGrantDriveAccess,
-                            modifier = Modifier.testTag("grant_drive_access_button"),
+                        SettingsDivider()
+                        WhatsNewBlock(
+                            bullets = whatsNewBullets,
+                            onViewFullChangelog = { openUrl(context, cachedChangelogUrl) },
+                            modifier = Modifier.padding(top = 4.dp, bottom = 8.dp),
                         )
                     }
                 }
+            }
 
-                if (showBackupNowRow) {
-                    item(key = "row_backup_now", contentType = "action_row") {
-                        val summary = uiState.driveBackupSummary
-                        val statusPrefix = when {
-                            uiState.isDriveBackingUp || uiState.driveBackupStatus == DriveBackupStatus.BACKING_UP ->
-                                "Backing up to Drive & Downloads..."
-                            uiState.driveBackupStatus == DriveBackupStatus.ACTIVE -> "Drive Active"
-                            uiState.driveBackupStatus == DriveBackupStatus.ERROR -> "Drive offline / retry queued"
-                            else -> "Local export active • Drive permission needed"
+            // 3. ☁️ Backup & Cloud Sync — collapsed by default
+            if (showBackupSyncAccordion) {
+                item(key = "accordion_backup_sync", contentType = "accordion_card") {
+                    val driveShortStatus = when {
+                        uiState.isDriveBackingUp || uiState.driveBackupStatus == DriveBackupStatus.BACKING_UP ->
+                            "Backing up..."
+                        uiState.driveBackupStatus == DriveBackupStatus.ACTIVE -> "Drive Active"
+                        uiState.driveBackupStatus == DriveBackupStatus.ERROR -> "Drive retry queued"
+                        else -> "Needs Drive Permission"
+                    }
+                    val lastBackupText = DriveBackupManager.formatBackupTimestamp(uiState.driveLastBackupTimestamp)
+                    val summaryCounts = uiState.driveBackupSummary?.let {
+                        " • ${it.totalDeliveries} deliveries, ${it.totalPayments} payments"
+                    }.orEmpty()
+
+                    SettingsAccordionCard(
+                        title = "☁️ Backup & Cloud Sync",
+                        subtitle = "$driveShortStatus • Last: $lastBackupText • Pending: ${uiState.pendingSyncCount}",
+                        expanded = expandBackupSyncAccordion || isSearching,
+                        onToggle = { expandBackupSyncAccordion = !expandBackupSyncAccordion },
+                        cardTestTag = "settings_accordion_backup_sync",
+                        headerTestTag = "settings_accordion_backup_sync_header",
+                    ) {
+                        if (uiState.driveBackupStatus == DriveBackupStatus.NEEDS_PERMISSION) {
+                            SettingsActionRow(
+                                icon = Icons.Rounded.CloudUpload,
+                                title = "Grant Google Drive Access",
+                                subtitle = "Save backups in My Drive '${DriveBackupManager.BACKUP_FOLDER_NAME}'",
+                                iconTint = MaterialTheme.colorScheme.tertiary,
+                                onClick = onGrantDriveAccess,
+                                modifier = Modifier.testTag("grant_drive_access_button"),
+                            )
+                            SettingsDivider()
                         }
-                        val countsLine = summary?.let {
-                            " • ${it.totalDeliveries} deliveries, ${it.totalPayments} payments, ${it.totalCustomers} customers"
-                        }.orEmpty()
 
                         SettingsActionRow(
                             icon = Icons.Rounded.Backup,
                             title = "Backup",
-                            subtitle = "$statusPrefix • Last: ${
-                                DriveBackupManager.formatBackupTimestamp(uiState.driveLastBackupTimestamp)
-                            }$countsLine",
+                            subtitle = "$driveShortStatus • Last: $lastBackupText$summaryCounts",
                             enabled = !uiState.isDriveBackingUp,
                             iconTint = MaterialTheme.colorScheme.primary,
                             onClick = onBackupToDriveNow,
@@ -368,318 +557,28 @@ fun SettingsScreen(
                             },
                             modifier = Modifier.testTag("backup_now_button"),
                         )
-                    }
-                }
+                        SettingsDivider()
 
-                if (showRestoreRow) {
-                    item(key = "row_restore", contentType = "action_row") {
                         SettingsActionRow(
                             icon = Icons.Rounded.Restore,
                             title = "Restore",
-                            subtitle = "Verify & restore from '${DriveBackupManager.BACKUP_FOLDER_NAME}' (${DriveBackupManager.BACKUP_FILE_NAME})",
+                            subtitle = "Verify & restore from '${DriveBackupManager.BACKUP_FOLDER_NAME}'",
                             enabled = !uiState.isDriveBackingUp,
                             onClick = onPreviewRestoreFromDrive,
                             modifier = Modifier.testTag("restore_from_drive_button"),
                         )
-                    }
-                }
+                        SettingsDivider()
 
-                if (showAutoBackupRow) {
-                    item(key = "row_auto_backup", contentType = "switch_row") {
                         SettingsSwitchRow(
                             icon = Icons.Rounded.AutoMode,
-                            title = "Automatic backup",
-                            subtitle = "Automatically make a backup of everything when a new version of the application is found",
+                            title = "Automatic backup before update",
+                            subtitle = "Back up data automatically when an update is found",
                             checked = uiState.autoBackupBeforeUpdate,
                             onCheckedChange = onToggleAutoBackupBeforeUpdate,
                             switchTestTag = "auto_backup_on_update_switch",
                         )
-                    }
-                }
+                        SettingsDivider()
 
-                if (showBackupPathRow) {
-                    item(key = "row_backup_path", contentType = "action_row") {
-                        SettingsActionRow(
-                            icon = Icons.Rounded.FolderOpen,
-                            title = "Backup path",
-                            subtitle = "Google Drive: ${DriveBackupManager.BACKUP_FOLDER_NAME}\nLocal: ${DriveBackupManager.LOCAL_BACKUP_DISPLAY_PATH}",
-                            onClick = {
-                                copyToClipboard(
-                                    context = context,
-                                    label = "Minige Backup Path",
-                                    text = "Drive: ${DriveBackupManager.BACKUP_FOLDER_NAME} | Local: ${DriveBackupManager.LOCAL_BACKUP_DISPLAY_PATH}",
-                                    toastMessage = "Backup path copied",
-                                )
-                            },
-                            modifier = Modifier.testTag("backup_path_row"),
-                        )
-                    }
-                }
-
-                item(key = "divider_backup", contentType = "divider") {
-                    SettingsDivider(modifier = Modifier.padding(top = 6.dp))
-                }
-            }
-
-            if (showDiagnosticsCategory) {
-                item(key = "header_diagnostics", contentType = "category_header") {
-                    SettingsCategoryHeader(title = "Diagnostics & Logs")
-                }
-
-                item(key = "row_diagnostics", contentType = "diagnostics_row") {
-                    val report = uiState.diagnosticReport
-                    Column(modifier = Modifier.fillMaxWidth()) {
-                        SettingsActionRow(
-                            icon = Icons.Rounded.HealthAndSafety,
-                            title = "Logs / App Diagnostics",
-                            subtitle = report?.let {
-                                "5 checks evaluated • ${it.overallStatus.badgeLabel} (${it.generatedAtDisplay})"
-                            } ?: "Read-only health check across auth, Drive backup, ledger math & permissions",
-                            iconTint = MaterialTheme.colorScheme.primary,
-                            onClick = {
-                                showDiagnostics = !showDiagnostics
-                                if (showDiagnostics && report == null && !uiState.isRunningDiagnostics) {
-                                    onRunDiagnostics()
-                                }
-                            },
-                            trailingContent = {
-                                if (report != null) {
-                                    DiagnosticStatusBadge(status = report.overallStatus)
-                                } else {
-                                    Icon(
-                                        imageVector = if (showDiagnostics) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
-                                        contentDescription = "Toggle diagnostics",
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                }
-                            },
-                            modifier = Modifier.testTag("diagnostics_toggle_row"),
-                        )
-
-                        AnimatedVisibility(visible = showDiagnostics || report != null || normalizedQuery.isNotEmpty()) {
-                            AppDiagnosticsPanel(
-                                report = report,
-                                isRunning = uiState.isRunningDiagnostics,
-                                onRunDiagnostics = onRunDiagnostics,
-                                onCopyReport = { text ->
-                                    copyToClipboard(
-                                        context = context,
-                                        label = "Minige Diagnostic Report",
-                                        text = text,
-                                        toastMessage = "Diagnostic report copied (secrets redacted)",
-                                    )
-                                },
-                            )
-                        }
-                    }
-                }
-
-                item(key = "divider_diagnostics", contentType = "divider") {
-                    SettingsDivider(modifier = Modifier.padding(top = 6.dp))
-                }
-            }
-
-            if (showCustomerAlertsCategory) {
-                item(key = "header_customer_alerts", contentType = "category_header") {
-                    SettingsCategoryHeader(title = "Customer Alerts")
-                }
-
-                if (showInactiveAlertsToggleRow) {
-                    item(key = "row_inactive_alerts_toggle", contentType = "switch_row") {
-                        SettingsSwitchRow(
-                            icon = Icons.Rounded.NotificationsActive,
-                            title = "${uiState.inactiveThresholdDays}+ Days Walang Karga Alerts",
-                            subtitle = "Track suki customers who haven't ordered recently",
-                            checked = uiState.inactiveAlertsEnabled,
-                            onCheckedChange = onToggleInactiveAlerts,
-                            switchTestTag = "inactive_alerts_enabled_switch",
-                        )
-                    }
-                }
-
-                if (showInactiveThresholdRow) {
-                    item(key = "row_inactive_threshold", contentType = "threshold_stepper_row") {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .defaultMinSize(minHeight = 60.dp)
-                                .padding(horizontal = 16.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(16.dp),
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Schedule,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(24.dp),
-                            )
-                            Column(
-                                modifier = Modifier.weight(1f),
-                                verticalArrangement = Arrangement.spacedBy(2.dp),
-                            ) {
-                                Text(
-                                    text = "Overdue Threshold",
-                                    style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Medium),
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                )
-                                Text(
-                                    text = "Flag suki after ${uiState.inactiveThresholdDays} day(s) without an order",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            ) {
-                                FilledTonalIconButton(
-                                    onClick = {
-                                        onUpdateInactiveThresholdDays(
-                                            (uiState.inactiveThresholdDays - 1)
-                                                .coerceAtLeast(InactiveSukiAlertPrefs.MIN_THRESHOLD_DAYS)
-                                        )
-                                    },
-                                    enabled = uiState.inactiveThresholdDays > InactiveSukiAlertPrefs.MIN_THRESHOLD_DAYS,
-                                    modifier = Modifier
-                                        .size(48.dp)
-                                        .testTag("inactive_threshold_minus_button"),
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Remove,
-                                        contentDescription = "Decrease overdue days threshold",
-                                    )
-                                }
-                                Text(
-                                    text = "${uiState.inactiveThresholdDays}d",
-                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                                    modifier = Modifier
-                                        .padding(horizontal = 6.dp)
-                                        .testTag("inactive_threshold_value_text"),
-                                )
-                                FilledTonalIconButton(
-                                    onClick = {
-                                        onUpdateInactiveThresholdDays(
-                                            (uiState.inactiveThresholdDays + 1)
-                                                .coerceAtMost(InactiveSukiAlertPrefs.MAX_THRESHOLD_DAYS)
-                                        )
-                                    },
-                                    enabled = uiState.inactiveThresholdDays < InactiveSukiAlertPrefs.MAX_THRESHOLD_DAYS,
-                                    modifier = Modifier
-                                        .size(48.dp)
-                                        .testTag("inactive_threshold_plus_button"),
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Add,
-                                        contentDescription = "Increase overdue days threshold",
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if (showInactiveListCard) {
-                    item(key = "row_inactive_suki_list", contentType = "inactive_suki_alert") {
-                        if (uiState.inactiveSukiAlerts.isNotEmpty()) {
-                            InactiveSukiAlertCard(
-                                alerts = uiState.inactiveSukiAlerts,
-                                expanded = isInactiveAlertExpanded || normalizedQuery.isNotEmpty(),
-                                onToggleExpanded = { isInactiveAlertExpanded = !isInactiveAlertExpanded },
-                                onReorderClick = onReorderInactiveSuki,
-                                thresholdDays = uiState.inactiveThresholdDays,
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-                            )
-                        } else {
-                            Surface(
-                                shape = RoundedCornerShape(16.dp),
-                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 6.dp)
-                                    .testTag("inactive_suki_all_active_row"),
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(14.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.CheckCircleOutline,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.primary,
-                                    )
-                                    Text(
-                                        text = "All suki are active — no ${uiState.inactiveThresholdDays}+ day overdue customers.",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-
-                item(key = "divider_customer_alerts", contentType = "divider") {
-                    SettingsDivider(modifier = Modifier.padding(top = 6.dp))
-                }
-            }
-
-            if (showPreferencesCategory) {
-                item(key = "header_preferences", contentType = "category_header") {
-                    SettingsCategoryHeader(title = "Preferences")
-                }
-
-                if (showPricingRow) {
-                    item(key = "row_pricing", contentType = "action_row") {
-                        SettingsActionRow(
-                            icon = Icons.Rounded.Payments,
-                            title = "Pricing & Default Sukli",
-                            subtitle = "Purified ₱${uiState.settings.purifiedPrice} • Alkaline ₱${uiState.settings.alkalinePrice} • Maliit ₱${com.melvin.minige.domain.MinigeCustomerUtils.formatPrice(uiState.smallGallonPrice)} (₱${CommissionRateHistory.formatRate(uiState.smallGallonCommissionRate)}/g) • Sukli ₱${uiState.settings.defaultSukli}",
-                            onClick = { showPricingDialog = true },
-                            modifier = Modifier.testTag("settings_pricing_row"),
-                        )
-                    }
-                }
-
-                if (showCommissionScheduleRow) {
-                    item(key = "row_commission_schedule", contentType = "action_row") {
-                        SettingsActionRow(
-                            icon = Icons.Rounded.Percent,
-                            title = "Commission Rate Schedule",
-                            subtitle = "Active rate: ₱${CommissionRateHistory.formatRate(uiState.activeCommissionRate)}/gal • Schedule future rates",
-                            onClick = { showCommissionDialog = true },
-                            modifier = Modifier.testTag("settings_commission_schedule_row"),
-                        )
-                    }
-                }
-
-                if (showQuotaRow) {
-                    item(key = "row_quota", contentType = "action_row") {
-                        SettingsActionRow(
-                            icon = Icons.Rounded.TrackChanges,
-                            title = "Daily Quota Target",
-                            subtitle = "${uiState.dailyQuotaTarget} paid gallons per day",
-                            onClick = { showQuotaDialog = true },
-                            modifier = Modifier.testTag("settings_quota_row"),
-                        )
-                    }
-                }
-
-                if (showSundayRow) {
-                    item(key = "row_sunday_makeup", contentType = "switch_row") {
-                        SettingsSwitchRow(
-                            icon = Icons.Rounded.EventAvailable,
-                            title = "Sunday Makeup Work Mode",
-                            subtitle = "Include Sunday deliveries & commissions in this week's tally",
-                            checked = uiState.sundayMakeupEnabled,
-                            onCheckedChange = onToggleSundayMakeup,
-                            switchTestTag = "settings_sunday_makeup_switch",
-                        )
-                    }
-                }
-
-                if (showCloudSyncRow) {
-                    item(key = "row_cloud_sync", contentType = "action_row") {
                         SettingsActionRow(
                             icon = Icons.Rounded.CloudSync,
                             title = if (uiState.isSyncing) "Syncing Cloud Data..." else "Cloud Sync Now",
@@ -698,114 +597,128 @@ fun SettingsScreen(
                         )
                     }
                 }
-
-                if (showMicRow) {
-                    item(key = "row_mic_permission", contentType = "action_row") {
-                        SettingsActionRow(
-                            icon = Icons.Rounded.Mic,
-                            title = "Enable Microphone",
-                            subtitle = "Allow quick voice input in delivery forms",
-                            onClick = { micLauncher.launch(Manifest.permission.RECORD_AUDIO) },
-                            modifier = Modifier.testTag("enable_mic_row"),
-                        )
-                    }
-                }
-
-                if (showSignOutRow) {
-                    item(key = "row_sign_out", contentType = "action_row") {
-                        SettingsActionRow(
-                            icon = Icons.AutoMirrored.Rounded.Logout,
-                            title = "Sign Out",
-                            subtitle = "Switch Google account on this device",
-                            iconTint = MaterialTheme.colorScheme.error,
-                            onClick = onSignOut,
-                            modifier = Modifier.testTag("sign_out_button"),
-                        )
-                    }
-                }
-
-                item(key = "divider_preferences", contentType = "divider") {
-                    SettingsDivider(modifier = Modifier.padding(top = 6.dp))
-                }
             }
 
-            if (showAboutCategory) {
-                item(key = "header_about", contentType = "category_header") {
-                    SettingsCategoryHeader(title = "About")
-                }
-
-                if (showVersionRow) {
-                    item(key = "row_about_version", contentType = "action_row") {
-                        SettingsActionRow(
-                            icon = Icons.Rounded.Info,
-                            title = "App Version",
-                            subtitle = "v${BuildConfig.VERSION_NAME} (Code ${BuildConfig.VERSION_CODE})",
-                            onClick = {
-                                val nextTap = versionTapCount + 1
-                                if (nextTap >= DeveloperSignatureConfig.EASTER_EGG_TAPS) {
-                                    versionTapCount = 0
-                                    Toast.makeText(
-                                        context,
-                                        DeveloperSignatureConfig.EASTER_EGG_MESSAGE,
-                                        Toast.LENGTH_SHORT,
-                                    ).show()
-                                } else {
-                                    versionTapCount = nextTap
-                                }
-                            },
-                            modifier = Modifier.testTag("about_version_row"),
-                        )
+            // 4. 🩺 App Diagnostics — collapsed by default; runs on tap
+            if (showDiagnosticsAccordion) {
+                item(key = "accordion_diagnostics", contentType = "accordion_card") {
+                    val report = uiState.diagnosticReport
+                    val diagBorderColor = when (report?.overallStatus) {
+                        DiagnosticStatus.FAIL -> MaterialTheme.colorScheme.error.copy(alpha = 0.55f)
+                        DiagnosticStatus.WARN -> MaterialTheme.colorScheme.tertiary.copy(alpha = 0.65f)
+                        else -> MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
                     }
-                }
 
-                if (showPackageRow) {
-                    item(key = "row_about_package", contentType = "action_row") {
-                        SettingsActionRow(
-                            icon = Icons.Rounded.Android,
-                            title = "Package Name",
-                            subtitle = BuildConfig.APPLICATION_ID,
-                            onClick = {
+                    SettingsAccordionCard(
+                        title = "🩺 App Diagnostics",
+                        subtitle = report?.let {
+                            "5 checks • ${it.overallStatus.badgeLabel} (${it.generatedAtDisplay})"
+                        } ?: "Tap to run 5-point health check & copy report",
+                        expanded = expandDiagnosticsAccordion || isSearching,
+                        onToggle = {
+                            val next = !expandDiagnosticsAccordion
+                            expandDiagnosticsAccordion = next
+                            if (next && report == null && !uiState.isRunningDiagnostics) {
+                                onRunDiagnostics()
+                            }
+                        },
+                        borderColor = diagBorderColor,
+                        trailingBadge = {
+                            if (report != null) {
+                                DiagnosticStatusBadge(status = report.overallStatus)
+                            }
+                        },
+                        cardTestTag = "settings_accordion_diagnostics",
+                        headerTestTag = "diagnostics_toggle_row",
+                    ) {
+                        AppDiagnosticsPanel(
+                            report = report,
+                            isRunning = uiState.isRunningDiagnostics,
+                            onRunDiagnostics = onRunDiagnostics,
+                            onCopyReport = { text ->
                                 copyToClipboard(
                                     context = context,
-                                    label = "Minige Package Name",
-                                    text = BuildConfig.APPLICATION_ID,
-                                    toastMessage = "Package name copied",
+                                    label = "Minige Diagnostic Report",
+                                    text = text,
+                                    toastMessage = "Diagnostic report copied (secrets redacted)",
                                 )
                             },
-                            modifier = Modifier.testTag("about_package_row"),
-                        )
-                    }
-                }
-
-                if (showSourceRow) {
-                    item(key = "row_about_source", contentType = "action_row") {
-                        SettingsActionRow(
-                            icon = Icons.Rounded.Code,
-                            title = "Source Code",
-                            subtitle = DriveBackupManager.GITHUB_SOURCE_CODE_URL,
-                            onClick = { openUrl(context, DriveBackupManager.GITHUB_SOURCE_CODE_URL) },
-                            trailingContent = {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
-                                    contentDescription = "Open source repository",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.size(18.dp),
-                                )
-                            },
-                            modifier = Modifier.testTag("about_source_code_row"),
+                            modifier = Modifier.padding(bottom = 8.dp),
                         )
                     }
                 }
             }
 
-            if (!showUpdatingCategory && !showBackupCategory && !showDiagnosticsCategory &&
-                !showCustomerAlertsCategory && !showPreferencesCategory && !showAboutCategory
+            // 5. ⚙️ Pricing, Commission & Quota — expanded by default
+            if (showPreferencesAccordion) {
+                item(key = "accordion_preferences", contentType = "accordion_card") {
+                    val formattedRate = CommissionRateHistory.formatRate(uiState.activeCommissionRate)
+                    SettingsAccordionCard(
+                        title = "⚙️ Pricing, Commission & Quota",
+                        subtitle = "Purified ₱${uiState.settings.purifiedPrice} • Comm ₱$formattedRate/gal • Quota ${uiState.dailyQuotaTarget}g",
+                        expanded = expandPreferencesAccordion || isSearching,
+                        onToggle = { expandPreferencesAccordion = !expandPreferencesAccordion },
+                        cardTestTag = "settings_accordion_preferences",
+                        headerTestTag = "settings_accordion_preferences_header",
+                    ) {
+                        SettingsActionRow(
+                            icon = Icons.Rounded.Payments,
+                            title = "Pricing & Default Sukli",
+                            subtitle = "Purified ₱${uiState.settings.purifiedPrice} • Alkaline ₱${uiState.settings.alkalinePrice} • Maliit ₱${MinigeCustomerUtils.formatPrice(uiState.smallGallonPrice)} • Sukli ₱${uiState.settings.defaultSukli}",
+                            onClick = { showPricingDialog = true },
+                            modifier = Modifier.testTag("settings_pricing_row"),
+                        )
+                        SettingsDivider()
+
+                        SettingsActionRow(
+                            icon = Icons.Rounded.Percent,
+                            title = "Commission Rate Schedule",
+                            subtitle = "Active rate: ₱$formattedRate/gal • Schedule future rates",
+                            onClick = { showCommissionDialog = true },
+                            modifier = Modifier.testTag("settings_commission_schedule_row"),
+                        )
+                        SettingsDivider()
+
+                        SettingsActionRow(
+                            icon = Icons.Rounded.TrackChanges,
+                            title = "Daily Quota Target",
+                            subtitle = "${uiState.dailyQuotaTarget} gallons per day",
+                            onClick = { showQuotaDialog = true },
+                            modifier = Modifier.testTag("settings_quota_row"),
+                        )
+                        SettingsDivider()
+
+                        SettingsSwitchRow(
+                            icon = Icons.Rounded.EventAvailable,
+                            title = "Sunday Makeup Work Mode",
+                            subtitle = "Include Sunday deliveries & commissions in this week's tally",
+                            checked = uiState.sundayMakeupEnabled,
+                            onCheckedChange = onToggleSundayMakeup,
+                            switchTestTag = "settings_sunday_makeup_switch",
+                        )
+
+                        if (!hasMicPermission) {
+                            SettingsDivider()
+                            SettingsActionRow(
+                                icon = Icons.Rounded.Mic,
+                                title = "Enable Microphone",
+                                subtitle = "Allow quick voice input in delivery forms",
+                                onClick = { micLauncher.launch(Manifest.permission.RECORD_AUDIO) },
+                                modifier = Modifier.testTag("enable_mic_row"),
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (!showInactiveAccordion && !showUpdatesAccordion && !showBackupSyncAccordion &&
+                !showDiagnosticsAccordion && !showPreferencesAccordion && !showSignOutRow
             ) {
                 item(key = "settings_no_match", contentType = "empty_search") {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(32.dp),
+                            .padding(28.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
@@ -814,7 +727,7 @@ fun SettingsScreen(
                             style = MaterialTheme.typography.titleMedium,
                         )
                         Text(
-                            text = "Try searching for update, backup, diagnostics, rate, quota, or about.",
+                            text = "Try searching for walang karga, update, backup, diagnostics, rate, or quota.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -822,9 +735,28 @@ fun SettingsScreen(
                 }
             }
 
+            // Compact bottom Sign Out row + Developer attribution card (preserves 5-tap secret gesture)
+            if (showSignOutRow) {
+                item(key = "row_sign_out_compact", contentType = "sign_out_card") {
+                    OutlinedCard(
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        SettingsActionRow(
+                            icon = Icons.AutoMirrored.Rounded.Logout,
+                            title = "Sign Out",
+                            subtitle = userEmail ?: "Switch Google account on this device",
+                            iconTint = MaterialTheme.colorScheme.error,
+                            onClick = onSignOut,
+                            modifier = Modifier.testTag("sign_out_button"),
+                        )
+                    }
+                }
+            }
+
             item(key = "developer_signature_card", contentType = "developer_signature") {
                 DeveloperSignatureCard(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                    modifier = Modifier.padding(top = 4.dp),
                 )
             }
         }
@@ -911,6 +843,84 @@ fun SettingsScreen(
             onConfirm = onConfirmRestoreFromDrive,
             onDismiss = onDismissRestorePreview,
         )
+    }
+}
+
+@Composable
+private fun SettingsAccordionCard(
+    title: String,
+    subtitle: String,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    cardTestTag: String,
+    headerTestTag: String,
+    modifier: Modifier = Modifier,
+    borderColor: Color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f),
+    trailingBadge: (@Composable () -> Unit)? = null,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Surface(
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f),
+        border = BorderStroke(1.dp, borderColor),
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag(cardTestTag),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .defaultMinSize(minHeight = 60.dp)
+                    .clickable(onClick = onToggle)
+                    .padding(horizontal = 14.dp, vertical = 12.dp)
+                    .testTag(headerTestTag),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = subtitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                if (trailingBadge != null) {
+                    trailingBadge()
+                }
+                Icon(
+                    imageVector = if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                    contentDescription = if (expanded) "Collapse section" else "Expand section",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(22.dp),
+                )
+            }
+
+            AnimatedVisibility(
+                visible = expanded,
+                enter = expandVertically(animationSpec = spring(stiffness = Spring.StiffnessMediumLow)),
+                exit = shrinkVertically(animationSpec = spring(stiffness = Spring.StiffnessMediumLow)),
+            ) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    HorizontalDivider(
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f),
+                    )
+                    content()
+                }
+            }
+        }
     }
 }
 

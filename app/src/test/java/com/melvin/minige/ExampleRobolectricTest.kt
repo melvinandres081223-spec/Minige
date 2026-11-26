@@ -77,6 +77,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.performTextInput
 import com.melvin.minige.domain.InactiveSukiAlert
 import com.melvin.minige.ui.MinigeUiState
 import com.melvin.minige.ui.components.InactiveSukiAlertPrefs
@@ -3204,7 +3205,7 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `settings screen renders overdue suki card, threshold controls, and reorder callback`() {
+    fun `settings screen renders collapsed accordion cards, expanded preferences, search auto-expand, and reorder`() {
         val alerts = listOf(
             InactiveSukiAlert(
                 customerId = "dc",
@@ -3232,6 +3233,7 @@ class ExampleRobolectricTest {
         var toggledEnabled: Boolean? = null
         var updatedThreshold: Int? = null
         var reorderedAlert: InactiveSukiAlert? = null
+        var diagnosticsTriggered = false
 
         composeTestRule.setContent {
             MaterialTheme {
@@ -3250,14 +3252,28 @@ class ExampleRobolectricTest {
                     onToggleInactiveAlerts = { toggledEnabled = it },
                     onUpdateInactiveThresholdDays = { updatedThreshold = it },
                     onReorderInactiveSuki = { reorderedAlert = it },
+                    onRunDiagnostics = { diagnosticsTriggered = true },
                     onSyncNow = {},
                     onSignOut = {},
                 )
             }
         }
 
-        // Scroll to Customer Alerts section and verify controls + Re-order action
-        composeTestRule.onNodeWithTag("settings_search_input").assertIsDisplayed()
+        // All 5 accordion cards exist, Cards 1–4 start collapsed, Card 5 (Pricing, Commission & Quota) starts expanded
+        composeTestRule.onNodeWithTag("settings_accordion_inactive_suki").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("reorder_inactive_dc").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("check_updates_button").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("backup_now_button").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("run_diagnostics_button").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("settings_lazy_column")
+            .performScrollToNode(hasTestTag("settings_pricing_row"))
+        composeTestRule.onNodeWithTag("settings_pricing_row").assertIsDisplayed()
+
+        // Expand Card 1 (3+ Days Walang Karga) and verify threshold stepper, toggle, and Re-order
+        composeTestRule.onNodeWithTag("settings_lazy_column")
+            .performScrollToNode(hasTestTag("settings_accordion_inactive_suki_header"))
+        composeTestRule.onNodeWithTag("settings_accordion_inactive_suki_header").performClick()
+
         composeTestRule.onNodeWithTag("settings_lazy_column")
             .performScrollToNode(hasTestTag("inactive_threshold_plus_button"))
         composeTestRule.onNodeWithTag("inactive_threshold_plus_button").performClick()
@@ -3269,12 +3285,22 @@ class ExampleRobolectricTest {
         assertEquals(false, toggledEnabled)
 
         composeTestRule.onNodeWithTag("settings_lazy_column")
-            .performScrollToNode(hasTestTag("inactive_suki_alert_card"))
-        composeTestRule.onNodeWithTag("inactive_suki_alert_card").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("settings_lazy_column")
             .performScrollToNode(hasTestTag("reorder_inactive_dc"))
         composeTestRule.onNodeWithTag("reorder_inactive_dc").performClick()
         assertEquals("dc", reorderedAlert?.customerName)
+
+        // Tapping App Diagnostics accordion expands and triggers diagnostics check
+        composeTestRule.onNodeWithTag("settings_lazy_column")
+            .performScrollToNode(hasTestTag("diagnostics_toggle_row"))
+        composeTestRule.onNodeWithTag("diagnostics_toggle_row").performClick()
+        assertTrue(diagnosticsTriggered)
+
+        // Searching auto-expands matching accordion (e.g., Updates)
+        composeTestRule.onNodeWithTag("settings_lazy_column")
+            .performScrollToNode(hasTestTag("settings_search_input"))
+        composeTestRule.onNodeWithTag("settings_search_input")
+            .performTextInput("updates")
+        composeTestRule.onNodeWithTag("check_updates_button").assertIsDisplayed()
     }
 
     @Test

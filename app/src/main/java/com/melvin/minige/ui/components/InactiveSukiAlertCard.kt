@@ -311,9 +311,10 @@ fun InactiveSukiAlertCard(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun InactiveSukiAlertRow(
+fun InactiveSukiAlertRow(
     alert: InactiveSukiAlert,
     onReorderClick: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val isCritical = alert.severity == InactiveSeverity.RED_CRITICAL
     val pillContainerColor = if (isCritical) {
@@ -341,7 +342,7 @@ private fun InactiveSukiAlertRow(
         shape = RoundedCornerShape(14.dp),
         color = MaterialTheme.colorScheme.surface,
         border = BorderStroke(1.dp, pillBorderColor.copy(alpha = 0.55f)),
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .testTag("inactive_suki_row_${alert.customerId}"),
     ) {
